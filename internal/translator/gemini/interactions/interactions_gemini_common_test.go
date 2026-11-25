@@ -2014,3 +2014,190 @@ func TestConvertGeminiRequestToInteractions_NormalizesNumericProtoSchemaTypes_Is
 		t.Errorf("response_format.schema.properties.answer.type = %s (type %v), want string", got.Raw, got.Type)
 	}
 }
+
+func TestConvertInteractionsRequestToGeminiGenerationConfigPreservesArraysEmptyContainersAndEscapedKeys(t *testing.T) {
+	input := []byte(`{
+		"model": "gemini-3.5-flash",
+		"input": "hi",
+		"generation_config": {
+			"response_schema": {
+				"type": "object",
+				"properties": {},
+				"required": [],
+				"any_of": [
+					{"type": "string", "min_length": 1},
+					{"type": "integer", "minimum": 0}
+				]
+			},
+			"speech_config": {
+				"multi_speaker_voice_config": {
+					"speaker_voice_configs": [
+						{
+							"speaker": "Alice",
+							"voice_config": {"prebuilt_voice_config": {"voice_name": "Kore"}}
+						}
+					]
+				}
+			},
+			"nested_matrix": [[1, 2], [3, 4]],
+			"special_keys": {
+				"user.name": "a",
+				"wild*card": "b",
+				":leading": "c",
+				"": "d",
+				"0": "e"
+			}
+		}
+	}`)
+
+	out, errConvert := ConvertInteractionsRequestToGemini("gemini-3.5-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+	}
+
+	genCfg := ojson.GetBytesNoCopy(out, "generationConfig")
+
+	anyOf := genCfg.Get("responseSchema.anyOf").Array()
+	if len(anyOf) != 2 {
+		t.Fatalf("responseSchema.anyOf len = %d, want 2. Output: %s", len(anyOf), genCfg.Raw)
+	}
+	if anyOf[0].Get("type").String() != "string" || anyOf[0].Get("minLength").Int() != 1 {
+		t.Fatalf("responseSchema.anyOf[0] = %s, want both type and minLength", anyOf[0].Raw)
+	}
+	if minField := anyOf[1].Get("minimum"); anyOf[1].Get("type").String() != "integer" || !minField.Exists() || minField.Raw != "0" {
+		t.Fatalf("responseSchema.anyOf[1] = %s, want both type and minimum", anyOf[1].Raw)
+	}
+
+	speakers := genCfg.Get("speechConfig.multiSpeakerVoiceConfig.speakerVoiceConfigs").Array()
+	if len(speakers) != 1 {
+		t.Fatalf("speakerVoiceConfigs len = %d, want 1. Output: %s", len(speakers), genCfg.Raw)
+	}
+	if speakers[0].Get("speaker").String() != "Alice" || speakers[0].Get("voiceConfig.prebuiltVoiceConfig.voiceName").String() != "Kore" {
+		t.Fatalf("speakerVoiceConfigs[0] = %s, want both speaker and voiceConfig", speakers[0].Raw)
+	}
+
+	props := genCfg.Get("responseSchema.properties")
+	if !props.Exists() || !props.IsObject() || len(props.Map()) != 0 {
+		t.Fatalf("responseSchema.properties = %q (exists=%v), want empty object {}", props.Raw, props.Exists())
+	}
+	req := genCfg.Get("responseSchema.required")
+	if !req.Exists() || !req.IsArray() || len(req.Array()) != 0 {
+		t.Fatalf("responseSchema.required = %q (exists=%v), want empty array []", req.Raw, req.Exists())
+	}
+
+	matrix := genCfg.Get("nestedMatrix").Array()
+	if len(matrix) != 2 || len(matrix[0].Array()) != 2 || len(matrix[1].Array()) != 2 {
+		t.Fatalf("nestedMatrix = %s, want [[1,2],[3,4]]", genCfg.Get("nestedMatrix").Raw)
+	}
+
+	special := genCfg.Get("specialKeys").Map()
+	for k, want := range map[string]string{
+		"user.name": "a",
+		"wild*card": "b",
+		":leading":  "c",
+		"":          "d",
+		"0":         "e",
+	} {
+		if got, ok := special[k]; !ok || got.String() != want {
+			t.Fatalf("specialKeys[%q] = %q (ok=%v), want %q. Raw: %s", k, got.String(), ok, want, genCfg.Get("specialKeys").Raw)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToInteractionsPreservesArraysEmptyContainersAndRootArrays(t *testing.T) {
+	input := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+		"generationConfig": {
+			"speechConfig": {
+				"multiSpeakerVoiceConfig": {
+					"speakerVoiceConfigs": [
+						{
+							"speaker": "Alice",
+							"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}
+						}
+					]
+				}
+			},
+			"emptyMap": {},
+			"emptyList": [],
+			"nestedMatrix": [[1, 2], [3, 4]],
+			"specialKeys": {
+				"user.name": "a",
+				"wild*card": "b",
+				":leading": "c",
+				"": "d",
+				"0": "e"
+			}
+		},
+		"tools": [
+			{
+				"googleSearch": {
+					"excludeDomains": ["example.com", "test.org"],
+					"customRules": [
+						{"matchPattern": "*.pdf", "maxDepth": 2},
+						{"matchPattern": "*.txt", "maxDepth": 1}
+					],
+					"emptyRules": []
+				}
+			}
+		]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToInteractions("gemini-3.5-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToInteractions error: %v", errConvert)
+	}
+
+	genCfg := ojson.GetBytesNoCopy(out, "generation_config")
+	speakers := genCfg.Get("speech_config.multi_speaker_voice_config.speaker_voice_configs").Array()
+	if len(speakers) != 1 {
+		t.Fatalf("speaker_voice_configs len = %d, want 1. Output: %s", len(speakers), genCfg.Raw)
+	}
+	if speakers[0].Get("speaker").String() != "Alice" || speakers[0].Get("voice_config.prebuilt_voice_config.voice_name").String() != "Kore" {
+		t.Fatalf("speaker_voice_configs[0] = %s, want both speaker and voice_config", speakers[0].Raw)
+	}
+
+	emptyMap := genCfg.Get("empty_map")
+	if !emptyMap.Exists() || !emptyMap.IsObject() || len(emptyMap.Map()) != 0 {
+		t.Fatalf("empty_map = %q (exists=%v), want empty object {}", emptyMap.Raw, emptyMap.Exists())
+	}
+	emptyList := genCfg.Get("empty_list")
+	if !emptyList.Exists() || !emptyList.IsArray() || len(emptyList.Array()) != 0 {
+		t.Fatalf("empty_list = %q (exists=%v), want empty array []", emptyList.Raw, emptyList.Exists())
+	}
+
+	matrix := genCfg.Get("nested_matrix").Array()
+	if len(matrix) != 2 || len(matrix[0].Array()) != 2 || len(matrix[1].Array()) != 2 {
+		t.Fatalf("nested_matrix = %s, want [[1,2],[3,4]]", genCfg.Get("nested_matrix").Raw)
+	}
+
+	special := genCfg.Get("special_keys").Map()
+	for k, want := range map[string]string{
+		"user.name": "a",
+		"wild*card": "b",
+		":leading":  "c",
+		"":          "d",
+		"0":         "e",
+	} {
+		if got, ok := special[k]; !ok || got.String() != want {
+			t.Fatalf("special_keys[%q] = %q (ok=%v), want %q. Raw: %s", k, got.String(), ok, want, genCfg.Get("special_keys").Raw)
+		}
+	}
+
+	gs := ojson.GetBytesNoCopy(out, "tools.0")
+	exclude := gs.Get("exclude_domains")
+	if !exclude.IsArray() || len(exclude.Array()) != 2 || exclude.Array()[0].String() != "example.com" || exclude.Array()[1].String() != "test.org" {
+		t.Fatalf("tools.0.exclude_domains = %s, want [\"example.com\",\"test.org\"]", exclude.Raw)
+	}
+	rules := gs.Get("custom_rules")
+	if !rules.IsArray() || len(rules.Array()) != 2 {
+		t.Fatalf("tools.0.custom_rules = %s, want 2-element array", rules.Raw)
+	}
+	if rules.Array()[0].Get("match_pattern").String() != "*.pdf" || rules.Array()[0].Get("max_depth").Int() != 2 {
+		t.Fatalf("tools.0.custom_rules[0] = %s, want both match_pattern and max_depth", rules.Array()[0].Raw)
+	}
+	emptyRules := gs.Get("empty_rules")
+	if !emptyRules.Exists() || !emptyRules.IsArray() || len(emptyRules.Array()) != 0 {
+		t.Fatalf("tools.0.empty_rules = %q (exists=%v), want empty array []", emptyRules.Raw, emptyRules.Exists())
+	}
+}

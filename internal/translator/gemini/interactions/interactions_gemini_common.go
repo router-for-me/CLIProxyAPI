@@ -820,36 +820,7 @@ func convertSnakeCaseKeysToCamelCase(raw []byte) []byte {
 	if !root.Exists() {
 		return raw
 	}
-	outDoc := ojson.NewDocString(`{}`)
-	copySnakeCaseValueToCamelCaseDoc(outDoc, "", root)
-	return outDoc.Bytes()
-}
-
-func copySnakeCaseValueToCamelCaseDoc(outDoc *ojson.Doc, path string, node ojson.Result) {
-	if node.IsObject() {
-		node.ForEach(func(key, value ojson.Result) bool {
-			childPath := joinJSONPath(path, toCamelCase(key.String()))
-			copySnakeCaseValueToCamelCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	if node.IsArray() {
-		node.ForEach(func(_, value ojson.Result) bool {
-			childPath := path + ".-1"
-			copySnakeCaseValueToCamelCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	_ = outDoc.SetRaw(path, node.Raw)
-}
-
-func joinJSONPath(path, key string) string {
-	if path == "" {
-		return key
-	}
-	return path + "." + key
+	return translatorcommon.ConvertJSONNodeKeys(root, toCamelCase)
 }
 
 func toCamelCase(s string) string {
@@ -872,29 +843,7 @@ func convertCamelCaseKeysToSnakeCase(raw []byte) []byte {
 	if !root.Exists() {
 		return raw
 	}
-	outDoc := ojson.NewDocString(`{}`)
-	copyCamelCaseValueToSnakeCaseDoc(outDoc, "", root)
-	return outDoc.Bytes()
-}
-
-func copyCamelCaseValueToSnakeCaseDoc(outDoc *ojson.Doc, path string, node ojson.Result) {
-	if node.IsObject() {
-		node.ForEach(func(key, value ojson.Result) bool {
-			childPath := joinJSONPath(path, toSnakeCase(key.String()))
-			copyCamelCaseValueToSnakeCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	if node.IsArray() {
-		node.ForEach(func(_, value ojson.Result) bool {
-			childPath := path + ".-1"
-			copyCamelCaseValueToSnakeCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	_ = outDoc.SetRaw(path, node.Raw)
+	return translatorcommon.ConvertJSONNodeKeys(root, toSnakeCase)
 }
 
 func toSnakeCase(s string) string {

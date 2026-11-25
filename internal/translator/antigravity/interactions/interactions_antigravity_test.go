@@ -908,3 +908,92 @@ func TestConvertInteractionsRequestToAntigravityBareInstructionTextKeepsEmptiedT
 		})
 	}
 }
+
+func TestConvertInteractionsRequestToAntigravityGenerationConfigPreservesArraysEmptyContainersAndEscapedKeys(t *testing.T) {
+	input := []byte(`{
+		"model": "antigravity-test",
+		"input": "hi",
+		"generation_config": {
+			"response_schema": {
+				"type": "object",
+				"properties": {},
+				"required": [],
+				"any_of": [
+					{"type": "string", "min_length": 1},
+					{"type": "integer", "minimum": 0}
+				]
+			},
+			"speech_config": {
+				"multi_speaker_voice_config": {
+					"speaker_voice_configs": [
+						{
+							"speaker": "Alice",
+							"voice_config": {"prebuilt_voice_config": {"voice_name": "Kore"}}
+						}
+					]
+				}
+			},
+			"nested_matrix": [[1, 2], [3, 4]],
+			"special_keys": {
+				"user.name": "a",
+				"wild*card": "b",
+				":leading": "c",
+				"": "d",
+				"0": "e"
+			}
+		}
+	}`)
+
+	out, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+	}
+
+	genCfg := ojson.GetBytesNoCopy(out, "request.generationConfig")
+
+	anyOf := genCfg.Get("responseSchema.anyOf").Array()
+	if len(anyOf) != 2 {
+		t.Fatalf("responseSchema.anyOf len = %d, want 2. Output: %s", len(anyOf), genCfg.Raw)
+	}
+	if anyOf[0].Get("type").String() != "string" || anyOf[0].Get("minLength").Int() != 1 {
+		t.Fatalf("responseSchema.anyOf[0] = %s, want both type and minLength", anyOf[0].Raw)
+	}
+	if minField := anyOf[1].Get("minimum"); anyOf[1].Get("type").String() != "integer" || !minField.Exists() || minField.Raw != "0" {
+		t.Fatalf("responseSchema.anyOf[1] = %s, want both type and minimum", anyOf[1].Raw)
+	}
+
+	speakers := genCfg.Get("speechConfig.multiSpeakerVoiceConfig.speakerVoiceConfigs").Array()
+	if len(speakers) != 1 {
+		t.Fatalf("speakerVoiceConfigs len = %d, want 1. Output: %s", len(speakers), genCfg.Raw)
+	}
+	if speakers[0].Get("speaker").String() != "Alice" || speakers[0].Get("voiceConfig.prebuiltVoiceConfig.voiceName").String() != "Kore" {
+		t.Fatalf("speakerVoiceConfigs[0] = %s, want both speaker and voiceConfig", speakers[0].Raw)
+	}
+
+	props := genCfg.Get("responseSchema.properties")
+	if !props.Exists() || !props.IsObject() || len(props.Map()) != 0 {
+		t.Fatalf("responseSchema.properties = %q (exists=%v), want empty object {}", props.Raw, props.Exists())
+	}
+	req := genCfg.Get("responseSchema.required")
+	if !req.Exists() || !req.IsArray() || len(req.Array()) != 0 {
+		t.Fatalf("responseSchema.required = %q (exists=%v), want empty array []", req.Raw, req.Exists())
+	}
+
+	matrix := genCfg.Get("nestedMatrix").Array()
+	if len(matrix) != 2 || len(matrix[0].Array()) != 2 || len(matrix[1].Array()) != 2 {
+		t.Fatalf("nestedMatrix = %s, want [[1,2],[3,4]]", genCfg.Get("nestedMatrix").Raw)
+	}
+
+	special := genCfg.Get("specialKeys").Map()
+	for k, want := range map[string]string{
+		"user.name": "a",
+		"wild*card": "b",
+		":leading":  "c",
+		"":          "d",
+		"0":         "e",
+	} {
+		if got, ok := special[k]; !ok || got.String() != want {
+			t.Fatalf("specialKeys[%q] = %q (ok=%v), want %q. Raw: %s", k, got.String(), ok, want, genCfg.Get("specialKeys").Raw)
+		}
+	}
+}

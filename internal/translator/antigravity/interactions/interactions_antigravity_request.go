@@ -1122,35 +1122,7 @@ func convertSnakeCaseKeysToCamelCaseForAntigravity(raw []byte) []byte {
 	if !root.Exists() {
 		return raw
 	}
-	outDoc := ojson.NewDoc([]byte(`{}`))
-	copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc, "", root)
-	return outDoc.Bytes()
-}
-
-func copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc *ojson.Doc, path string, node ojson.Result) {
-	if node.IsObject() {
-		node.ForEach(func(key, value ojson.Result) bool {
-			childPath := joinAntigravityJSONPath(path, toAntigravityCamelCase(key.String()))
-			copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	if node.IsArray() {
-		node.ForEach(func(_, value ojson.Result) bool {
-			copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc, path+".-1", value)
-			return true
-		})
-		return
-	}
-	_ = outDoc.SetRaw(path, node.Raw)
-}
-
-func joinAntigravityJSONPath(path, key string) string {
-	if path == "" {
-		return key
-	}
-	return path + "." + key
+	return translatorcommon.ConvertJSONNodeKeys(root, toAntigravityCamelCase)
 }
 
 func toAntigravityCamelCase(s string) string {
