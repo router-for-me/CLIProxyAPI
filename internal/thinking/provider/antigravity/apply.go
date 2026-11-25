@@ -88,6 +88,8 @@ func (a *Applier) applyCompatibleDoc(doc *ojson.Doc, config thinking.ThinkingCon
 func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	_ = util.DeleteJSONDocIfExists(doc, "request.generation_config.thinking_config")
+	_ = util.DeleteJSONDocIfExists(doc, "request.generation_config.thinkingConfig")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingBudget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
@@ -127,6 +129,8 @@ func formatAntigravityThinkingLevel(level thinking.ThinkingLevel) string {
 func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	_ = util.DeleteJSONDocIfExists(doc, "request.generation_config.thinking_config")
+	_ = util.DeleteJSONDocIfExists(doc, "request.generation_config.thinkingConfig")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingLevel")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
@@ -154,6 +158,10 @@ func extractAntigravityIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 		"request.generationConfig.thinkingConfig.include_thoughts",
 		"request.generationConfig.thinking_config.includeThoughts",
 		"request.generationConfig.thinking_config.include_thoughts",
+		"request.generation_config.thinkingConfig.includeThoughts",
+		"request.generation_config.thinkingConfig.include_thoughts",
+		"request.generation_config.thinking_config.includeThoughts",
+		"request.generation_config.thinking_config.include_thoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:
