@@ -49,14 +49,24 @@ func (f PayloadFinalizer) FinalizeDoc(doc *ojson.Doc) {
 
 // NewPayloadFinalizer snapshots matching context before built-in request mutations.
 func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root string, original []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, auths ...*cliproxyauth.Auth) PayloadFinalizer {
-	requestedModel := PayloadRequestedModel(opts, req.Model)
-	requestPath := PayloadRequestPath(opts)
-	headers := opts.Headers.Clone()
-	source := append([]byte(nil), original...)
 	var auth *cliproxyauth.Auth
 	if len(auths) > 0 {
 		auth = auths[0]
 	}
+	return newPayloadFinalizer(cfg, executor, model, protocol, root, original, req, opts, auth, nil)
+}
+
+// NewPayloadFinalizerWithSourceModels includes intermediate resolved model IDs
+// when a provider makes a second model selection after alias resolution.
+func NewPayloadFinalizerWithSourceModels(cfg *config.Config, executor, model, protocol, root string, original []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, sourceModels ...string) PayloadFinalizer {
+	return newPayloadFinalizer(cfg, executor, model, protocol, root, original, req, opts, nil, append([]string(nil), sourceModels...))
+}
+
+func newPayloadFinalizer(cfg *config.Config, executor, model, protocol, root string, original []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, auth *cliproxyauth.Auth, sourceModels []string) PayloadFinalizer {
+	requestedModel := PayloadRequestedModel(opts, req.Model)
+	requestPath := PayloadRequestPath(opts)
+	headers := opts.Headers.Clone()
+	source := append([]byte(nil), original...)
 	var formatCallback func(string)
 	if opts.Metadata != nil {
 		formatCallback, _ = opts.Metadata[cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey].(func(string))
@@ -66,7 +76,7 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 			key := &body[:1][0]
 			if v, ok := payloadDocProbes.LoadAndDelete(key); ok {
 				if doc, okDoc := v.(*ojson.Doc); okDoc && doc != nil {
-					applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth, nil)
+					applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth, sourceModels)
 					if formatCallback != nil {
 						formatCallback(strings.Clone(strings.TrimSpace(doc.Get(buildPayloadPath(root, "response_format")).String())))
 					}
@@ -75,7 +85,7 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 			}
 		}
 		doc := ojson.NewDoc(body)
-		_, mutated := applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth, nil)
+		_, mutated := applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth, sourceModels)
 		out := body
 		if mutated {
 			out = doc.Bytes()

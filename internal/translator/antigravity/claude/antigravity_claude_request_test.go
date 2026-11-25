@@ -2,15 +2,17 @@ package claude
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -1529,7 +1531,8 @@ func TestConvertClaudeRequestToAntigravity_CacheModeRecoversSignatureWhenClientO
 
 	validNativeSig := testAnthropicNativeSignature(t)
 	expectedAntigravitySig := base64.StdEncoding.EncodeToString([]byte(validNativeSig))
-	cache.CacheSignature("claude-sonnet-4-5-thinking", "Let me think...", validNativeSig)
+	ctx := cache.WithSignatureCacheScope(context.Background(), "test-account")
+	cache.CacheSignatureBestEffort(ctx, "claude-sonnet-4-5-thinking", "Let me think...", validNativeSig)
 
 	// Client omitted signature (signature is empty or absent).
 	inputJSON := []byte(`{
@@ -1545,10 +1548,17 @@ func TestConvertClaudeRequestToAntigravity_CacheModeRecoversSignatureWhenClientO
 		]
 	}`)
 
-	output, _ := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
-	parts := ojson.GetBytesNoCopy(output, "request.contents.0.parts").Array()
+	translated := sdktranslator.TranslateRequestEnvelope(ctx, sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format: sdktranslator.FormatClaude,
+		Model:  "claude-sonnet-4-5-thinking",
+		Body:   inputJSON,
+	})
+	if translated.Err != nil {
+		t.Fatalf("TranslateRequestEnvelope() error = %v", translated.Err)
+	}
+	parts := ojson.GetBytesNoCopy(translated.Body, "request.contents.0.parts").Array()
 	if len(parts) != 2 {
-		t.Fatalf("Expected omitted signature thinking block to be recovered from cache, got %d parts; output=%s", len(parts), output)
+		t.Fatalf("Expected omitted signature thinking block to be recovered from cache, got %d parts; output=%s", len(parts), translated.Body)
 	}
 	if !parts[0].Get("thought").Bool() || parts[0].Get("thoughtSignature").String() != expectedAntigravitySig {
 		t.Fatalf("Expected recovered thinking part with signature %s, got %s", expectedAntigravitySig, parts[0].Raw)
@@ -1943,7 +1953,7 @@ func TestConvertClaudeRequestToAntigravity_ToolUsePreservesPresentNonObjectInput
 		{name: "number", inputJSON: `42`, wantArgs: `42`, wantFunctionCall: true},
 		{name: "boolean", inputJSON: `true`, wantArgs: `true`, wantFunctionCall: true},
 		{name: "null", inputJSON: `null`, wantArgs: `{}`, wantFunctionCall: true},
-		{name: "missing", wantFunctionCall: false},
+		{name: "missing", wantArgs: `{}`, wantFunctionCall: true},
 	}
 
 	for _, tc := range tests {
@@ -1980,6 +1990,67 @@ func TestConvertClaudeRequestToAntigravity_ToolUsePreservesPresentNonObjectInput
 				t.Fatalf("missing input should not create functionCall, output: %s", output)
 			}
 		})
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolUseWithoutInputPreservesToolResultPair(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "user",
+				"content": "What time is it?"
+			},
+			{
+				"role": "assistant",
+				"content": [{
+					"type": "tool_use",
+					"id": "toolu_1",
+					"name": "get_time"
+				}]
+			},
+			{
+				"role": "user",
+				"content": [{
+					"type": "tool_result",
+					"tool_use_id": "toolu_1",
+					"content": "12:00"
+				}]
+			}
+		]
+	}`)
+
+	output, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", err)
+	}
+
+	contents := ojson.GetBytesNoCopy(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("request.contents length = %d, want 3; output: %s", len(contents), output)
+	}
+	functionCall := contents[1].Get("parts.0.functionCall")
+	if !functionCall.Exists() {
+		t.Fatalf("assistant functionCall is missing; output: %s", output)
+	}
+	if got := functionCall.Get("id").String(); got != "toolu_1" {
+		t.Fatalf("functionCall.id = %q, want toolu_1", got)
+	}
+	if got := functionCall.Get("name").String(); got != "get_time" {
+		t.Fatalf("functionCall.name = %q, want get_time", got)
+	}
+	if got := functionCall.Get("args").Raw; got != `{}` {
+		t.Fatalf("functionCall.args = %q, want {}; output: %s", got, output)
+	}
+	functionResponse := contents[2].Get("parts.0.functionResponse")
+	if !functionResponse.Exists() {
+		t.Fatalf("user functionResponse is missing; output: %s", output)
+	}
+	if got := functionResponse.Get("id").String(); got != "toolu_1" {
+		t.Fatalf("functionResponse.id = %q, want toolu_1", got)
+	}
+	if got := functionResponse.Get("name").String(); got != "get_time" {
+		t.Fatalf("functionResponse.name = %q, want get_time", got)
 	}
 }
 
@@ -2743,6 +2814,51 @@ func TestConvertClaudeRequestToAntigravity_ImageContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_PreservesGenerationConstraints(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-2.5-pro",
+		"max_tokens": 256,
+		"stop_sequences": ["STOP_HERE"],
+		"thinking": {"type": "adaptive"},
+		"output_config": {
+			"effort": "high",
+			"format": {
+				"type": "json_schema",
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"],
+					"additionalProperties": false
+				}
+			}
+		},
+		"messages": [{"role": "user", "content": "Return Tokyo."}]
+	}`)
+
+	output, errConvert := ConvertClaudeRequestToAntigravity("gemini-2.5-pro", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.maxOutputTokens").Int(); got != 256 {
+		t.Errorf("request.generationConfig.maxOutputTokens = %d, want 256; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.stopSequences.0").String(); got != "STOP_HERE" {
+		t.Errorf("request.generationConfig.stopSequences[0] = %q, want STOP_HERE; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Errorf("request.generationConfig.responseMimeType = %q, want application/json; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.responseSchema.properties.city.type").String(); got != "string" {
+		t.Errorf("request.generationConfig.responseSchema.properties.city.type = %q, want string; output=%s", got, output)
+	}
+	if ojson.GetBytesNoCopy(output, "request.generationConfig.responseJsonSchema").Exists() {
+		t.Errorf("request.generationConfig.responseJsonSchema should not exist; output=%s", output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Errorf("request.generationConfig.thinkingConfig.thinkingLevel = %q, want high; output=%s", got, output)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_GenerationConfig(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
@@ -3019,9 +3135,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNoContent(t *testing.T) {
 	}
 
 	// Verify the functionResponse has a valid result value
-	fr := ojson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.result")
+	fr := ojson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.output")
 	if !fr.Exists() {
-		t.Error("functionResponse.response.result should exist")
+		t.Error("functionResponse.response.output should exist")
 	}
 }
 
@@ -3108,7 +3224,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Text content should be in response.result
+	// Text content should be in response.output
 	resultText := funcResp.Get("response.result.text").String()
 	if resultText != "File content here" {
 		t.Errorf("Expected response.result.text = 'File content here', got '%s'", resultText)
@@ -3171,9 +3287,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 		t.Fatal("functionResponse should exist")
 	}
 
-	// response.result should be empty (image only)
-	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result for image-only content, got '%s'", funcResp.Get("response.result").String())
+	// response.output should be empty (image only)
+	if funcResp.Get("response.output").String() != "" {
+		t.Errorf("Expected empty response.output for image-only content, got '%s'", funcResp.Get("response.output").String())
 	}
 
 	// Image should be in functionResponse.parts[0].inlineData
@@ -3194,7 +3310,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(t *testing.T) {
 	// tool_result with array content: 2 text items + 2 images
-	// All images go into functionResponse.parts, texts into response.result array
+	// All images go into functionResponse.parts, texts into response.output array
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -3234,7 +3350,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Multiple text items => response.result is an array
+	// Multiple text items => response.output is an array
 	resultArr := funcResp.Get("response.result")
 	if !resultArr.IsArray() {
 		t.Fatalf("Expected response.result to be an array, got: %s", resultArr.Raw)
@@ -3270,7 +3386,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 }
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *testing.T) {
-	// tool_result with only images (no text) — response.result should be empty string
+	// tool_result with only images (no text) — response.output should be empty string
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -3308,9 +3424,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *t
 		t.Fatal("functionResponse should exist")
 	}
 
-	// No text => response.result should be empty string
-	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result, got '%s'", funcResp.Get("response.result").String())
+	// No text => response.output should be empty string
+	if funcResp.Get("response.output").String() != "" {
+		t.Errorf("Expected empty response.output, got '%s'", funcResp.Get("response.output").String())
 	}
 
 	// Both images in functionResponse.parts
@@ -3916,9 +4032,9 @@ func TestConvertClaudeRequestToAntigravity_FunctionResponseJSONRef(t *testing.T)
 	}`)
 
 	output, _ := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	result := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse.response.result")
+	result := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse.response.output")
 	if result.Type != ojson.String {
-		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", result.Type, result.Raw)
+		t.Fatalf("expected functionResponse.response.output to be string, got %s (raw: %s)", result.Type, result.Raw)
 	}
 	if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
 		t.Fatalf("expected result to contain ref target, got %q", result.String())
@@ -3935,7 +4051,7 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		{
 			name:         "success_without_flag",
 			fields:       `"content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "explicit_success",
@@ -3945,12 +4061,12 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		{
 			name:         "non_bool_is_error_string_treated_as_success",
 			fields:       `"is_error":"true","content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "non_bool_is_error_number_treated_as_success",
 			fields:       `"is_error":1,"content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "failed_string",
@@ -4086,4 +4202,73 @@ func TestConvertClaudeRequestToAntigravity_ToolResultDocumentExtractedToParts(t 
 			}
 		})
 	}
+}
+
+func TestConvertClaudeRequestToAntigravity_SanitizesGenerationConstraints(t *testing.T) {
+	t.Run("preserves native numeric max_tokens and filters mixed stop_sequences", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			maxTokens  string
+			wantRawMax string
+		}{
+			{name: "zero max_tokens preserved", maxTokens: "0", wantRawMax: "0"},
+			{name: "fractional max_tokens passed verbatim", maxTokens: "1024.9", wantRawMax: "1024.9"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inputJSON := []byte(`{
+					"model": "gemini-3.8-flash",
+					"max_tokens": ` + tc.maxTokens + `,
+					"stop_sequences": ["STOP", "\n", " ", "", 42, null],
+					"messages": [{"role": "user", "content": "hi"}]
+				}`)
+				output, errConvert := ConvertClaudeRequestToAntigravity("gemini-3.8-flash", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "request.generationConfig")
+				if got := genConfig.Get("maxOutputTokens").Raw; got != tc.wantRawMax {
+					t.Fatalf("maxOutputTokens raw = %q, want %s; output=%s", got, tc.wantRawMax, output)
+				}
+				stops := genConfig.Get("stopSequences").Array()
+				wantStops := []string{"STOP", "\n", " "}
+				if len(stops) != len(wantStops) {
+					t.Fatalf("stopSequences = %s, want %v", genConfig.Get("stopSequences").Raw, wantStops)
+				}
+				for i, want := range wantStops {
+					if got := stops[i].String(); got != want {
+						t.Fatalf("stopSequences[%d] = %q, want %q", i, got, want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("omits non-numeric max_tokens, empty stop_sequences, and invalid output_config.format", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			payload string
+		}{
+			{
+				name:    "null max_tokens and empty stop_sequences",
+				payload: `{"model":"claude-sonnet-5-5-high","max_tokens":null,"stop_sequences":["",false],"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name:    "string max_tokens and json_schema without schema object",
+				payload: `{"model":"claude-sonnet-5-5-high","max_tokens":"256","stop_sequences":[],"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-5-5-high", []byte(tc.payload), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "request.generationConfig")
+				for _, key := range []string{"maxOutputTokens", "stopSequences", "responseMimeType", "responseSchema", "responseJsonSchema"} {
+					if genConfig.Get(key).Exists() {
+						t.Fatalf("request.generationConfig.%s should be omitted, got %s; output=%s", key, genConfig.Get(key).Raw, output)
+					}
+				}
+			})
+		}
+	})
 }
