@@ -312,7 +312,16 @@ func TestConvertAntigravityResponseToInteractionsRestoresDisambiguatedName(t *te
 }
 
 func findAntigravityInteractionsEventPayload(events [][]byte, eventType string) []byte {
+	payloads := findAntigravityInteractionsEventPayloads(events, eventType)
+	if len(payloads) == 0 {
+		return nil
+	}
+	return payloads[0]
+}
+
+func findAntigravityInteractionsEventPayloads(events [][]byte, eventType string) [][]byte {
 	prefix := []byte("data:")
+	var out [][]byte
 	for _, event := range events {
 		for _, line := range bytes.Split(event, []byte("\n")) {
 			line = bytes.TrimSpace(line)
@@ -321,11 +330,11 @@ func findAntigravityInteractionsEventPayload(events [][]byte, eventType string) 
 			}
 			payload := bytes.TrimSpace(line[len(prefix):])
 			if ojson.GetBytesNoCopy(payload, "type").String() == eventType || ojson.GetBytesNoCopy(payload, "event_type").String() == eventType {
-				return payload
+				out = append(out, payload)
 			}
 		}
 	}
-	return nil
+	return out
 }
 
 func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
@@ -1163,5 +1172,261 @@ func TestConvertInteractionsRequestToAntigravity_NativeFunctionCallArgsNormalize
 				t.Fatalf("thoughtSignature = %q, want sig_keep", got)
 			}
 		})
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsStream_InlineData(t *testing.T) {
+	tests := []struct {
+		name        string
+		partJSON    string
+		wantType    string
+		wantMime    string
+		wantData    string
+		wantThought string
+	}{
+		{
+			name:        "camelCase inlineData image with thoughtSignature",
+			partJSON:    `{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="},"thoughtSignature":"sig_img"}`,
+			wantType:    "image",
+			wantMime:    "image/png",
+			wantData:    "aGVsbG8=",
+			wantThought: "sig_img",
+		},
+		{
+			name:     "snake_case inline_data audio",
+			partJSON: `{"inline_data":{"mime_type":"audio/wav","data":"YXVkaW8="}}`,
+			wantType: "audio",
+			wantMime: "audio/wav",
+			wantData: "YXVkaW8=",
+		},
+		{
+			name:     "inlineData video",
+			partJSON: `{"inlineData":{"mimeType":"video/mp4","data":"dmlkZW8="}}`,
+			wantType: "video",
+			wantMime: "video/mp4",
+			wantData: "dmlkZW8=",
+		},
+		{
+			name:     "inlineData document fallback",
+			partJSON: `{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}`,
+			wantType: "document",
+			wantMime: "application/pdf",
+			wantData: "JVBERi0=",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[` + tt.partJSON + `]}}]}}`)
+			events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk, &param)
+
+			starts := findAntigravityInteractionsEventPayloads(events, "step.start")
+			if len(starts) == 0 {
+				t.Fatalf("step.start event not found: %q", events)
+			}
+			if got := ojson.GetBytesNoCopy(starts[0], "step.type").String(); got != "model_output" {
+				t.Fatalf("step.start[0].step.type = %q, want model_output. Payload: %s", got, starts[0])
+			}
+
+			deltas := findAntigravityInteractionsEventPayloads(events, "step.delta")
+			if len(deltas) == 0 {
+				t.Fatalf("step.delta event not found: %q", events)
+			}
+			if ojson.GetBytesNoCopy(deltas[0], "delta.content").Exists() {
+				t.Fatalf("delta.content must not wrap media delta. Payload: %s", deltas[0])
+			}
+			if got := ojson.GetBytesNoCopy(deltas[0], "delta.type").String(); got != tt.wantType {
+				t.Fatalf("delta.type = %q, want %q. Payload: %s", got, tt.wantType, deltas[0])
+			}
+			if got := ojson.GetBytesNoCopy(deltas[0], "delta.mime_type").String(); got != tt.wantMime {
+				t.Fatalf("delta.mime_type = %q, want %q. Payload: %s", got, tt.wantMime, deltas[0])
+			}
+			if got := ojson.GetBytesNoCopy(deltas[0], "delta.data").String(); got != tt.wantData {
+				t.Fatalf("delta.data = %q, want %q. Payload: %s", got, tt.wantData, deltas[0])
+			}
+
+			if tt.wantThought != "" {
+				if len(deltas) < 2 {
+					t.Fatalf("expected trailing thought_signature delta, got %d deltas: %q", len(deltas), events)
+				}
+				if got := ojson.GetBytesNoCopy(deltas[1], "delta.type").String(); got != "thought_signature" {
+					t.Fatalf("deltas[1].delta.type = %q, want thought_signature. Payload: %s", got, deltas[1])
+				}
+				if got := ojson.GetBytesNoCopy(deltas[1], "delta.signature").String(); got != tt.wantThought {
+					t.Fatalf("deltas[1].delta.signature = %q, want %q. Payload: %s", got, tt.wantThought, deltas[1])
+				}
+			}
+		})
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsNonStream_FunctionCallEmitsIDAndCallID(t *testing.T) {
+	tests := []struct {
+		name   string
+		fcJSON string
+		wantID string
+	}{
+		{
+			name:   "upstream id populates both id and call_id",
+			fcJSON: `{"name":"lookup","id":"call_1","args":{"q":"x"}}`,
+			wantID: "call_1",
+		},
+		{
+			name:   "upstream call_id populates both id and call_id",
+			fcJSON: `{"name":"lookup","call_id":"call_2","args":{"q":"x"}}`,
+			wantID: "call_2",
+		},
+		{
+			name:   "empty upstream id falls back to call_id",
+			fcJSON: `{"name":"lookup","id":"","call_id":"call_3","args":{"q":"x"}}`,
+			wantID: "call_3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"role":"model","parts":[{"functionCall":` + tt.fcJSON + `}]},"finishReason":"STOP"}]}}`)
+			out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", nil, nil, raw, nil)
+			if got := ojson.GetBytesNoCopy(out, "steps.0.id").String(); got != tt.wantID {
+				t.Fatalf("steps.0.id = %q, want %q. Output: %s", got, tt.wantID, string(out))
+			}
+			if got := ojson.GetBytesNoCopy(out, "steps.0.call_id").String(); got != tt.wantID {
+				t.Fatalf("steps.0.call_id = %q, want %q. Output: %s", got, tt.wantID, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertAntigravityResponseToInteractions_FunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid JSON object preserved",
+			argsField: `,"args":{"q":"go"}`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"args":"{\"q\":\"go\"}"`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "null falls back to empty object",
+			argsField: `,"args":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "array falls back to empty object",
+			argsField: `,"args":[1,2]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "number scalar falls back to empty object",
+			argsField: `,"args":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "boolean scalar falls back to empty object",
+			argsField: `,"args":true`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "non-object string falls back to empty object",
+			argsField: `,"args":"not-an-object"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing args defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			part := `{"functionCall":{"name":"lookup","id":"call_1"` + tt.argsField + `}}`
+			nonStreamRaw := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"role":"model","parts":[` + part + `]},"finishReason":"STOP"}]}}`)
+			out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", nil, nil, nonStreamRaw, nil)
+			args := ojson.GetBytesNoCopy(out, "steps.0.arguments")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("non-stream steps.0.arguments = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("non-stream steps.0.arguments = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+
+			var param any
+			streamRaw := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[` + part + `]}}]}}`)
+			events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, streamRaw, &param)
+			delta := findAntigravityInteractionsEventPayload(events, "step.delta")
+			if len(delta) == 0 {
+				t.Fatalf("stream step.delta not found: %q", events)
+			}
+			gotStreamArgs := ojson.GetBytesNoCopy(delta, "delta.arguments").String()
+			if gotStreamArgs != tt.wantRaw {
+				t.Fatalf("stream delta.arguments = %q, want %q. Payload: %s", gotStreamArgs, tt.wantRaw, string(delta))
+			}
+		})
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsStream_ParallelFunctionCallFallbackIDsUnique(t *testing.T) {
+	var param any
+	chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"first","args":{"a":1}}},{"functionCall":{"name":"second","args":{"b":2}}}]}}]}}`)
+	events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk, &param)
+
+	starts := findAntigravityInteractionsEventPayloads(events, "step.start")
+	if len(starts) != 2 {
+		t.Fatalf("step.start count = %d, want 2. Events: %q", len(starts), events)
+	}
+	id0 := ojson.GetBytesNoCopy(starts[0], "step.id").String()
+	callID0 := ojson.GetBytesNoCopy(starts[0], "step.call_id").String()
+	id1 := ojson.GetBytesNoCopy(starts[1], "step.id").String()
+	callID1 := ojson.GetBytesNoCopy(starts[1], "step.call_id").String()
+
+	if id0 == "" || id0 != callID0 {
+		t.Fatalf("first step id/call_id mismatch: id=%q call_id=%q", id0, callID0)
+	}
+	if id1 == "" || id1 != callID1 {
+		t.Fatalf("second step id/call_id mismatch: id=%q call_id=%q", id1, callID1)
+	}
+	if id0 == id1 {
+		t.Fatalf("parallel fallback step IDs collided: %q == %q", id0, id1)
+	}
+	if !strings.HasSuffix(id0, "_0") {
+		t.Fatalf("first fallback step.id = %q, want _0 suffix for ActiveStepIndex=0", id0)
+	}
+	if !strings.HasSuffix(id1, "_1") {
+		t.Fatalf("second fallback step.id = %q, want _1 suffix for ActiveStepIndex=1", id1)
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsNonStream_ParallelFunctionCallFallbackIDsUnique(t *testing.T) {
+	raw := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"first","args":{"a":1}}},{"functionCall":{"name":"second","args":{"b":2}}}]},"finishReason":"STOP"}]}}`)
+	out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", nil, nil, raw, nil)
+
+	id0 := ojson.GetBytesNoCopy(out, "steps.0.id").String()
+	callID0 := ojson.GetBytesNoCopy(out, "steps.0.call_id").String()
+	id1 := ojson.GetBytesNoCopy(out, "steps.1.id").String()
+	callID1 := ojson.GetBytesNoCopy(out, "steps.1.call_id").String()
+
+	if id0 == "" || id0 != callID0 {
+		t.Fatalf("first non-stream function_call id/call_id mismatch: id=%q call_id=%q. Output: %s", id0, callID0, string(out))
+	}
+	if id1 == "" || id1 != callID1 {
+		t.Fatalf("second non-stream function_call id/call_id mismatch: id=%q call_id=%q. Output: %s", id1, callID1, string(out))
+	}
+	if id0 == id1 {
+		t.Fatalf("non-stream parallel fallback function_call IDs collided: %q == %q. Output: %s", id0, id1, string(out))
+	}
+	if !strings.HasSuffix(id0, "_0") {
+		t.Fatalf("first non-stream fallback id = %q, want _0 suffix. Output: %s", id0, string(out))
+	}
+	if !strings.HasSuffix(id1, "_1") {
+		t.Fatalf("second non-stream fallback id = %q, want _1 suffix. Output: %s", id1, string(out))
 	}
 }
