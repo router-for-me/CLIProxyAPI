@@ -56,68 +56,38 @@ func SanitizeGeminiInteractionsUnsupportedInputIDsDoc(doc *ojson.Doc, allowVerte
 	changed := false
 	for idx, item := range items {
 		stepPath := fmt.Sprintf("input.%d", idx)
-		stepType := item.Get("type").String()
-		if stepType == "thought" {
-			sig := strings.TrimSpace(item.Get("signature").String())
-			if sig == "" {
-				sig = strings.TrimSpace(item.Get("thought_signature").String())
-			}
-			if sig == "" {
-				sig = strings.TrimSpace(item.Get("thoughtSignature").String())
-			}
-			normalizedSig, ok := signature.CompatibleSignatureForProviderBlock(
-				signature.SignatureProviderGemini,
-				sig,
-				signature.SignatureBlockKindGeminiModelPart,
-			)
-			if !allowVertexBareTink && ok && signature.IsGeminiVertexBareTinkSignature(normalizedSig) {
-				ok = false
-			}
-			if !ok || normalizedSig == "" || signature.IsGeminiThoughtSignatureBypass(signature.SignaturePayloadWithoutProviderPrefix(normalizedSig)) {
-				// Official Gemini Interactions API rejects thought steps without a
-				// valid Gemini signature (or with foreign/corrupt base64 signatures
-				// or "content" arrays).
-				dropped[idx] = true
-				changed = true
-				continue
-			}
-			if normalizedSig != item.Get("signature").String() {
-				if errSet := doc.Set(stepPath+".signature", normalizedSig); errSet == nil {
-					changed = true
-				}
-			}
-			for _, unsupportedField := range []string{"id", "content", "text", "thought_signature", "thoughtSignature"} {
-				if item.Get(unsupportedField).Exists() {
-					if errDel := doc.Delete(stepPath + "." + unsupportedField); errDel == nil {
-						changed = true
-					}
-				}
-			}
-			continue
+		itemDropped, itemChanged := sanitizeGeminiInteractionsItemDoc(doc, stepPath, item, allowVertexBareTink)
+		if itemChanged {
+			changed = true
 		}
-		if stepType == "function_call" {
-			if !item.Get("id").Exists() && item.Get("call_id").Exists() {
-				if errSet := doc.Set(stepPath+".id", item.Get("call_id").String()); errSet == nil {
-					changed = true
-				}
-			}
-			if item.Get("call_id").Exists() {
-				if errDel := doc.Delete(stepPath + ".call_id"); errDel == nil {
-					changed = true
-				}
-			}
-		} else if item.Get("id").Exists() {
-			if errDel := doc.Delete(stepPath + ".id"); errDel == nil {
-				changed = true
-			}
+		if itemDropped {
+			dropped[idx] = true
+			continue
 		}
 		content := item.Get("content")
 		if content.IsArray() {
+			contentPath := stepPath + ".content"
+			droppedParts := make(map[int]bool)
 			for j, part := range content.Array() {
-				if part.Get("id").Exists() {
-					if errDel := doc.Delete(fmt.Sprintf("%s.content.%d.id", stepPath, j)); errDel == nil {
-						changed = true
+				partPath := fmt.Sprintf("%s.%d", contentPath, j)
+				partDropped, partChanged := sanitizeGeminiInteractionsItemDoc(doc, partPath, part, allowVertexBareTink)
+				if partChanged {
+					changed = true
+				}
+				if partDropped {
+					droppedParts[j] = true
+				}
+			}
+			if len(droppedParts) > 0 {
+				updatedParts := doc.Get(contentPath).Array()
+				keptParts := make([][]byte, 0, len(updatedParts)-len(droppedParts))
+				for j, part := range updatedParts {
+					if !droppedParts[j] {
+						keptParts = append(keptParts, []byte(part.Raw))
 					}
+				}
+				if errSet := doc.SetRawBytes(contentPath, JoinRawJSONArray(keptParts)); errSet == nil {
+					changed = true
 				}
 			}
 		}
@@ -136,6 +106,67 @@ func SanitizeGeminiInteractionsUnsupportedInputIDsDoc(doc *ojson.Doc, allowVerte
 		return doc.SetRawBytes("input", JoinRawJSONArray(kept)) == nil
 	}
 	return true
+}
+
+func sanitizeGeminiInteractionsItemDoc(doc *ojson.Doc, itemPath string, item ojson.Result, allowVertexBareTink bool) (dropped bool, changed bool) {
+	itemType := item.Get("type").String()
+	if itemType == "thought" {
+		sig := strings.TrimSpace(item.Get("signature").String())
+		if sig == "" {
+			sig = strings.TrimSpace(item.Get("thought_signature").String())
+		}
+		if sig == "" {
+			sig = strings.TrimSpace(item.Get("thoughtSignature").String())
+		}
+		normalizedSig, ok := signature.CompatibleSignatureForProviderBlock(
+			signature.SignatureProviderGemini,
+			sig,
+			signature.SignatureBlockKindGeminiModelPart,
+		)
+		if !allowVertexBareTink && ok && signature.IsGeminiVertexBareTinkSignature(normalizedSig) {
+			ok = false
+		}
+		if !ok || normalizedSig == "" || signature.IsGeminiThoughtSignatureBypass(signature.SignaturePayloadWithoutProviderPrefix(normalizedSig)) {
+			// Official Gemini Interactions API rejects thought steps/parts without a
+			// valid Gemini signature (or with foreign/corrupt base64 signatures
+			// or "content" arrays).
+			return true, true
+		}
+		if normalizedSig != item.Get("signature").String() {
+			if errSet := doc.Set(itemPath+".signature", normalizedSig); errSet == nil {
+				changed = true
+			}
+		}
+		for _, unsupportedField := range []string{"id", "content", "text", "thought_signature", "thoughtSignature"} {
+			if item.Get(unsupportedField).Exists() {
+				if errDel := doc.Delete(itemPath + "." + unsupportedField); errDel == nil {
+					changed = true
+				}
+			}
+		}
+		return false, changed
+	}
+	if itemType == "function_call" {
+		id := strings.TrimSpace(item.Get("id").String())
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if id == "" && callID != "" {
+			if errSet := doc.Set(itemPath+".id", callID); errSet == nil {
+				changed = true
+			}
+		}
+		if item.Get("call_id").Exists() {
+			if errDel := doc.Delete(itemPath + ".call_id"); errDel == nil {
+				changed = true
+			}
+		}
+		return false, changed
+	}
+	if item.Get("id").Exists() {
+		if errDel := doc.Delete(itemPath + ".id"); errDel == nil {
+			changed = true
+		}
+	}
+	return false, changed
 }
 
 // TranslateGeminiInteractionsRequestBody translates a request payload to FormatInteractions.
