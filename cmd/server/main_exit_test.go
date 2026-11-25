@@ -39,6 +39,8 @@ func newServerExitCommand(t *testing.T, dir string, args ...string) (*exec.Cmd, 
 	t.Cleanup(cancel)
 	cmdArgs := append([]string{"-test.run=^TestServerExitHelper$", "--"}, args...)
 	command := exec.CommandContext(ctx, os.Args[0], cmdArgs...)
+	// Bubble Tea can reopen the controlling terminal when stdin is redirected.
+	command.SysProcAttr = &serverExitProcessAttrs
 	command.Dir = dir
 	// Isolate from host store environment variables and prevent external network calls.
 	command.Env = append(os.Environ(),

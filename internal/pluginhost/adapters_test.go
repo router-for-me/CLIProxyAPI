@@ -4334,6 +4334,19 @@ func setHostSnapshotForTest(host *Host, enabled bool, records ...capabilityRecor
 	records = normalizeTestCapabilityRecords(records)
 	sortRecords(records)
 	host.mu.Lock()
+	for i := range records {
+		record := &records[i]
+		if len(record.plugin.Capabilities.ExecutorAuthProviders) == 0 {
+			continue
+		}
+		if record.loaded == nil {
+			record.loaded = host.loaded[record.id]
+			if record.loaded == nil {
+				record.loaded = &loadedPlugin{id: record.id, path: record.path, version: record.version}
+			}
+		}
+		host.loaded[record.id] = record.loaded
+	}
 	host.rebuildActivePluginMapsLocked(records)
 	host.snapshot.Store(&Snapshot{enabled: enabled, records: records, quotaSupportedProviders: make(map[string][]string)})
 	host.mu.Unlock()

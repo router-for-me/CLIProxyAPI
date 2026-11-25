@@ -1459,3 +1459,160 @@ func TestConvertOpenAIRequestToGemini_PreservesDemotedInstructionBoundary(t *tes
 		t.Fatalf("demoted instruction = %q, want standalone reminder. Output: %s", got, result)
 	}
 }
+
+func TestConvertOpenAIRequestToGemini_ValidatesToolCallArguments(t *testing.T) {
+	tests := []struct {
+		name         string
+		arguments    string
+		wantRawArgs  string
+		wantParams   string
+		expectParams bool
+	}{
+		{
+			name:        "valid json object",
+			arguments:   `{"path":"a.txt"}`,
+			wantRawArgs: `{"path":"a.txt"}`,
+		},
+		{
+			name:        "valid json object with whitespace",
+			arguments:   `  {"path":"a.txt"}  `,
+			wantRawArgs: `{"path":"a.txt"}`,
+		},
+		{
+			name:        "empty string defaults to empty object",
+			arguments:   "",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "whitespace defaults to empty object",
+			arguments:   "   ",
+			wantRawArgs: "{}",
+		},
+		{
+			name:         "truncated object wrapped under params",
+			arguments:    `{"path":"a.txt"`,
+			wantParams:   `{"path":"a.txt"`,
+			expectParams: true,
+		},
+		{
+			name:         "truncated array wrapped under params",
+			arguments:    `[1, 2`,
+			wantParams:   `[1, 2`,
+			expectParams: true,
+		},
+		{
+			name:         "valid json array wrapped under params",
+			arguments:    `[1,2]`,
+			wantParams:   `[1,2]`,
+			expectParams: true,
+		},
+		{
+			name:         "valid json scalar wrapped under params",
+			arguments:    "123",
+			wantParams:   "123",
+			expectParams: true,
+		},
+		{
+			name:         "plain non-json text wrapped under params",
+			arguments:    "not json",
+			wantParams:   "not json",
+			expectParams: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqDoc := ojson.NewDocString(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"},{"role":"user","content":"done"}]}`)
+			if errSet := reqDoc.Set("messages.1.tool_calls.0.function.arguments", tt.arguments); errSet != nil {
+				t.Fatalf("set arguments error: %v", errSet)
+			}
+
+			result, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", reqDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+			}
+			if !ojson.ValidBytes(result) {
+				t.Fatalf("translated request is not valid JSON: %s", result)
+			}
+			args := ojson.GetBytesNoCopy(result, "contents.1.parts.0.functionCall.args")
+			if !args.IsObject() {
+				t.Fatalf("functionCall.args = %s, want JSON object. Output: %s", args.Raw, result)
+			}
+			if tt.expectParams {
+				if got := args.Get("params").String(); got != tt.wantParams {
+					t.Fatalf("functionCall.args.params = %q, want %q. Output: %s", got, tt.wantParams, result)
+				}
+				return
+			}
+			if args.Raw != tt.wantRawArgs {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRawArgs, result)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiMapsStopSequences(t *testing.T) {
+	tests := []struct {
+		name      string
+		stopJSON  string
+		wantStops []string
+	}{
+		{
+			name:      "single string",
+			stopJSON:  `"END"`,
+			wantStops: []string{"END"},
+		},
+		{
+			name:      "single newline string preserved",
+			stopJSON:  `"\n"`,
+			wantStops: []string{"\n"},
+		},
+		{
+			name:      "array preserves whitespace and filters invalid entries",
+			stopJSON:  `["STOP","\n\n"," ","",123,null]`,
+			wantStops: []string{"STOP", "\n\n", " "},
+		},
+		{
+			name:     "null omitted",
+			stopJSON: `null`,
+		},
+		{
+			name:     "empty string omitted",
+			stopJSON: `""`,
+		},
+		{
+			name:     "empty array omitted",
+			stopJSON: `[]`,
+		},
+		{
+			name:     "only invalid entries omitted",
+			stopJSON: `["",123,null]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"}],"stop":` + tt.stopJSON + `}`)
+			out, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", inputJSON, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+			}
+			got := ojson.GetBytesNoCopy(out, "generationConfig.stopSequences")
+			if len(tt.wantStops) == 0 {
+				if got.Exists() {
+					t.Fatalf("expected stopSequences to be omitted, got %s", got.Raw)
+				}
+				return
+			}
+			arr := got.Array()
+			if len(arr) != len(tt.wantStops) {
+				t.Fatalf("stopSequences = %s, want %v. Output: %s", got.Raw, tt.wantStops, out)
+			}
+			for i, want := range tt.wantStops {
+				if arr[i].String() != want {
+					t.Fatalf("stopSequences[%d] = %q, want %q", i, arr[i].String(), want)
+				}
+			}
+		})
+	}
+}

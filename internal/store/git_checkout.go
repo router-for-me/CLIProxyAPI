@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 
 	gitindex "github.com/go-git/go-git/v6/plumbing/format/index"
@@ -113,8 +114,10 @@ func planGitCheckout(root *os.Root, base, next *object.Tree, paths []string, old
 			if errRead != nil {
 				return nil, errRead
 			}
+			// Windows worktrees cannot represent the Git executable bit.
 			if before == nil || before.mode.Type() != old.mode.Type() ||
-				(old.mode.IsRegular() && before.mode&0o100 != old.mode&0o100) || !bytes.Equal(before.data, old.data) {
+				(runtime.GOOS != "windows" && old.mode.IsRegular() && before.mode&0o100 != old.mode&0o100) ||
+				!bytes.Equal(before.data, old.data) {
 				return nil, gitCheckoutConflict(name)
 			}
 		}

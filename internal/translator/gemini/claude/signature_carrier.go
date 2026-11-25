@@ -92,6 +92,16 @@ func geminiClaudeCarrierSignatures(blocks []ojson.Result) map[int]string {
 		if !compatible || sigcompat.IsGeminiThoughtSignatureBypass(signature) {
 			continue
 		}
+		if target != i && blocks[target].Get("type").String() == "thinking" {
+			if ownSig, ownCompatible := sigcompat.CompatibleSignatureForProviderBlock(
+				sigcompat.SignatureProviderGemini,
+				blocks[target].Get("signature").String(),
+				sigcompat.SignatureBlockKindGeminiModelPart,
+			); ownCompatible && !sigcompat.IsGeminiThoughtSignatureBypass(ownSig) {
+				// Preserve a detached carrier as its own part instead of overwriting a thinking block's own signature.
+				target = i
+			}
+		}
 		if signatures == nil {
 			signatures = make(map[int]string)
 		}

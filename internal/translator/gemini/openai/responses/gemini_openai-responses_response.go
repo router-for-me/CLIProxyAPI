@@ -242,6 +242,69 @@ func unwrapRequestRoot(root ojson.Result) ojson.Result {
 	return root
 }
 
+func echoOpenAIResponsesRequestFieldsDoc(doc *ojson.Doc, prefix string, req ojson.Result) {
+	if v := req.Get("instructions"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"instructions", v.String())
+	}
+	if v := req.Get("max_output_tokens"); v.Exists() && v.Type == ojson.Number {
+		_ = doc.Set(prefix+"max_output_tokens", v.Int())
+	}
+	if v := req.Get("max_tool_calls"); v.Exists() && v.Type == ojson.Number {
+		_ = doc.Set(prefix+"max_tool_calls", v.Int())
+	}
+	if v := req.Get("model"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"model", v.String())
+	}
+	if v := req.Get("parallel_tool_calls"); v.Exists() && (v.Type == ojson.True || v.Type == ojson.False) {
+		_ = doc.Set(prefix+"parallel_tool_calls", v.Bool())
+	}
+	if v := req.Get("previous_response_id"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"previous_response_id", v.String())
+	}
+	if v := req.Get("prompt_cache_key"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"prompt_cache_key", v.String())
+	}
+	if v := req.Get("reasoning"); v.Exists() && v.Type != ojson.Null {
+		_ = doc.Set(prefix+"reasoning", v.Value())
+	}
+	if v := req.Get("safety_identifier"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"safety_identifier", v.String())
+	}
+	if v := req.Get("service_tier"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"service_tier", v.String())
+	}
+	if v := req.Get("store"); v.Exists() && (v.Type == ojson.True || v.Type == ojson.False) {
+		_ = doc.Set(prefix+"store", v.Bool())
+	}
+	if v := req.Get("temperature"); v.Exists() && v.Type == ojson.Number {
+		_ = doc.Set(prefix+"temperature", v.Float())
+	}
+	if v := req.Get("text"); v.Exists() && v.Type != ojson.Null {
+		_ = doc.Set(prefix+"text", v.Value())
+	}
+	if v := req.Get("tool_choice"); v.Exists() && v.Type != ojson.Null {
+		_ = doc.Set(prefix+"tool_choice", v.Value())
+	}
+	if v := req.Get("tools"); v.Exists() && v.Type != ojson.Null {
+		_ = doc.Set(prefix+"tools", v.Value())
+	}
+	if v := req.Get("top_logprobs"); v.Exists() && v.Type == ojson.Number {
+		_ = doc.Set(prefix+"top_logprobs", v.Int())
+	}
+	if v := req.Get("top_p"); v.Exists() && v.Type == ojson.Number {
+		_ = doc.Set(prefix+"top_p", v.Float())
+	}
+	if v := req.Get("truncation"); v.Exists() && v.Type == ojson.String {
+		_ = doc.Set(prefix+"truncation", v.String())
+	}
+	if v := req.Get("user"); v.Exists() && v.Type != ojson.Null {
+		_ = doc.Set(prefix+"user", v.Value())
+	}
+	if v := req.Get("metadata"); v.Exists() && v.Type != ojson.Null {
+		_ = doc.Set(prefix+"metadata", v.Value())
+	}
+}
+
 func unwrapGeminiResponseRoot(root ojson.Result) ojson.Result {
 	resp := root.Get("response")
 	if resp.Exists() {
@@ -1559,7 +1622,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				st.FuncToolSearch[idx] = isToolSearch
 
 				argsJSON := "{}"
-				if args := fc.Get("args"); args.Exists() {
+				if args := fc.Get("args"); args.Exists() && args.Type != ojson.Null && strings.TrimSpace(args.Raw) != "" {
 					argsJSON = args.Raw
 				}
 				if st.FuncArgsBuf[idx].Len() == 0 && argsJSON != "" {
@@ -1812,66 +1875,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		if len(reqJSON) > 0 {
 			req := unwrapRequestRoot(util.ParseGJSONBytesNoCopy(reqJSON))
-			if v := req.Get("instructions"); v.Exists() {
-				_ = completedDoc.Set("response.instructions", v.String())
-			}
-			if v := req.Get("max_output_tokens"); v.Exists() {
-				_ = completedDoc.Set("response.max_output_tokens", v.Int())
-			}
-			if v := req.Get("max_tool_calls"); v.Exists() {
-				_ = completedDoc.Set("response.max_tool_calls", v.Int())
-			}
-			if v := req.Get("model"); v.Exists() {
-				_ = completedDoc.Set("response.model", v.String())
-			}
-			if v := req.Get("parallel_tool_calls"); v.Exists() {
-				_ = completedDoc.Set("response.parallel_tool_calls", v.Bool())
-			}
-			if v := req.Get("previous_response_id"); v.Exists() {
-				_ = completedDoc.Set("response.previous_response_id", v.String())
-			}
-			if v := req.Get("prompt_cache_key"); v.Exists() {
-				_ = completedDoc.Set("response.prompt_cache_key", v.String())
-			}
-			if v := req.Get("reasoning"); v.Exists() {
-				_ = completedDoc.Set("response.reasoning", v.Value())
-			}
-			if v := req.Get("safety_identifier"); v.Exists() {
-				_ = completedDoc.Set("response.safety_identifier", v.String())
-			}
-			if v := req.Get("service_tier"); v.Exists() {
-				_ = completedDoc.Set("response.service_tier", v.String())
-			}
-			if v := req.Get("store"); v.Exists() {
-				_ = completedDoc.Set("response.store", v.Bool())
-			}
-			if v := req.Get("temperature"); v.Exists() {
-				_ = completedDoc.Set("response.temperature", v.Float())
-			}
-			if v := req.Get("text"); v.Exists() {
-				_ = completedDoc.Set("response.text", v.Value())
-			}
-			if v := req.Get("tool_choice"); v.Exists() {
-				_ = completedDoc.Set("response.tool_choice", v.Value())
-			}
-			if v := req.Get("tools"); v.Exists() {
-				_ = completedDoc.Set("response.tools", v.Value())
-			}
-			if v := req.Get("top_logprobs"); v.Exists() {
-				_ = completedDoc.Set("response.top_logprobs", v.Int())
-			}
-			if v := req.Get("top_p"); v.Exists() {
-				_ = completedDoc.Set("response.top_p", v.Float())
-			}
-			if v := req.Get("truncation"); v.Exists() {
-				_ = completedDoc.Set("response.truncation", v.String())
-			}
-			if v := req.Get("user"); v.Exists() {
-				_ = completedDoc.Set("response.user", v.Value())
-			}
-			if v := req.Get("metadata"); v.Exists() {
-				_ = completedDoc.Set("response.metadata", v.Value())
-			}
+			echoOpenAIResponsesRequestFieldsDoc(completedDoc, "response.", req)
 		}
 
 		emitLateCitations()
@@ -2002,72 +2006,17 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	_ = respDoc.Set("created_at", createdAt)
 
 	// Echo request fields when present; fallback model from response modelVersion
+	modelEchoed := false
 	if len(reqJSON) > 0 {
 		req := unwrapRequestRoot(util.ParseGJSONBytesNoCopy(reqJSON))
-		if v := req.Get("instructions"); v.Exists() {
-			_ = respDoc.Set("instructions", v.String())
-		}
-		if v := req.Get("max_output_tokens"); v.Exists() {
-			_ = respDoc.Set("max_output_tokens", v.Int())
-		}
-		if v := req.Get("max_tool_calls"); v.Exists() {
-			_ = respDoc.Set("max_tool_calls", v.Int())
-		}
-		if v := req.Get("model"); v.Exists() {
-			_ = respDoc.Set("model", v.String())
-		} else if v = root.Get("modelVersion"); v.Exists() {
+		echoOpenAIResponsesRequestFieldsDoc(respDoc, "", req)
+		v := req.Get("model")
+		modelEchoed = v.Exists() && v.Type == ojson.String
+	}
+	if !modelEchoed {
+		if v := root.Get("modelVersion"); v.Exists() && v.Type == ojson.String {
 			_ = respDoc.Set("model", v.String())
 		}
-		if v := req.Get("parallel_tool_calls"); v.Exists() {
-			_ = respDoc.Set("parallel_tool_calls", v.Bool())
-		}
-		if v := req.Get("previous_response_id"); v.Exists() {
-			_ = respDoc.Set("previous_response_id", v.String())
-		}
-		if v := req.Get("prompt_cache_key"); v.Exists() {
-			_ = respDoc.Set("prompt_cache_key", v.String())
-		}
-		if v := req.Get("reasoning"); v.Exists() {
-			_ = respDoc.Set("reasoning", v.Value())
-		}
-		if v := req.Get("safety_identifier"); v.Exists() {
-			_ = respDoc.Set("safety_identifier", v.String())
-		}
-		if v := req.Get("service_tier"); v.Exists() {
-			_ = respDoc.Set("service_tier", v.String())
-		}
-		if v := req.Get("store"); v.Exists() {
-			_ = respDoc.Set("store", v.Bool())
-		}
-		if v := req.Get("temperature"); v.Exists() {
-			_ = respDoc.Set("temperature", v.Float())
-		}
-		if v := req.Get("text"); v.Exists() {
-			_ = respDoc.Set("text", v.Value())
-		}
-		if v := req.Get("tool_choice"); v.Exists() {
-			_ = respDoc.Set("tool_choice", v.Value())
-		}
-		if v := req.Get("tools"); v.Exists() {
-			_ = respDoc.Set("tools", v.Value())
-		}
-		if v := req.Get("top_logprobs"); v.Exists() {
-			_ = respDoc.Set("top_logprobs", v.Int())
-		}
-		if v := req.Get("top_p"); v.Exists() {
-			_ = respDoc.Set("top_p", v.Float())
-		}
-		if v := req.Get("truncation"); v.Exists() {
-			_ = respDoc.Set("truncation", v.String())
-		}
-		if v := req.Get("user"); v.Exists() {
-			_ = respDoc.Set("user", v.Value())
-		}
-		if v := req.Get("metadata"); v.Exists() {
-			_ = respDoc.Set("metadata", v.Value())
-		}
-	} else if v := root.Get("modelVersion"); v.Exists() {
-		_ = respDoc.Set("model", v.String())
 	}
 
 	// Build outputs from candidates[0].content.parts
@@ -2370,8 +2319,8 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				}
 
 				args := fc.Get("args")
-				argsStr := ""
-				if args.Exists() {
+				argsStr := "{}"
+				if args.Exists() && args.Type != ojson.Null && strings.TrimSpace(args.Raw) != "" {
 					argsStr = args.Raw
 				}
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))

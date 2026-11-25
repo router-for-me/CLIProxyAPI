@@ -442,3 +442,36 @@ func TestConvertOpenAIResponsesRequestToGemini_HistoryOnlyWithNamespacedToolSear
 		t.Fatalf("replayed tool_search_output name = %q, want tool_search (must not be hijacked by fixture_tools__tool_search)", got)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_ToolSearchCallArrayArgumentsDefaultsToEmptyObject(t *testing.T) {
+	request := []byte(`{
+		"model": "gemini-3.8-flash-high",
+		"stream": true,
+		"tools": [],
+		"input": [
+			{
+				"type": "tool_search_call",
+				"execution": "client",
+				"call_id": "search_arr",
+				"status": "completed",
+				"arguments": ["bad", "array"]
+			},
+			{
+				"type": "tool_search_output",
+				"execution": "client",
+				"call_id": "search_arr",
+				"status": "completed",
+				"tools": []
+			}
+		]
+	}`)
+	out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", request, true)
+	if errConvert != nil {
+		t.Fatalf("unexpected error: %v", errConvert)
+	}
+	root := util.ParseGJSONBytesNoCopy(out)
+	args := root.Get("contents.0.parts.0.functionCall.args")
+	if !args.IsObject() || args.Raw != "{}" {
+		t.Fatalf("tool_search_call array arguments translated to %s, want {}", args.Raw)
+	}
+}

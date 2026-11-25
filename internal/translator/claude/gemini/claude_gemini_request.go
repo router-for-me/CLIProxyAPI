@@ -7,6 +7,7 @@ package gemini
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -88,20 +89,27 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Generation config extraction from Gemini format
-	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
+	if genConfig := firstGeminiObject(root, "generationConfig", "generation_config"); genConfig.Exists() {
 		// Max output tokens configuration
-		if maxTokens := genConfig.Get("maxOutputTokens"); maxTokens.Exists() {
-			_ = outDoc.Set("max_tokens", maxTokens.Int())
+		if maxTokens, ok := firstGeminiPositiveInt(genConfig, "maxOutputTokens", "max_output_tokens"); ok {
+			_ = outDoc.Set("max_tokens", maxTokens)
 		}
+		// Temperature is intentionally omitted for translated Claude requests (see #4071/#4383).
 		// Top P setting for nucleus sampling.
-		if topP := genConfig.Get("topP"); topP.Exists() {
+		if topP := firstGeminiNumber(genConfig, "topP", "top_p"); topP.Exists() {
 			_ = outDoc.Set("top_p", topP.Float())
 		}
+		// Top K setting for sampling.
+		if topK, ok := firstGeminiNonNegativeInt(genConfig, "topK", "top_k"); ok {
+			_ = outDoc.Set("top_k", topK)
+		}
 		// Stop sequences configuration for custom termination conditions
-		if stopSeqs := genConfig.Get("stopSequences"); stopSeqs.Exists() && stopSeqs.IsArray() {
+		if stopSeqs := firstGeminiArray(genConfig, "stopSequences", "stop_sequences"); stopSeqs.Exists() {
 			var stopSequences []string
 			stopSeqs.ForEach(func(_, value ojson.Result) bool {
-				stopSequences = append(stopSequences, value.String())
+				if value.Type == ojson.String {
+					stopSequences = append(stopSequences, value.String())
+				}
 				return true
 			})
 			if len(stopSequences) > 0 {
@@ -109,7 +117,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			}
 		}
 		// Convert thinking configuration to Claude request fields.
-		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+		if thinkingConfig := firstGeminiObject(genConfig, "thinkingConfig", "thinking_config"); thinkingConfig.Exists() {
 			mi := registry.LookupModelInfo(modelName, "claude")
 			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
 			supportsMax := supportsAdaptive && thinking.HasLevel(mi.Thinking.Levels, string(thinking.LevelMax))
@@ -117,15 +125,10 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 			// MapToClaudeEffort normalizes levels (e.g. minimal→low, xhigh→high) to avoid
 			// validation errors since validate treats same-provider unsupported levels as errors.
-			thinkingLevel := thinkingConfig.Get("thinkingLevel")
-			if !thinkingLevel.Exists() {
-				thinkingLevel = thinkingConfig.Get("thinking_level")
-			}
-			if thinkingLevel.Exists() {
-				level := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
+			thinkingLevel := firstGeminiString(thinkingConfig, "thinkingLevel", "thinking_level")
+			if level := strings.ToLower(strings.TrimSpace(thinkingLevel.String())); thinkingLevel.Exists() && level != "" {
 				if supportsAdaptive {
 					switch {
-					case level == "":
 					case level == "none":
 						_ = outDoc.Set("thinking.type", "disabled")
 						_ = outDoc.Delete("thinking.budget_tokens")
@@ -146,7 +149,6 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					}
 				} else {
 					switch level {
-					case "":
 					case "none":
 						_ = outDoc.Set("thinking.type", "disabled")
 						_ = outDoc.Delete("thinking.budget_tokens")
@@ -161,11 +163,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					}
 				}
 			} else {
-				thinkingBudget := thinkingConfig.Get("thinkingBudget")
-				if !thinkingBudget.Exists() {
-					thinkingBudget = thinkingConfig.Get("thinking_budget")
-				}
-				if thinkingBudget.Exists() {
+				if thinkingBudget := firstGeminiNumber(thinkingConfig, "thinkingBudget", "thinking_budget"); thinkingBudget.Exists() {
 					budget := int(thinkingBudget.Int())
 					switch {
 					case budget == 0:
@@ -373,7 +371,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		var anthropicTools []interface{}
 
 		tools.ForEach(func(_, tool ojson.Result) bool {
-			if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {
+			if funcDecls := firstGeminiArray(tool, "functionDeclarations", "function_declarations"); funcDecls.Exists() {
 				funcDecls.ForEach(func(_, funcDecl ojson.Result) bool {
 					toolDoc := ojson.NewDoc([]byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`))
 
@@ -383,10 +381,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					if desc := funcDecl.Get("description"); desc.Exists() {
 						_ = toolDoc.Set("description", desc.String())
 					}
-					if params := funcDecl.Get("parameters"); params.Exists() {
-						cleaned := normalizeClaudeToolSchema(params)
-						_ = toolDoc.SetRawBytes("input_schema", cleaned)
-					} else if params = funcDecl.Get("parametersJsonSchema"); params.Exists() {
+					if params := firstGeminiObject(funcDecl, "parameters", "parametersJsonSchema", "parameters_json_schema"); params.Exists() {
 						cleaned := normalizeClaudeToolSchema(params)
 						_ = toolDoc.SetRawBytes("input_schema", cleaned)
 					} else {
@@ -407,10 +402,8 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tool config mapping from Gemini format to Claude Code format
-	if toolConfig := root.Get("tool_config"); toolConfig.Exists() {
-		setClaudeToolChoiceFromGeminiToolConfigDoc(outDoc, toolConfig.Get("function_calling_config"))
-	} else if toolConfig := root.Get("toolConfig"); toolConfig.Exists() {
-		setClaudeToolChoiceFromGeminiToolConfigDoc(outDoc, toolConfig.Get("functionCallingConfig"))
+	if toolConfig := firstGeminiObject(root, "tool_config", "toolConfig"); toolConfig.Exists() {
+		setClaudeToolChoiceFromGeminiToolConfigDoc(outDoc, firstGeminiObject(toolConfig, "function_calling_config", "functionCallingConfig"))
 	}
 
 	// Stream setting configuration
@@ -519,6 +512,66 @@ func setClaudeToolChoiceFromGeminiToolConfigDoc(outDoc *ojson.Doc, funcCalling o
 			_ = outDoc.SetRaw("tool_choice", `{"type":"any"}`)
 		}
 	}
+}
+
+func firstGeminiObject(parent ojson.Result, keys ...string) ojson.Result {
+	for _, key := range keys {
+		if value := parent.Get(key); value.Exists() && value.IsObject() {
+			return value
+		}
+	}
+	return ojson.Result{}
+}
+
+func firstGeminiArray(parent ojson.Result, keys ...string) ojson.Result {
+	for _, key := range keys {
+		if value := parent.Get(key); value.Exists() && value.IsArray() {
+			return value
+		}
+	}
+	return ojson.Result{}
+}
+
+func firstGeminiNumber(parent ojson.Result, keys ...string) ojson.Result {
+	for _, key := range keys {
+		if value := parent.Get(key); value.Exists() && value.Type == ojson.Number {
+			return value
+		}
+	}
+	return ojson.Result{}
+}
+
+func firstGeminiPositiveInt(parent ojson.Result, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		if value := parent.Get(key); value.Exists() && value.Type == ojson.Number && value.Int() > 0 {
+			return value.Int(), true
+		}
+	}
+	return 0, false
+}
+
+func firstGeminiNonNegativeInt(parent ojson.Result, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		value := parent.Get(key)
+		if !value.Exists() || value.Type != ojson.Number {
+			continue
+		}
+		f := value.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || math.Trunc(f) != f || f >= float64(math.MaxInt64) {
+			continue
+		}
+		return int64(f), true
+	}
+	return 0, false
+}
+
+func firstGeminiString(parent ojson.Result, keys ...string) ojson.Result {
+	for _, key := range keys {
+		if value := parent.Get(key); value.Exists() && value.Type == ojson.String {
+			return value
+		}
+	}
+	return ojson.Result{}
 }
 
 func geminiClaudeInlineData(part ojson.Result) ojson.Result {

@@ -447,3 +447,37 @@ func SetGeminiFunctionResponseRawDoc(doc *ojson.Doc, path string, rawJSON string
 	}
 	SetGeminiFunctionResponseResultDoc(doc, path, ojson.Parse(trimmed))
 }
+
+// SetGeminiFunctionCallArgsDoc writes a valid JSON object to path on doc for Gemini functionCall.args.
+// Valid JSON-object strings are unwrapped; all other non-object or invalid inputs fall back to {}.
+func SetGeminiFunctionCallArgsDoc(doc *ojson.Doc, path string, value ojson.Result) {
+	if doc == nil {
+		return
+	}
+	if value.IsObject() {
+		raw := strings.TrimSpace(value.Raw)
+		if ojson.Valid(raw) {
+			_ = doc.SetRaw(path, raw)
+			return
+		}
+	}
+	if value.Type == ojson.String {
+		raw := strings.TrimSpace(value.String())
+		if raw != "" && ojson.Valid(raw) && ojson.Parse(raw).IsObject() {
+			_ = doc.SetRaw(path, raw)
+			return
+		}
+	}
+	_ = doc.SetRaw(path, `{}`)
+}
+
+// NormalizeGeminiFunctionCallPart ensures a native Gemini functionCall part carries a valid JSON object
+// in functionCall.args while preserving all other fields on the part.
+func NormalizeGeminiFunctionCallPart(part ojson.Result) []byte {
+	if args := part.Get("functionCall.args"); args.IsObject() && ojson.Valid(strings.TrimSpace(args.Raw)) {
+		return []byte(part.Raw)
+	}
+	partDoc := ojson.NewDoc([]byte(part.Raw))
+	SetGeminiFunctionCallArgsDoc(partDoc, "functionCall.args", part.Get("functionCall.args"))
+	return partDoc.Bytes()
+}

@@ -1287,6 +1287,30 @@ func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchPreservesInstructio
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchToolChoiceNull(t *testing.T) {
+	modelID := "ag-websearch-toolchoice-null-model"
+	registerAntigravityResponsesWebSearchModel(t, "ag-search-toolchoice-null-client", modelID)
+
+	input := []byte(`{
+		"model": "` + modelID + `",
+		"tool_choice": null,
+		"input": "latest weather in Paris",
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	out, errConvert := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToAntigravity error: %v", errConvert)
+	}
+	parsed := util.ParseGJSONBytesNoCopy(out)
+	if parsed.Get("requestType").String() != "web_search" {
+		t.Fatalf("expected requestType web_search with tool_choice null, got %q. Output: %s", parsed.Get("requestType").String(), out)
+	}
+	if !parsed.Get("request.tools.0.googleSearch").Exists() {
+		t.Fatalf("expected request.tools.0.googleSearch with tool_choice null, got: %s", out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchToolChoiceAutoPreservesContext(t *testing.T) {
 	modelID := "ag-websearch-toolchoice-auto-model"
 	registerAntigravityResponsesWebSearchModel(t, "ag-search-toolchoice-auto-client", modelID)
@@ -1876,5 +1900,286 @@ func TestConvertOpenAIResponsesRequestToAntigravity_TopLevelMedia(t *testing.T) 
 	}
 	if !foundAudio {
 		t.Errorf("expected audio inline part in output: %s", out)
+	}
+}
+
+func collectAntigravityThoughtParts(out []byte) []ojson.Result {
+	var thoughts []ojson.Result
+	for _, content := range ojson.GetBytesNoCopy(out, "request.contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("thought").Bool() {
+				thoughts = append(thoughts, part)
+			}
+		}
+	}
+	return thoughts
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ClaudeReasoningSurvivesDroppedInvalidCarrier(t *testing.T) {
+	rawSig1 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-sonnet-4-6")
+	rawSig2 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-opus-4-6")
+	expectedSig1, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig1)
+	if !ok {
+		t.Fatal("first Claude signature should be compatible")
+	}
+	expectedSig2, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig2)
+	if !ok {
+		t.Fatal("second Claude signature should be compatible")
+	}
+
+	raw := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"input":[
+			{"type":"reasoning","encrypted_content":"cpa-gemini-responses-carrier-v1:previous:text:not-base64!","summary":[]},
+			{"role":"assistant","content":[{"type":"output_text","text":"earlier turn"}]},
+			{"role":"user","content":[{"type":"input_text","text":"next 1"}]},
+			{"type":"reasoning","encrypted_content":"` + rawSig1 + `","summary":[{"type":"summary_text","text":"first claude thought"}]},
+			{"role":"assistant","content":[{"type":"output_text","text":"answer 1"}]},
+			{"role":"user","content":[{"type":"input_text","text":"next 2"}]},
+			{"type":"reasoning","encrypted_content":"` + rawSig2 + `","summary":[{"type":"summary_text","text":"second claude thought"}]},
+			{"role":"assistant","content":[{"type":"output_text","text":"answer 2"}]},
+			{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+
+	out, _ := ConvertOpenAIResponsesRequestToAntigravity("claude-opus-4-6-thinking", raw, false)
+	thoughts := collectAntigravityThoughtParts(out)
+	if len(thoughts) != 2 {
+		t.Fatalf("thought count = %d, want 2. Output: %s", len(thoughts), out)
+	}
+	if got := thoughts[0].Get("text").String(); got != "first claude thought" {
+		t.Fatalf("thoughts[0].text = %q, want first claude thought. Output: %s", got, out)
+	}
+	if got := thoughts[0].Get("thoughtSignature").String(); got != expectedSig1 {
+		t.Fatalf("thoughts[0].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig1), len(expectedSig1), out)
+	}
+	if got := thoughts[1].Get("text").String(); got != "second claude thought" {
+		t.Fatalf("thoughts[1].text = %q, want second claude thought. Output: %s", got, out)
+	}
+	if got := thoughts[1].Get("thoughtSignature").String(); got != expectedSig2 {
+		t.Fatalf("thoughts[1].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig2), len(expectedSig2), out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ClaudeReasoningSurvivesMergedDetachedAfterCarrier(t *testing.T) {
+	rawSig1 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-sonnet-4-6")
+	rawSig2 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-opus-4-6")
+	expectedSig1, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig1)
+	if !ok {
+		t.Fatal("first Claude signature should be compatible")
+	}
+	expectedSig2, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig2)
+	if !ok {
+		t.Fatal("second Claude signature should be compatible")
+	}
+
+	raw := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"input":[
+			{"id":"rs_turn1_0","type":"reasoning","summary":[{"type":"summary_text","text":"first claude thought"}]},
+			{"id":"rs_turn1_detached_after_1","type":"reasoning","encrypted_content":"` + rawSig1 + `","summary":[]},
+			{"role":"assistant","content":[{"type":"output_text","text":"answer 1"}]},
+			{"role":"user","content":[{"type":"input_text","text":"next"}]},
+			{"id":"rs_turn2_0","type":"reasoning","encrypted_content":"` + rawSig2 + `","summary":[{"type":"summary_text","text":"second claude thought"}]},
+			{"role":"assistant","content":[{"type":"output_text","text":"answer 2"}]},
+			{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+
+	out, _ := ConvertOpenAIResponsesRequestToAntigravity("claude-opus-4-6-thinking", raw, false)
+	thoughts := collectAntigravityThoughtParts(out)
+	if len(thoughts) != 2 {
+		t.Fatalf("thought count = %d, want 2. Output: %s", len(thoughts), out)
+	}
+	if got := thoughts[0].Get("text").String(); got != "first claude thought" {
+		t.Fatalf("thoughts[0].text = %q, want first claude thought. Output: %s", got, out)
+	}
+	if got := thoughts[0].Get("thoughtSignature").String(); got != expectedSig1 {
+		t.Fatalf("thoughts[0].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig1), len(expectedSig1), out)
+	}
+	if got := thoughts[1].Get("text").String(); got != "second claude thought" {
+		t.Fatalf("thoughts[1].text = %q, want second claude thought. Output: %s", got, out)
+	}
+	if got := thoughts[1].Get("thoughtSignature").String(); got != expectedSig2 {
+		t.Fatalf("thoughts[1].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig2), len(expectedSig2), out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ClaudeReasoningSurvivesEarlierGeminiCarrierInCrossProviderHistory(t *testing.T) {
+	geminiSig := "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+	markedGeminiCarrier := "cpa-gemini-responses-carrier-v1:next:text:" + base64.RawStdEncoding.EncodeToString([]byte(geminiSig))
+	rawSig1 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-sonnet-4-6")
+	rawSig2 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-opus-4-6")
+	expectedSig1, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig1)
+	if !ok {
+		t.Fatal("first Claude signature should be compatible")
+	}
+	expectedSig2, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig2)
+	if !ok {
+		t.Fatal("second Claude signature should be compatible")
+	}
+
+	tests := []struct {
+		name             string
+		earlierEncrypted string
+	}{
+		{
+			name:             "raw Gemini thought signature",
+			earlierEncrypted: geminiSig,
+		},
+		{
+			name:             "marked Gemini responses carrier",
+			earlierEncrypted: markedGeminiCarrier,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"model":"claude-opus-4-6-thinking",
+				"input":[
+					{"type":"reasoning","encrypted_content":"` + tt.earlierEncrypted + `","summary":[]},
+					{"role":"assistant","content":[{"type":"output_text","text":"gemini answer"}]},
+					{"role":"user","content":[{"type":"input_text","text":"switch to claude"}]},
+					{"type":"reasoning","encrypted_content":"` + rawSig1 + `","summary":[{"type":"summary_text","text":"first claude thought"}]},
+					{"role":"assistant","content":[{"type":"output_text","text":"claude answer 1"}]},
+					{"role":"user","content":[{"type":"input_text","text":"follow up"}]},
+					{"type":"reasoning","encrypted_content":"` + rawSig2 + `","summary":[{"type":"summary_text","text":"second claude thought"}]},
+					{"role":"assistant","content":[{"type":"output_text","text":"claude answer 2"}]},
+					{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+				]
+			}`)
+
+			out, _ := ConvertOpenAIResponsesRequestToAntigravity("claude-opus-4-6-thinking", raw, false)
+			thoughts := collectAntigravityThoughtParts(out)
+			if len(thoughts) != 2 {
+				t.Fatalf("thought count = %d, want 2. Output: %s", len(thoughts), out)
+			}
+			if got := thoughts[0].Get("text").String(); got != "first claude thought" {
+				t.Fatalf("thoughts[0].text = %q, want first claude thought. Output: %s", got, out)
+			}
+			if got := thoughts[0].Get("thoughtSignature").String(); got != expectedSig1 {
+				t.Fatalf("thoughts[0].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+					firstByte(got), len(got), firstByte(expectedSig1), len(expectedSig1), out)
+			}
+			if got := thoughts[1].Get("text").String(); got != "second claude thought" {
+				t.Fatalf("thoughts[1].text = %q, want second claude thought. Output: %s", got, out)
+			}
+			if got := thoughts[1].Get("thoughtSignature").String(); got != expectedSig2 {
+				t.Fatalf("thoughts[1].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+					firstByte(got), len(got), firstByte(expectedSig2), len(expectedSig2), out)
+			}
+			if strings.Contains(string(out), geminiSig) || strings.Contains(string(out), "cpa-gemini-responses-carrier-v1:") {
+				t.Fatalf("Gemini signature or carrier must not reach Antigravity Claude. Output: %s", out)
+			}
+			for _, content := range ojson.GetBytesNoCopy(out, "request.contents").Array() {
+				for _, part := range content.Get("parts").Array() {
+					if !part.Get("thought").Bool() && part.Get("thoughtSignature").Exists() {
+						t.Fatalf("non-thought part must not carry thoughtSignature for Claude. Output: %s", out)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ClaudeReasoningPairedWithFunctionCallPreservesSignature(t *testing.T) {
+	rawSig1 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-sonnet-4-6")
+	rawSig2 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-opus-4-6")
+	expectedSig1, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig1)
+	if !ok {
+		t.Fatal("first Claude signature should be compatible")
+	}
+	expectedSig2, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig2)
+	if !ok {
+		t.Fatal("second Claude signature should be compatible")
+	}
+
+	raw := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"input":[
+			{"type":"reasoning","encrypted_content":"cpa-gemini-responses-carrier-v1:previous:text:not-base64!","summary":[]},
+			{"type":"reasoning","encrypted_content":"` + rawSig1 + `","summary":[{"type":"summary_text","text":"thinking before tool"}]},
+			{"type":"function_call","call_id":"call-1","name":"run","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-1","output":"ok"},
+			{"type":"reasoning","encrypted_content":"` + testAntigravityResponsesGPTSignature() + `","summary":[{"type":"summary_text","text":"gpt thought before tool"}]},
+			{"type":"function_call","call_id":"call-2","name":"run","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-2","output":"ok2"},
+			{"type":"reasoning","encrypted_content":"` + rawSig2 + `","summary":[{"type":"summary_text","text":"thinking after tool"}]},
+			{"role":"assistant","content":[{"type":"output_text","text":"done"}]},
+			{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+
+	out, _ := ConvertOpenAIResponsesRequestToAntigravity("claude-opus-4-6-thinking", raw, false)
+	thoughts := collectAntigravityThoughtParts(out)
+	if len(thoughts) != 2 {
+		t.Fatalf("thought count = %d, want 2. Output: %s", len(thoughts), out)
+	}
+	if got := thoughts[0].Get("text").String(); got != "thinking before tool" {
+		t.Fatalf("thoughts[0].text = %q, want thinking before tool. Output: %s", got, out)
+	}
+	if got := thoughts[0].Get("thoughtSignature").String(); got != expectedSig1 {
+		t.Fatalf("thoughts[0].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig1), len(expectedSig1), out)
+	}
+	if got := thoughts[1].Get("text").String(); got != "thinking after tool" {
+		t.Fatalf("thoughts[1].text = %q, want thinking after tool. Output: %s", got, out)
+	}
+	if got := thoughts[1].Get("thoughtSignature").String(); got != expectedSig2 {
+		t.Fatalf("thoughts[1].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig2), len(expectedSig2), out)
+	}
+	if strings.Contains(string(out), "gpt thought before tool") {
+		t.Fatalf("incompatible GPT thought before tool should be dropped. Output: %s", out)
+	}
+	for _, content := range ojson.GetBytesNoCopy(out, "request.contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("functionCall").Exists() && part.Get("thoughtSignature").Exists() {
+				t.Fatalf("Claude functionCall part must not carry thoughtSignature. Output: %s", out)
+			}
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_DetachedAfterCarrierWithDifferentOriginDoesNotBindToEarlierThought(t *testing.T) {
+	rawSig1 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-sonnet-4-6")
+	rawSig2 := testAntigravityResponsesClaudeSignatureForModel(t, "claude-opus-4-6")
+	expectedSig2, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSig2)
+	if !ok {
+		t.Fatal("second Claude signature should be compatible")
+	}
+
+	raw := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"input":[
+			{"id":"rs_turnA_0","type":"reasoning","summary":[{"type":"summary_text","text":"turn A thought"}]},
+			{"id":"rs_turnB_detached_after_1","type":"reasoning","encrypted_content":"` + rawSig1 + `","summary":[]},
+			{"role":"assistant","content":[{"type":"output_text","text":"answer 1"}]},
+			{"role":"user","content":[{"type":"input_text","text":"next"}]},
+			{"id":"rs_turnC_0","type":"reasoning","encrypted_content":"` + rawSig2 + `","summary":[{"type":"summary_text","text":"turn C thought"}]},
+			{"role":"assistant","content":[{"type":"output_text","text":"answer 2"}]},
+			{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+
+	out, _ := ConvertOpenAIResponsesRequestToAntigravity("claude-opus-4-6-thinking", raw, false)
+	thoughts := collectAntigravityThoughtParts(out)
+	if len(thoughts) != 1 {
+		t.Fatalf("thought count = %d, want 1 (only turn C). Output: %s", len(thoughts), out)
+	}
+	if got := thoughts[0].Get("text").String(); got != "turn C thought" {
+		t.Fatalf("thoughts[0].text = %q, want turn C thought. Output: %s", got, out)
+	}
+	if got := thoughts[0].Get("thoughtSignature").String(); got != expectedSig2 {
+		t.Fatalf("thoughts[0].thoughtSignature mismatch: got prefix/len=%q/%d, want %q/%d. Output: %s",
+			firstByte(got), len(got), firstByte(expectedSig2), len(expectedSig2), out)
+	}
+	if strings.Contains(string(out), "turn A thought") {
+		t.Fatalf("unsigned turn A thought must not adopt turn B detached signature. Output: %s", out)
 	}
 }
