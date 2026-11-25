@@ -87,6 +87,25 @@ func SetAntigravityCreditsHintForAuth(auth *Auth, hint AntigravityCreditsHint) {
 	setAntigravityCreditsHint(auth.ID, hint, AntigravityCreditsScope(auth))
 }
 
+// ClearAntigravityCreditsUnavailableHintForAuth atomically clears a known
+// unavailable credits hint under the auth's hint scope lock when clearFresh is
+// true or the cached hint is no longer fresh.
+func ClearAntigravityCreditsUnavailableHintForAuth(auth *Auth, clearFresh bool) {
+	unlock, current := lockAntigravityCreditsHintScope(auth)
+	if !current {
+		return
+	}
+	defer unlock()
+	scope := AntigravityCreditsScope(auth)
+	hint, ok, err := getAntigravityCreditsHintRequired(context.Background(), auth.ID, scope)
+	if err != nil || !ok || !hint.Known || hint.Available {
+		return
+	}
+	if clearFresh || !IsAntigravityCreditsHintFresh(hint, time.Now()) {
+		setAntigravityCreditsHint(auth.ID, AntigravityCreditsHint{}, scope)
+	}
+}
+
 func setAntigravityCreditsHint(authID string, hint AntigravityCreditsHint, scope string) {
 	authID = strings.TrimSpace(authID)
 	if authID == "" {

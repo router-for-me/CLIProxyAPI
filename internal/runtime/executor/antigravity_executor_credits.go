@@ -73,7 +73,7 @@ var (
 	antigravityShortCooldownByAuth      sync.Map
 	antigravityCreditsBalanceByAuth     sync.Map // credential-scoped auth key → antigravityCreditsBalance
 	antigravityCreditsCurrentScope      sync.Map
-	antigravityCreditsHintRefreshByID   sync.Map // auth.ID → *antigravityCreditsHintRefreshState
+	antigravityCreditsHintRefreshByID   sync.Map // credential-scoped refresh key → *antigravityCreditsHintRefreshState
 	antigravityCreditsRefreshRegistries sync.Map // auth.ID → *antigravityCreditsRefreshRegistry
 	antigravityRefreshGroup             singleflight.Group
 	antigravityQuotaExhaustedKeywords   = []string{
@@ -348,11 +348,7 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	}
 	defer unlock()
 	_, hadFailure := antigravityCreditsFailureByAuth.LoadAndDelete(key)
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth); ok && hint.Known && !hint.Available {
-		if hadFailure || !cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
-			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{})
-		}
-	}
+	cliproxyauth.ClearAntigravityCreditsUnavailableHintForAuth(auth, hadFailure)
 }
 func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" || antigravityCoolingDisabled(auth, nil) {
@@ -644,10 +640,7 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 		return
 	}
 	refreshScope := cliproxyauth.AntigravityCreditsScope(auth)
-	refreshKey := authID
-	if refreshScope != "" {
-		refreshKey += "|" + refreshScope
-	}
+	refreshKey := antigravityCreditsRefreshKeyForScope(authID, refreshScope)
 	registryValue, _ := antigravityCreditsRefreshRegistries.LoadOrStore(authID, &antigravityCreditsRefreshRegistry{})
 	registry, okRegistry := registryValue.(*antigravityCreditsRefreshRegistry)
 	if !okRegistry || registry == nil {
@@ -846,10 +839,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 			state := task.state
 			state.mu.Lock()
 			defer state.mu.Unlock()
-			refreshKey := authID
-			if state.scope != "" {
-				refreshKey += "|" + state.scope
-			}
+			refreshKey := antigravityCreditsRefreshKeyForScope(authID, state.scope)
 			current, _ := antigravityCreditsHintRefreshByID.Load(refreshKey)
 			if current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch || state.scope != cliproxyauth.AntigravityCreditsScope(auth) {
 				return
@@ -951,6 +941,21 @@ func antigravityShortCooldownKey(auth *cliproxyauth.Auth, modelName string) stri
 		return ""
 	}
 	return authID + "|" + cliproxyauth.AntigravityCreditsScope(auth) + "|" + modelName + "|sc"
+}
+
+func antigravityCreditsRefreshKeyForScope(authID, scope string) string {
+	refreshKey := strings.TrimSpace(authID)
+	if scope != "" {
+		refreshKey += "|" + scope
+	}
+	return refreshKey
+}
+
+func antigravityCreditsRefreshKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return antigravityCreditsRefreshKeyForScope(auth.ID, cliproxyauth.AntigravityCreditsScope(auth))
 }
 
 func newAntigravityCreditsCacheKey(authID, scope string) any {
