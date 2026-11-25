@@ -86,6 +86,9 @@ func summarizeOAuthSettingsList(list []config.OAuthModelSetting) OAuthSettingsSu
 		if setting.MaxContextLength > 0 {
 			key += fmt.Sprintf("|max-context-length=%d", setting.MaxContextLength)
 		}
+		if setting.MaxCompletionTokens > 0 {
+			key += fmt.Sprintf("|max-completion-tokens=%d", setting.MaxCompletionTokens)
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}

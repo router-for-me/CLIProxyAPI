@@ -75,3 +75,15 @@ func TestDiffOAuthSettingsChanges_Reordering(t *testing.T) {
 		t.Fatalf("expected codex to be affected by reordering: %#v", affected)
 	}
 }
+
+func TestDiffOAuthSettingsCompletionLimits(t *testing.T) {
+	settings := func(limit int) map[string][]config.OAuthModelSetting {
+		return map[string][]config.OAuthModelSetting{"codex": {{Name: "model", MaxCompletionTokens: limit}}}
+	}
+	if _, affected := DiffOAuthSettingsChanges(settings(4096), settings(8192)); len(affected) != 1 || affected[0] != "codex" {
+		t.Fatalf("affected channels = %v, want [codex]", affected)
+	}
+	if _, affected := DiffOAuthSettingsChanges(settings(0), settings(-1)); len(affected) != 0 {
+		t.Fatalf("affected channels = %v, want none", affected)
+	}
+}

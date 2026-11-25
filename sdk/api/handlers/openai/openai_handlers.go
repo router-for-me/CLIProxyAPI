@@ -82,7 +82,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	// Include the core model fields and any advertised completion limit.
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -98,6 +98,10 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		// Add owned_by field if it exists
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
+		}
+
+		if limit, exists := model["max_completion_tokens"]; exists {
+			filteredModel["max_completion_tokens"] = limit
 		}
 
 		filteredModels[i] = filteredModel

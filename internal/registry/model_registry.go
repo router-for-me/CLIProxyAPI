@@ -79,6 +79,9 @@ type ModelInfo struct {
 	// MaxContextLength is an explicit per-model context window override from configuration.
 	// It is carried internally for Codex client model catalog generation.
 	MaxContextLength int `json:"-"`
+	// CatalogMaxCompletionTokens overrides the advertised output limit for this model.
+	// Request translators and executors use the model's runtime limits.
+	CatalogMaxCompletionTokens int `json:"-"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
@@ -2062,7 +2065,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.MaxContextLength > 0 {
 			result["max_context_length"] = model.MaxContextLength
 		}
-		if model.MaxCompletionTokens > 0 {
+		if limit := model.CatalogMaxCompletionTokens; limit > 0 {
+			result["max_completion_tokens"] = limit
+		} else if model.MaxCompletionTokens > 0 {
 			result["max_completion_tokens"] = model.MaxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
@@ -2089,7 +2094,10 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if maxInput <= 0 {
 			maxInput = DefaultClaudeMaxInputTokens
 		}
-		maxOutput := model.MaxCompletionTokens
+		maxOutput := model.CatalogMaxCompletionTokens
+		if maxOutput <= 0 {
+			maxOutput = model.MaxCompletionTokens
+		}
 		if maxOutput <= 0 {
 			maxOutput = DefaultClaudeMaxOutputTokens
 		}
@@ -2120,7 +2128,10 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if inputTokenLimit > 0 {
 			result["inputTokenLimit"] = inputTokenLimit
 		}
-		outputTokenLimit := model.OutputTokenLimit
+		outputTokenLimit := model.CatalogMaxCompletionTokens
+		if outputTokenLimit <= 0 {
+			outputTokenLimit = model.OutputTokenLimit
+		}
 		if outputTokenLimit <= 0 {
 			outputTokenLimit = model.MaxCompletionTokens
 		}

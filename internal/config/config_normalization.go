@@ -219,10 +219,11 @@ func (cfg *Config) SanitizeOAuthSettings() {
 				openAPI = &value
 			}
 			reversed = append(reversed, OAuthModelSetting{
-				OpenAPI:          openAPI,
-				Name:             name,
-				Alias:            alias,
-				MaxContextLength: entry.MaxContextLength,
+				OpenAPI:             openAPI,
+				Name:                name,
+				Alias:               alias,
+				MaxContextLength:    entry.MaxContextLength,
+				MaxCompletionTokens: max(0, entry.MaxCompletionTokens),
 			})
 		}
 		if len(reversed) > 0 {

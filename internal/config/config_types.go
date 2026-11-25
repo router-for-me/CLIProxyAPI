@@ -642,10 +642,14 @@ type OAuthModelSetting struct {
 
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
+	// MaxCompletionTokens overrides the output token limit advertised in model catalogs.
+	MaxCompletionTokens int `yaml:"max-completion-tokens,omitempty" json:"max-completion-tokens,omitempty"`
 }
 
 // GetMaxContextLength returns the configured maximum context length override.
-func (s OAuthModelSetting) GetMaxContextLength() int { return s.MaxContextLength }
+func (s OAuthModelSetting) GetMaxContextLength() int    { return s.MaxContextLength }
+func (s OAuthModelSetting) GetMaxCompletionTokens() int { return s.MaxCompletionTokens }
 
 // ResolveOAuthModelSetting finds the best matching OAuthModelSetting for a given model.
 // An exact Alias match on the model ID takes precedence over a general Name match.
@@ -867,6 +871,9 @@ type ClaudeModel struct {
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// MaxCompletionTokens overrides the output token limit advertised in model catalogs.
+	MaxCompletionTokens int `yaml:"max-completion-tokens,omitempty" json:"max-completion-tokens,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -883,10 +890,11 @@ func (m ClaudeModel) GetName() string { return m.Name }
 
 func (m ClaudeModel) GetAlias() string { return m.Alias }
 
-func (m ClaudeModel) GetDisplayName() string   { return m.DisplayName }
-func (m ClaudeModel) GetMaxContextLength() int { return m.MaxContextLength }
-func (m ClaudeModel) GetForceMapping() bool    { return m.ForceMapping }
-func (m ClaudeModel) GetIsCompat() bool        { return m.IsCompat }
+func (m ClaudeModel) GetDisplayName() string      { return m.DisplayName }
+func (m ClaudeModel) GetMaxContextLength() int    { return m.MaxContextLength }
+func (m ClaudeModel) GetMaxCompletionTokens() int { return m.MaxCompletionTokens }
+func (m ClaudeModel) GetForceMapping() bool       { return m.ForceMapping }
+func (m ClaudeModel) GetIsCompat() bool           { return m.IsCompat }
 
 func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -972,6 +980,9 @@ type CodexModel struct {
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// MaxCompletionTokens overrides the output token limit advertised in model catalogs.
+	MaxCompletionTokens int `yaml:"max-completion-tokens,omitempty" json:"max-completion-tokens,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -995,10 +1006,11 @@ func (m CodexModel) GetName() string { return m.Name }
 
 func (m CodexModel) GetAlias() string { return m.Alias }
 
-func (m CodexModel) GetDisplayName() string   { return m.DisplayName }
-func (m CodexModel) GetMaxContextLength() int { return m.MaxContextLength }
-func (m CodexModel) GetForceMapping() bool    { return m.ForceMapping }
-func (m CodexModel) GetIsCompat() bool        { return m.IsCompat }
+func (m CodexModel) GetDisplayName() string      { return m.DisplayName }
+func (m CodexModel) GetMaxContextLength() int    { return m.MaxContextLength }
+func (m CodexModel) GetMaxCompletionTokens() int { return m.MaxCompletionTokens }
+func (m CodexModel) GetForceMapping() bool       { return m.ForceMapping }
+func (m CodexModel) GetIsCompat() bool           { return m.IsCompat }
 
 func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -1085,6 +1097,9 @@ type GeminiModel struct {
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// MaxCompletionTokens overrides the output token limit advertised in model catalogs.
+	MaxCompletionTokens int `yaml:"max-completion-tokens,omitempty" json:"max-completion-tokens,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -1100,10 +1115,11 @@ func (m GeminiModel) GetName() string { return m.Name }
 
 func (m GeminiModel) GetAlias() string { return m.Alias }
 
-func (m GeminiModel) GetDisplayName() string   { return m.DisplayName }
-func (m GeminiModel) GetMaxContextLength() int { return m.MaxContextLength }
-func (m GeminiModel) GetForceMapping() bool    { return m.ForceMapping }
-func (m GeminiModel) GetIsCompat() bool        { return m.IsCompat }
+func (m GeminiModel) GetDisplayName() string      { return m.DisplayName }
+func (m GeminiModel) GetMaxContextLength() int    { return m.MaxContextLength }
+func (m GeminiModel) GetMaxCompletionTokens() int { return m.MaxCompletionTokens }
+func (m GeminiModel) GetForceMapping() bool       { return m.ForceMapping }
+func (m GeminiModel) GetIsCompat() bool           { return m.IsCompat }
 
 func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -1187,6 +1203,9 @@ type OpenAICompatibilityModel struct {
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// MaxCompletionTokens overrides the output token limit advertised in model catalogs.
+	MaxCompletionTokens int `yaml:"max-completion-tokens,omitempty" json:"max-completion-tokens,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -1219,6 +1238,7 @@ func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
 
 func (m OpenAICompatibilityModel) GetDisplayName() string          { return m.DisplayName }
 func (m OpenAICompatibilityModel) GetMaxContextLength() int        { return m.MaxContextLength }
+func (m OpenAICompatibilityModel) GetMaxCompletionTokens() int     { return m.MaxCompletionTokens }
 func (m OpenAICompatibilityModel) GetForceMapping() bool           { return m.ForceMapping }
 func (m OpenAICompatibilityModel) GetIsCompat() bool               { return m.IsCompat }
 func (m OpenAICompatibilityModel) GetUseMaxCompletionTokens() bool { return m.UseMaxCompletionTokens }

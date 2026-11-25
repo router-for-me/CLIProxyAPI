@@ -678,6 +678,7 @@ upstream:
 #           alias: "gemini-flash"    # client alias mapped to the upstream model
 #           display-name: "Gemini Flash" # optional catalog display name
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
+#           max-completion-tokens: 32768 # optional: override catalog metadata only (no request defaulting or clamping)
 #           is-compat: false             # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #           thinking:                    # optional: exact thinking capability for this configured model
 #             levels: ["high", "medium", "low", "none", "auto"]
@@ -736,6 +737,7 @@ upstream:
 #         - name: "gemini-2.5-flash" # upstream model name
 #           alias: "native-gemini-flash" # client alias mapped to the upstream model
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
+#           max-completion-tokens: 32768 # optional: override catalog metadata only (no request defaulting or clamping)
 #           is-compat: false             # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #           thinking:                    # optional: exact thinking capability for this configured model
 #             levels: ["high", "medium", "low", "none", "auto"]
@@ -818,6 +820,7 @@ upstream:
 #           alias: "codex-latest" # client alias mapped to the upstream model
 #           display-name: "Codex Latest" # optional catalog display name
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
+#           max-completion-tokens: 32768 # optional: override catalog metadata only (no request defaulting or clamping)
 #           force-mapping: true    # optional: rewrite response model fields back to the alias
 #           # Preserve thinking blocks with empty signatures for compatible upstreams.
 #           # Also handle compaction_trigger requests with local summary compaction instead of forwarding them upstream.
@@ -869,6 +872,7 @@ upstream:
 #           alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #           display-name: "Claude Sonnet"      # optional catalog display name
 #           max-context-length: 1048576         # optional: override Codex client context window metadata
+#           max-completion-tokens: 32768 # optional: override catalog metadata only (no request defaulting or clamping)
 #           force-mapping: true                 # optional: rewrite response model fields back to the alias
 #           is-compat: false                    # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #           thinking:                           # optional: exact thinking capability for this configured model
@@ -990,6 +994,7 @@ upstream:
 #           alias: "grok-latest"   # client alias mapped to the upstream model
 #           display-name: "Grok Latest" # optional catalog display name
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
+#           max-completion-tokens: 32768 # optional: override catalog metadata only (no request defaulting or clamping)
 #           force-mapping: true     # optional: rewrite response model fields back to the alias
 #           is-compat: false        # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #           thinking:               # optional: exact thinking capability for this configured model
@@ -1058,6 +1063,7 @@ upstream:
 #           alias: "kimi-k2"               # The alias used in the API.
 #           display-name: "Kimi K2"         # optional catalog display name
 #           max-context-length: 1048576    # optional: override Codex client context window metadata
+#           max-completion-tokens: 32768 # optional: override catalog metadata only (no request defaulting or clamping)
 #           image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
 #           input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #           output-modalities: [text]       # optional: declare output modalities when known
@@ -1163,6 +1169,7 @@ oauth:
   #   codex:
   #     - name: "gpt-6-sol"
   #       max-context-length: 524288 # overrides context window advertised to Codex clients
+  #       max-completion-tokens: 32768 # optional: positive values override catalog metadata only (no request defaulting or clamping)
   #     - name: "gpt-6-astra"
   #       max-context-length: 1048576
 

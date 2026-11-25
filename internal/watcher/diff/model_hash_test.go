@@ -313,3 +313,32 @@ func TestComputeModelHashesIncludeThinking(t *testing.T) {
 		})
 	}
 }
+
+func TestConfiguredModelsHashIncludesCompletionLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hash func(int) string
+	}{
+		{"claude", func(limit int) string {
+			return ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "model", MaxCompletionTokens: limit}})
+		}},
+		{"codex", func(limit int) string {
+			return ComputeCodexModelsHash([]config.CodexModel{{Name: "model", MaxCompletionTokens: limit}})
+		}},
+		{"gemini", func(limit int) string {
+			return ComputeGeminiModelsHash([]config.GeminiModel{{Name: "model", MaxCompletionTokens: limit}})
+		}},
+		{"compatibility", func(limit int) string {
+			return ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", MaxCompletionTokens: limit}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.hash(4096) == tc.hash(8192) || tc.hash(4096) == tc.hash(0) {
+				t.Error("changing or removing the completion limit should change the hash")
+			}
+			if tc.hash(-1) != tc.hash(0) {
+				t.Error("non-positive limits should hash like an omitted limit")
+			}
+		})
+	}
+}

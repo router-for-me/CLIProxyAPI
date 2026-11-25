@@ -30,6 +30,7 @@ type ModelRoute struct {
 	Description               string
 	ContextLength             int
 	MaxContextLength          int
+	CatalogOutputLimit        int
 	MaxCompletionTokens       int
 	InputTokenLimit           int
 	OutputTokenLimit          int
@@ -53,6 +54,7 @@ type ModelInput struct {
 	Description               string
 	ContextLength             int
 	MaxContextLength          int
+	CatalogOutputLimit        int
 	MaxCompletionTokens       int
 	InputTokenLimit           int
 	OutputTokenLimit          int
@@ -253,6 +255,7 @@ func ModelInputsFromGlobalRegistry(reg *registry.ModelRegistry) []ModelInput {
 				Description:               pInfo.Description,
 				ContextLength:             pInfo.ContextLength,
 				MaxContextLength:          pInfo.MaxContextLength,
+				CatalogOutputLimit:        pInfo.CatalogMaxCompletionTokens,
 				MaxCompletionTokens:       pInfo.MaxCompletionTokens,
 				InputTokenLimit:           pInfo.InputTokenLimit,
 				OutputTokenLimit:          pInfo.OutputTokenLimit,
@@ -291,6 +294,7 @@ func ModelInputsFromRegistry(infos []*registry.ModelInfo) []ModelInput {
 			Description:               info.Description,
 			ContextLength:             info.ContextLength,
 			MaxContextLength:          info.MaxContextLength,
+			CatalogOutputLimit:        info.CatalogMaxCompletionTokens,
 			MaxCompletionTokens:       info.MaxCompletionTokens,
 			InputTokenLimit:           info.InputTokenLimit,
 			OutputTokenLimit:          info.OutputTokenLimit,
@@ -557,6 +561,7 @@ func buildModelEntry(input ModelInput, availableIDs map[string]struct{}) ModelEn
 				Description:               input.Description,
 				ContextLength:             input.ContextLength,
 				MaxContextLength:          input.MaxContextLength,
+				CatalogOutputLimit:        input.CatalogOutputLimit,
 				MaxCompletionTokens:       input.MaxCompletionTokens,
 				InputTokenLimit:           input.InputTokenLimit,
 				OutputTokenLimit:          input.OutputTokenLimit,
@@ -845,6 +850,7 @@ func resolveSingleRoute(modelID string, route ModelRoute) resolvedRoute {
 		)
 	}
 	outputLimit := firstPositive(
+		route.CatalogOutputLimit,
 		route.MaxCompletionTokens,
 		route.OutputTokenLimit,
 	)

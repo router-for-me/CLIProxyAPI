@@ -757,3 +757,96 @@ func TestMuseCodeRoutesEnforceAuthSafeModeAndDisallowedPaths(t *testing.T) {
 		t.Fatalf("upstream called %d times, want 0", upstreamCalls.Load())
 	}
 }
+
+func TestHomeCompletionLimitOverridesCatalogMetadata(t *testing.T) {
+	entries := []homeModelEntry{{
+		id: "public", maxCompletionTokens: 65536,
+		routes: []homeModelRoute{
+			{provider: "claude", metadataModelID: "claude-model", maxCompletionTokens: 65536},
+			{provider: "codex-pro", metadataModelID: "codex-model", maxCompletionTokens: 65536},
+		},
+	}}
+	cfg := &proxyconfig.Config{OAuthSettings: map[string][]proxyconfig.OAuthModelSetting{
+		"claude": {{Name: "claude-model", MaxCompletionTokens: -1}},
+		"codex":  {{Name: "codex-model", Alias: "public", MaxCompletionTokens: 32768}},
+	}}
+	applyHomeModelCompletionLimits(entries, cfg)
+	entry := entries[0]
+	if entry.maxCompletionTokens != 65536 || entry.routes[0].maxCompletionTokens != 65536 || entry.routes[1].maxCompletionTokens != 65536 {
+		t.Fatalf("Home completion metadata changed: %+v", entry)
+	}
+	if entry.routes[0].catalogOutputLimit != 0 || entry.routes[1].catalogOutputLimit != 32768 {
+		t.Fatalf("route catalog limits = %d/%d, want 0/32768", entry.routes[0].catalogOutputLimit, entry.routes[1].catalogOutputLimit)
+	}
+	if got := formatHomeCodexModel(entry)["max_completion_tokens"]; got != 32768 {
+		t.Errorf("Codex limit = %v, want 32768", got)
+	}
+	if got := formatHomeClaudeModel(entry)["max_tokens"]; got != 32768 {
+		t.Errorf("Claude limit = %v, want 32768", got)
+	}
+	if got := formatHomeGeminiModel(entry)["outputTokenLimit"]; got != 32768 {
+		t.Errorf("Gemini limit = %v, want 32768", got)
+	}
+}
+
+func TestCatalogCompletionLimitEndpoints(t *testing.T) {
+	const modelID = "completion-limit-catalog-test"
+	const limit = 32768
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(t.Name(), "codex", []*registry.ModelInfo{{
+		ID: modelID, OwnedBy: "openai", MaxCompletionTokens: 64000, OutputTokenLimit: 65536,
+		CatalogMaxCompletionTokens: limit,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(t.Name()) })
+
+	for _, mode := range []string{"local", "home"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &proxyconfig.Config{
+				SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+				Home:      proxyconfig.HomeConfig{Enabled: mode == "home"},
+				OAuthSettings: map[string][]proxyconfig.OAuthModelSetting{
+					"codex": {{Name: modelID, MaxCompletionTokens: limit}},
+				},
+			}
+			cfg.ClaudeCode.DisableCloakingModelList = true
+			if cfg.Home.Enabled {
+				client, _, _ := newReadyHomeCatalogClient(t, `{"codex-pro":[{"id":"completion-limit-catalog-test","owned_by":"openai","max_completion_tokens":64000}]}`)
+				previous := home.Current()
+				home.SetCurrent(client)
+				t.Cleanup(func() { home.SetCurrent(previous) })
+			}
+			server := newTestServerWithConfig(t, cfg)
+			for _, tc := range []struct {
+				name, path, listKey, idKey, id, limitKey string
+			}{
+				{"OpenAI", "/v1/models", "data", "id", modelID, "max_completion_tokens"},
+				{"Codex", "/v1/models?client_version=cpa", "models", "slug", modelID, "max_tokens"},
+				{"Claude", "/v1/models", "data", "id", modelID, "max_tokens"},
+				{"Gemini", "/v1beta/models", "models", "name", "models/" + modelID, "outputTokenLimit"},
+				{"MuseCode", "/muse-code/models", "data", "id", modelID, "metadata.muse-code.limit.output"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+					req.Header.Set("Authorization", "Bearer test-key")
+					if tc.name == "Claude" {
+						req.Header.Set("Anthropic-Version", "2023-06-01")
+					}
+					rec := httptest.NewRecorder()
+					server.engine.ServeHTTP(rec, req)
+					if rec.Code != http.StatusOK {
+						t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+					}
+					for _, entry := range ojson.GetBytes(rec.Body.Bytes(), tc.listKey).Array() {
+						if entry.Get(tc.idKey).String() == tc.id {
+							if got := entry.Get(tc.limitKey).Int(); got != limit {
+								t.Fatalf("%s = %d, want %d; model=%s", tc.limitKey, got, limit, entry.Raw)
+							}
+							return
+						}
+					}
+					t.Fatalf("missing %s; body=%s", tc.id, rec.Body.String())
+				})
+			}
+		})
+	}
+}

@@ -869,8 +869,8 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 	if entry.maxContextLength > 0 {
 		model["max_context_length"] = entry.maxContextLength
 	}
-	if entry.maxCompletionTokens > 0 {
-		model["max_completion_tokens"] = entry.maxCompletionTokens
+	if limit := entry.catalogCompletionLimit(); limit > 0 {
+		model["max_completion_tokens"] = limit
 	}
 	if entry.thinking != nil {
 		model["thinking"] = entry.thinking
@@ -897,24 +897,34 @@ func normalizeHomeProviderChannel(provider string) string {
 }
 
 func resolveHomeRouteMaxContextLength(modelID, metadataModelID, modelName, provider string, baseMaxContextLength int, cfg *config.Config) int {
+	return resolveHomeRouteTokenLimit(modelID, metadataModelID, modelName, provider, baseMaxContextLength, cfg, config.OAuthModelSetting.GetMaxContextLength)
+}
+
+func resolveHomeRouteTokenLimit(modelID, metadataModelID, modelName, provider string, fallback int, cfg *config.Config, limit func(config.OAuthModelSetting) int) int {
 	if cfg == nil || len(cfg.OAuthSettings) == 0 {
-		return baseMaxContextLength
+		return fallback
 	}
 	channel := normalizeHomeProviderChannel(provider)
 	if channel == "" {
-		return baseMaxContextLength
+		return fallback
 	}
 	if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
-		if setting := config.ResolveOAuthModelSetting(channelSettings, modelID, metadataModelID, modelName); setting != nil && setting.MaxContextLength > 0 {
-			return setting.MaxContextLength
+		if setting := config.ResolveOAuthModelSetting(channelSettings, modelID, metadataModelID, modelName); setting != nil {
+			if value := limit(*setting); value > 0 {
+				return value
+			}
 		}
 	}
-	return baseMaxContextLength
+	return fallback
 }
 
 func resolveHomeModelMaxContextLength(entry homeModelEntry, cfg *config.Config) int {
+	return resolveHomeModelTokenLimit(entry, entry.maxContextLength, cfg, config.OAuthModelSetting.GetMaxContextLength)
+}
+
+func resolveHomeModelTokenLimit(entry homeModelEntry, fallback int, cfg *config.Config, limit func(config.OAuthModelSetting) int) int {
 	if cfg == nil || len(cfg.OAuthSettings) == 0 {
-		return entry.maxContextLength
+		return fallback
 	}
 	if len(entry.routes) > 0 {
 		routes := append([]homeModelRoute(nil), entry.routes...)
@@ -930,14 +940,11 @@ func resolveHomeModelMaxContextLength(entry homeModelEntry, cfg *config.Config) 
 			return ci < cj
 		})
 		for _, route := range routes {
-			channel := normalizeHomeProviderChannel(route.provider)
-			if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
-				if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, route.metadataModelID, route.modelName); setting != nil && setting.MaxContextLength > 0 {
-					return setting.MaxContextLength
-				}
+			if value := resolveHomeRouteTokenLimit(entry.id, route.metadataModelID, route.modelName, route.provider, 0, cfg, limit); value > 0 {
+				return value
 			}
 		}
-		return entry.maxContextLength
+		return fallback
 	}
 	providers := append([]string(nil), entry.providers...)
 	sort.SliceStable(providers, func(i, j int) bool {
@@ -952,14 +959,25 @@ func resolveHomeModelMaxContextLength(entry homeModelEntry, cfg *config.Config) 
 		return ci < cj
 	})
 	for _, p := range providers {
-		channel := normalizeHomeProviderChannel(p)
-		if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
-			if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, entry.metadataModelID, entry.modelName); setting != nil && setting.MaxContextLength > 0 {
-				return setting.MaxContextLength
-			}
+		if value := resolveHomeRouteTokenLimit(entry.id, entry.metadataModelID, entry.modelName, p, 0, cfg, limit); value > 0 {
+			return value
 		}
 	}
-	return entry.maxContextLength
+	return fallback
+}
+
+func applyHomeModelCompletionLimits(entries []homeModelEntry, cfg *config.Config) {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return
+	}
+	for i := range entries {
+		entry := &entries[i]
+		entry.catalogOutputLimit = resolveHomeModelTokenLimit(*entry, 0, cfg, config.OAuthModelSetting.GetMaxCompletionTokens)
+		for j := range entry.routes {
+			route := &entry.routes[j]
+			route.catalogOutputLimit = resolveHomeRouteTokenLimit(entry.id, route.metadataModelID, route.modelName, route.provider, 0, cfg, config.OAuthModelSetting.GetMaxCompletionTokens)
+		}
+	}
 }
 
 func (s *Server) loadMuseCodeHomeModels(c *gin.Context) ([]musecode.ModelInput, bool) {
@@ -986,6 +1004,7 @@ func (s *Server) loadMuseCodeHomeModels(c *gin.Context) ([]musecode.ModelInput, 
 				Description:               route.description,
 				ContextLength:             route.contextLength,
 				MaxContextLength:          resolveHomeRouteMaxContextLength(entry.id, route.metadataModelID, route.modelName, route.provider, route.maxContextLength, cfg),
+				CatalogOutputLimit:        route.catalogOutputLimit,
 				MaxCompletionTokens:       route.maxCompletionTokens,
 				Thinking:                  route.thinking,
 				ExplicitThinking:          route.hasThinking,
@@ -1013,6 +1032,7 @@ func (s *Server) loadMuseCodeHomeModels(c *gin.Context) ([]musecode.ModelInput, 
 			Description:               entry.description,
 			ContextLength:             entry.contextLength,
 			MaxContextLength:          resolveHomeModelMaxContextLength(entry, cfg),
+			CatalogOutputLimit:        entry.catalogOutputLimit,
 			MaxCompletionTokens:       entry.maxCompletionTokens,
 			Thinking:                  entry.thinking,
 			SupportedInputModalities:  append([]string(nil), entry.supportedInputModalities...),
@@ -1056,6 +1076,7 @@ type homeModelRoute struct {
 	description               string
 	contextLength             int
 	maxContextLength          int
+	catalogOutputLimit        int
 	maxCompletionTokens       int
 	thinking                  *registry.ThinkingSupport
 	hasThinking               bool
@@ -1076,6 +1097,7 @@ type homeModelEntry struct {
 	description               string
 	contextLength             int
 	maxContextLength          int
+	catalogOutputLimit        int
 	maxCompletionTokens       int
 	thinking                  *registry.ThinkingSupport
 	supportedInputModalities  []string
@@ -1083,6 +1105,13 @@ type homeModelEntry struct {
 	providers                 []string
 	nativeCapabilityRoutes    []registry.NativeCapabilityRoute
 	routes                    []homeModelRoute
+}
+
+func (entry homeModelEntry) catalogCompletionLimit() int {
+	if entry.catalogOutputLimit > 0 {
+		return entry.catalogOutputLimit
+	}
+	return entry.maxCompletionTokens
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -1112,6 +1141,9 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
+		if limit := entry.catalogCompletionLimit(); limit > 0 {
+			model["max_completion_tokens"] = limit
+		}
 		filtered = append(filtered, model)
 	}
 	s.writeModelListResponse(c, "openai", gin.H{
@@ -1137,7 +1169,7 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 	if maxInput <= 0 {
 		maxInput = registry.DefaultClaudeMaxInputTokens
 	}
-	maxOutput := entry.maxCompletionTokens
+	maxOutput := entry.catalogCompletionLimit()
 	if maxOutput <= 0 {
 		maxOutput = registry.DefaultClaudeMaxOutputTokens
 	}
@@ -1237,6 +1269,7 @@ func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 		return nil, false
 	}
 
+	applyHomeModelCompletionLimits(entries, s.getConfig())
 	return entries, true
 }
 
@@ -1266,8 +1299,8 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 	if entry.contextLength > 0 {
 		model["inputTokenLimit"] = entry.contextLength
 	}
-	if entry.maxCompletionTokens > 0 {
-		model["outputTokenLimit"] = entry.maxCompletionTokens
+	if limit := entry.catalogCompletionLimit(); limit > 0 {
+		model["outputTokenLimit"] = limit
 	}
 	return model
 }

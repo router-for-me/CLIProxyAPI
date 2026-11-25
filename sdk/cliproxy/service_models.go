@@ -837,6 +837,10 @@ type modelMaxContextLengthEntry interface {
 	GetMaxContextLength() int
 }
 
+type modelMaxCompletionTokensEntry interface {
+	GetMaxCompletionTokens() int
+}
+
 type modelCompatEntry interface {
 	GetIsCompat() bool
 }
@@ -875,6 +879,11 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 		if maxContextLength := maxContextModel.GetMaxContextLength(); maxContextLength > 0 {
 			info.ContextLength = maxContextLength
 			info.MaxContextLength = maxContextLength
+		}
+	}
+	if maxCompletionModel, okMaxCompletion := model.(modelMaxCompletionTokensEntry); okMaxCompletion {
+		if limit := maxCompletionModel.GetMaxCompletionTokens(); limit > 0 {
+			info.CatalogMaxCompletionTokens = limit
 		}
 	}
 	if compatModel, okCompat := any(model).(modelCompatEntry); okCompat {
@@ -1405,14 +1414,19 @@ func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*Mod
 			continue
 		}
 		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name, model.SourceModelID)
-		if setting != nil && setting.MaxContextLength > 0 {
-			clone := *model
+		if setting == nil || (setting.MaxContextLength <= 0 && setting.MaxCompletionTokens <= 0) {
+			out = append(out, model)
+			continue
+		}
+		clone := *model
+		if setting.MaxContextLength > 0 {
 			clone.ContextLength = setting.MaxContextLength
 			clone.MaxContextLength = setting.MaxContextLength
-			out = append(out, &clone)
-		} else {
-			out = append(out, model)
 		}
+		if setting.MaxCompletionTokens > 0 {
+			clone.CatalogMaxCompletionTokens = setting.MaxCompletionTokens
+		}
+		out = append(out, &clone)
 	}
 	return out
 }
