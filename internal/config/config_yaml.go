@@ -468,20 +468,29 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
-	// Pointer-backed booleans (such as cache-user-id, disable-cooling, and oauth-include-create-api-key): explicit values are meaningful and must be preserved.
-	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling" || path[len(path)-1] == "oauth-include-create-api-key") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
-		return false
-	}
-
-	// A parent mapping carrying an explicit session-date-pin-days or
-	// oauth-include-create-api-key value must survive the zero-value check below,
-	// or the new key is never written.
-	if node != nil && node.Kind == yaml.MappingNode {
-		if pinIdx := findMapKeyIndex(node, "session-date-pin-days"); pinIdx >= 0 {
+	// Pointer-backed booleans (such as cache-user-id, disable-cooling, oauth-include-create-api-key,
+	// openapi, interactions, and disable-codex-cloaking): explicit values are meaningful and must be preserved.
+	if len(path) > 0 && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		switch path[len(path)-1] {
+		case "cache-user-id", "disable-cooling", "oauth-include-create-api-key",
+			"openapi", "interactions", "disable-codex-cloaking":
 			return false
 		}
-		if scopeIdx := findMapKeyIndex(node, "oauth-include-create-api-key"); scopeIdx >= 0 {
-			return false
+	}
+
+	// A parent mapping carrying an explicit pointer-backed scalar override must
+	// survive the zero-value check below, or the new key is never written.
+	if node != nil && node.Kind == yaml.MappingNode {
+		for _, key := range []string{
+			"session-date-pin-days",
+			"oauth-include-create-api-key",
+			"openapi",
+			"interactions",
+			"disable-codex-cloaking",
+		} {
+			if findMapKeyIndex(node, key) >= 0 {
+				return false
+			}
 		}
 	}
 
