@@ -585,14 +585,34 @@ func rewriteVertexOpenAPILocation(base, location string) string {
 	return rewritten
 }
 
-func vertexOpenAPIHasVersionSegment(base string) bool {
+func vertexURLPath(base string) string {
 	if base == "" {
+		return ""
+	}
+	s := base
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	if idx := strings.IndexAny(s, "?#"); idx >= 0 {
+		s = s[:idx]
+	}
+	pathStart := strings.IndexByte(s, '/')
+	if pathStart < 0 {
+		return ""
+	}
+	return s[pathStart:]
+}
+
+// VertexAPIVersionSuffix reports whether the base URL's path portion ends with
+// a Google API version segment such as "/v1" or "/v1beta1". Only the URL path
+// is inspected so bare hostnames like "http://vertex1" or "http://v1-gateway"
+// are not mistaken for a version segment.
+func VertexAPIVersionSuffix(base string) bool {
+	path := strings.TrimRight(vertexURLPath(base), "/")
+	if path == "" {
 		return false
 	}
-	if strings.Contains(base, "/v1/") || strings.Contains(base, "/v1beta1/") {
-		return true
-	}
-	seg := base[strings.LastIndexByte(base, '/')+1:]
+	seg := path[strings.LastIndexByte(path, '/')+1:]
 	if len(seg) < 2 || seg[0] != 'v' {
 		return false
 	}
@@ -608,4 +628,15 @@ func vertexOpenAPIHasVersionSegment(base string) bool {
 		}
 	}
 	return hasDigit
+}
+
+func vertexOpenAPIHasVersionSegment(base string) bool {
+	if base == "" {
+		return false
+	}
+	if VertexAPIVersionSuffix(base) {
+		return true
+	}
+	path := vertexURLPath(base)
+	return strings.Contains(path, "/v1/") || strings.Contains(path, "/v1beta1/")
 }
