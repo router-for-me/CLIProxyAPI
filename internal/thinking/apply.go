@@ -965,18 +965,40 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 }
 
 func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider string) ThinkingConfig {
-	prefix := "generationConfig.thinkingConfig"
+	prefixes := []string{
+		"generationConfig.thinkingConfig",
+		"generationConfig.thinking_config",
+		"generation_config.thinkingConfig",
+		"generation_config.thinking_config",
+	}
 	if provider == "antigravity" {
-		prefix = "request.generationConfig.thinkingConfig"
+		prefixes = []string{
+			"request.generationConfig.thinkingConfig",
+			"request.generationConfig.thinking_config",
+			"request.generation_config.thinkingConfig",
+			"request.generation_config.thinking_config",
+		}
 	}
 
-	level := get(prefix + ".thinkingLevel")
-	if !level.Exists() {
-		level = get(prefix + ".thinking_level")
-	}
-	budget := get(prefix + ".thinkingBudget")
-	if !budget.Exists() {
-		budget = get(prefix + ".thinking_budget")
+	var level, budget ojson.Result
+	for _, prefix := range prefixes {
+		if !level.Exists() {
+			if v := get(prefix + ".thinkingLevel"); v.Exists() {
+				level = v
+			} else if v := get(prefix + ".thinking_level"); v.Exists() {
+				level = v
+			}
+		}
+		if !budget.Exists() {
+			if v := get(prefix + ".thinkingBudget"); v.Exists() {
+				budget = v
+			} else if v := get(prefix + ".thinking_budget"); v.Exists() {
+				budget = v
+			}
+		}
+		if level.Exists() && budget.Exists() {
+			break
+		}
 	}
 	return geminiThinkingConfigFromValues(level, budget)
 }
