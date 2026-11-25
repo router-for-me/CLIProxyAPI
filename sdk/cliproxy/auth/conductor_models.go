@@ -742,13 +742,13 @@ func rewriteForceMappedStreamChunk(rewriter *StreamRewriter, payload []byte) []b
 	if len(rewritten) > 0 {
 		return rewritten
 	}
+	if len(rewriter.pendingBuf) > 0 {
+		return nil
+	}
 	if bytes.Contains(payload, []byte("data:")) {
 		if lineWise := rewriteSSEPayloadLines(payload, rewriter.options.RewriteModel); len(lineWise) > 0 {
 			return lineWise
 		}
-	}
-	if len(rewriter.pendingBuf) > 0 {
-		return nil
 	}
 	return nil
 }
