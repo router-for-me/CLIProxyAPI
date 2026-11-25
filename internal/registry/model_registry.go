@@ -2208,20 +2208,33 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
 	}
 
-	// Sort models by creation timestamp (newest first)
+	extractModelID := func(model map[string]any) string {
+		if modelID, ok := model["id"].(string); ok && modelID != "" {
+			return modelID
+		}
+		if name, ok := model["name"].(string); ok && name != "" {
+			return strings.TrimPrefix(name, "models/")
+		}
+		return ""
+	}
+
+	// Sort models by creation timestamp (newest first), with strict weak ordering
+	// when created timestamps are absent or equal.
 	sort.Slice(models, func(i, j int) bool {
-		// Extract created timestamps from map
 		createdI, okI := models[i]["created"].(int64)
 		createdJ, okJ := models[j]["created"].(int64)
-		if !okI || !okJ {
-			return false
+		if okI != okJ {
+			return okI
 		}
-		return createdI > createdJ
+		if okI && createdI != createdJ {
+			return createdI > createdJ
+		}
+		return extractModelID(models[i]) < extractModelID(models[j])
 	})
 
 	// Find the first model with available clients
 	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
+		if modelID := extractModelID(model); modelID != "" {
 			if count := r.GetModelCount(modelID); count > 0 {
 				return modelID, nil
 			}
