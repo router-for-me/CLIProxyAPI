@@ -1306,6 +1306,9 @@ func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
 			XAIKey: []config.CodexKey{
 				{APIKey: "xai-key", BaseURL: "https://xai.api", RequestScopedErrors: rules},
 			},
+			VertexCompatAPIKey: []config.VertexCompatKey{
+				{APIKey: "vertex-key", BaseURL: "https://vertex.api", RequestScopedErrors: rules},
+			},
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{
 					Name:                "compat",
