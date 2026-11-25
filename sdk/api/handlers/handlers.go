@@ -757,10 +757,10 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx = coreauth.WithCodexClientRequest(newCtx, coreauth.IsCodexClientRequest(newCtx))
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
-		if c != nil {
+		if c != nil && c.Writer != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
-		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 {
+		if cfg := h.CurrentConfig(); c != nil && cfg != nil && cfg.RequestLog && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
 					cancel()
