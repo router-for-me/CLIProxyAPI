@@ -87,6 +87,7 @@ func (a *Applier) applyCompatibleDoc(doc *ojson.Doc, config thinking.ThinkingCon
 
 func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
+	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingBudget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
@@ -94,12 +95,13 @@ func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingCo
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
-		if config.Budget == 0 && config.Level == "" {
+		level := formatAntigravityThinkingLevel(config.Level)
+		if config.Budget == 0 && level == "" {
 			_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
 			return nil
 		}
-		if config.Level != "" {
-			_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+		if level != "" {
+			_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", level)
 		}
 		if hasIncludeThoughts {
 			_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
@@ -111,15 +113,20 @@ func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingCo
 		return nil
 	}
 
-	_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+	_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", formatAntigravityThinkingLevel(config.Level))
 	if hasIncludeThoughts {
 		_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	}
 	return nil
 }
 
+func formatAntigravityThinkingLevel(level thinking.ThinkingLevel) string {
+	return strings.ToUpper(strings.TrimSpace(string(level)))
+}
+
 func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
+	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingLevel")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
@@ -130,9 +137,6 @@ func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingC
 	if isClaude && modelInfo != nil {
 		budget = a.normalizeClaudeBudgetDoc(budget, doc, modelInfo)
 		if budget == -2 {
-			if hasIncludeThoughts {
-				_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-			}
 			return nil
 		}
 	}
@@ -148,6 +152,8 @@ func extractAntigravityIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 	for _, path := range []string{
 		"request.generationConfig.thinkingConfig.includeThoughts",
 		"request.generationConfig.thinkingConfig.include_thoughts",
+		"request.generationConfig.thinking_config.includeThoughts",
+		"request.generationConfig.thinking_config.include_thoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:
@@ -175,6 +181,7 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 	}
 	if minBudget > 0 && budget >= 0 && budget < minBudget {
 		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
+		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
 		return -2
 	}
 

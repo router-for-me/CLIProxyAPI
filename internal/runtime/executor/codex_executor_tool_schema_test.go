@@ -972,3 +972,201 @@ func TestOpenAICompatExecutor_NormalizesToolIntegerTypesForCodexUserAgent_NonCod
 		t.Fatalf("expected non-Codex executor to normalize timeout_ms to integer, got: %s (body=%s)", got, string(gotBody))
 	}
 }
+
+// Issue #7690: Codex Responses rejects function tool schemas containing "uniqueItems"
+// on gpt-6.2-astra when "strict" is omitted or true. All Codex HTTP and WebSocket
+// execution paths must strip uniqueItems while preserving strict semantics and literal
+// properties named "uniqueItems".
+func TestCodexExecutor_StripsUniqueItemsFromToolSchemas(t *testing.T) {
+	requestPayload := []byte(`{
+		"model": "gpt-6.2-astra",
+		"instructions": "Reply with ok",
+		"input": [{"role": "user", "content": [{"type": "input_text", "text": "Say ok"}]}],
+		"tools": [
+			{
+				"type": "function",
+				"name": "ask_user",
+				"description": "Ask the user a structured question.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"question": {"type": "string"},
+						"options": {
+							"type": "array",
+							"items": {"type": "string"},
+							"uniqueItems": true
+						}
+					},
+					"required": ["question"]
+				}
+			},
+			{
+				"type": "function",
+				"name": "strict_tags",
+				"strict": true,
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"tags": {
+							"type": "array",
+							"items": {"type": "string"},
+							"uniqueItems": false
+						},
+						"uniqueItems": {"type": "boolean"}
+					},
+					"required": ["tags", "uniqueItems"],
+					"additionalProperties": false
+				}
+			}
+		],
+		"stream": true,
+		"store": false
+	}`)
+
+	assertPayload := func(t *testing.T, mode string, body []byte) {
+		t.Helper()
+		askTool := ojson.GetBytes(body, `tools.#(name=="ask_user")`)
+		if !askTool.Exists() {
+			t.Fatalf("%s: ask_user tool missing in body: %s", mode, string(body))
+		}
+		if askTool.Get("strict").Exists() {
+			t.Fatalf("%s: expected omitted strict on ask_user to remain omitted, got %s", mode, askTool.Get("strict").Raw)
+		}
+		if askTool.Get("parameters.properties.options.uniqueItems").Exists() {
+			t.Fatalf("%s: expected ask_user options.uniqueItems to be stripped, got %s", mode, askTool.Get("parameters.properties.options").Raw)
+		}
+		strictTool := ojson.GetBytes(body, `tools.#(name=="strict_tags")`)
+		if !strictTool.Exists() {
+			t.Fatalf("%s: strict_tags tool missing in body: %s", mode, string(body))
+		}
+		if strictTool.Get("strict").Type != ojson.True {
+			t.Fatalf("%s: expected strict=true preserved on strict_tags, got %s", mode, strictTool.Get("strict").Raw)
+		}
+		if strictTool.Get("parameters.properties.tags.uniqueItems").Exists() {
+			t.Fatalf("%s: expected strict_tags tags.uniqueItems to be stripped, got %s", mode, strictTool.Get("parameters.properties.tags").Raw)
+		}
+		if gotType := strictTool.Get("parameters.properties.uniqueItems.type").String(); gotType != "boolean" {
+			t.Fatalf("%s: expected literal property uniqueItems preserved, got %q", mode, gotType)
+		}
+	}
+
+	t.Run("http", func(t *testing.T) {
+		var gotBody []byte
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read request body: %v", errRead)
+				http.Error(w, errRead.Error(), http.StatusInternalServerError)
+				return
+			}
+			gotBody = bytes.Clone(body)
+			if r.URL.Path == "/responses/compact" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"resp_compact","object":"response.compaction","output":[]}`))
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+		}))
+		defer server.Close()
+
+		executor := NewCodexExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"api_key":   "test",
+				"base_url":  server.URL,
+				"plan_type": "pro",
+			},
+		}
+		req := cliproxyexecutor.Request{Model: "gpt-6.2-astra", Payload: requestPayload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+
+		gotBody = nil
+		if _, errExec := executor.Execute(context.Background(), auth, req, opts); errExec != nil {
+			t.Fatalf("Execute() error = %v", errExec)
+		}
+		assertPayload(t, "http execute", gotBody)
+
+		gotBody = nil
+		streamRes, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		for range streamRes.Chunks {
+		}
+		assertPayload(t, "http stream", gotBody)
+
+		gotBody = nil
+		compactOpts := opts
+		compactOpts.Alt = "responses/compact"
+		if _, errCompact := executor.Execute(context.Background(), auth, req, compactOpts); errCompact != nil {
+			t.Fatalf("Execute(compact) error = %v", errCompact)
+		}
+		assertPayload(t, "http compact", gotBody)
+	})
+
+	t.Run("websocket", func(t *testing.T) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		capturedPayload := make(chan []byte, 2)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+			if errUpgrade != nil {
+				t.Errorf("upgrade websocket: %v", errUpgrade)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			_, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			capturedPayload <- bytes.Clone(payload)
+
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+			}
+		}))
+		defer server.Close()
+
+		exec := NewCodexWebsocketsExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"api_key":   "sk-test",
+				"base_url":  server.URL,
+				"plan_type": "pro",
+			},
+		}
+		req := cliproxyexecutor.Request{Model: "gpt-6.2-astra", Payload: requestPayload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("WS ExecuteStream() error = %v", errStream)
+		}
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("WS stream chunk error = %v", chunk.Err)
+			}
+		}
+		select {
+		case payload := <-capturedPayload:
+			assertPayload(t, "ws stream", payload)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for ws stream payload")
+		}
+
+		if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+			t.Fatalf("WS Execute() error = %v", errExec)
+		}
+		select {
+		case payload := <-capturedPayload:
+			assertPayload(t, "ws execute", payload)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for ws execute payload")
+		}
+	})
+}

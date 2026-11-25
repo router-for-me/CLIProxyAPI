@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type executionResources struct {
@@ -152,8 +153,16 @@ type HomeDispatchSelection struct {
 	Auth                       *Auth
 	Executor                   ProviderExecutor
 	Provider                   string
+	SelectionID                string
 	CanonicalSessionID         string
 	ParentSessionID            string
+	sessionAffinityProvider    string
+	sessionAffinityModel       string
+	lcpAffinitySessionID       string
+	lcpAccessGeneration        uint64
+	isLCPFork                  bool
+	isLCPCompaction            bool
+	lcpNodeKind                string
 	modelInfo                  *registry.ModelInfo
 	configurationUpdateSupport *bool
 
@@ -169,6 +178,54 @@ type HomeDispatchSelection struct {
 	runtimeAuthBound atomic.Bool
 	ended            atomic.Bool
 	preservedAttempt atomic.Pointer[attemptCancel]
+}
+
+func applyHomeSelectionSessionMetadata(base map[string]any, selection *HomeDispatchSelection) map[string]any {
+	if selection == nil || (selection.CanonicalSessionID == "" && selection.lcpAffinitySessionID == "") {
+		return base
+	}
+	meta := make(map[string]any, len(base)+9)
+	for k, v := range base {
+		meta[k] = v
+	}
+	if selection.CanonicalSessionID != "" {
+		meta[cliproxyexecutor.CanonicalSessionIDMetadataKey] = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" && selection.ParentSessionID != selection.CanonicalSessionID {
+			meta[cliproxyexecutor.ParentSessionIDMetadataKey] = selection.ParentSessionID
+		} else {
+			delete(meta, cliproxyexecutor.ParentSessionIDMetadataKey)
+		}
+	}
+	if selection.lcpAffinitySessionID != "" {
+		meta[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = selection.lcpAffinitySessionID
+		if selection.sessionAffinityProvider != "" {
+			meta[cliproxyexecutor.SessionAffinityProviderMetadataKey] = selection.sessionAffinityProvider
+		}
+		if selection.sessionAffinityModel != "" {
+			meta[cliproxyexecutor.SessionAffinityModelMetadataKey] = selection.sessionAffinityModel
+		}
+		if selection.lcpAccessGeneration > 0 {
+			meta[cliproxyexecutor.LCPAccessGenerationMetadataKey] = selection.lcpAccessGeneration
+		} else {
+			delete(meta, cliproxyexecutor.LCPAccessGenerationMetadataKey)
+		}
+		if selection.isLCPFork {
+			meta[cliproxyexecutor.IsForkMetadataKey] = true
+		} else {
+			delete(meta, cliproxyexecutor.IsForkMetadataKey)
+		}
+		if selection.isLCPCompaction {
+			meta[cliproxyexecutor.IsCompactionMetadataKey] = true
+		} else {
+			delete(meta, cliproxyexecutor.IsCompactionMetadataKey)
+		}
+		if selection.lcpNodeKind != "" {
+			meta[cliproxyexecutor.NodeKindMetadataKey] = selection.lcpNodeKind
+		} else {
+			delete(meta, cliproxyexecutor.NodeKindMetadataKey)
+		}
+	}
+	return meta
 }
 
 func newHomeDispatchSelection(auth *Auth, executor ProviderExecutor, provider string, scope *executionregistry.Scope) (*HomeDispatchSelection, error) {

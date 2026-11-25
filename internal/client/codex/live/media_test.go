@@ -1,3 +1,5 @@
+//go:build !solaris
+
 package live
 
 import (
@@ -27,10 +29,10 @@ func TestPionMediaRelaySelectsRemoteProxyMode(t *testing.T) {
 		t.Fatalf("create client DataChannel: %v", errChannel)
 	}
 	clientOffer := completeOffer(t, client)
-	relay, errRelay := newPionMediaRelay(config.CodexLiveMediaRelayConfig{
+	relay, errRelay := newMediaRelay(config.CodexLiveMediaRelayConfig{
 		Enabled:  true,
 		PublicIP: "198.51.100.1",
-	})
+	}, nil)
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
@@ -191,7 +193,8 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 		MaxSessions:             1,
 		DisablePrivateRemoteIPs: false,
 	}
-	relay, errRelay := newPionMediaRelay(relayConfig)
+	limiter := &mediaSessionLimiter{}
+	relay, errRelay := newMediaRelay(relayConfig, limiter)
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
@@ -208,7 +211,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 			t.Errorf("close media relay session: %v", errClose)
 		}
 	}()
-	reloadedRelay, errRelay := newPionMediaRelayWithLimiter(relayConfig, relay.limiter)
+	reloadedRelay, errRelay := newMediaRelay(relayConfig, limiter)
 	if errRelay != nil {
 		t.Fatalf("reload media relay: %v", errRelay)
 	}
@@ -308,6 +311,53 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	assertForwardingLog(t, hook, "direct", "Voice credential", "auth-index", "connected")
 	assertForwardingAfterRemoteConnected(t, hook)
 	assertSessionLog(t, hook, "codex live WebRTC media session closed", "closed", "call-log-test")
+}
+
+func TestHandlerUpdatesMediaRelayConfig(t *testing.T) {
+	handler := NewHandler(nil, nil)
+	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
+		t.Fatalf("initial media relay = %#v, error = %v", relay, errRelay)
+	}
+	enabled := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
+		Enabled:                 true,
+		MaxSessions:             1,
+		DisablePrivateRemoteIPs: false,
+	}}}
+	if errUpdate := handler.UpdateConfig(enabled); errUpdate != nil {
+		t.Fatalf("enable media relay: %v", errUpdate)
+	}
+	enabledRelay, errRelay := handler.currentMediaRelay()
+	if enabledRelay == nil || errRelay != nil {
+		t.Fatalf("enabled media relay = %#v, error = %v", enabledRelay, errRelay)
+	}
+	unchanged := *enabled
+	unchanged.Debug = true
+	unchanged.ProxyURL = "http://new-proxy.example"
+	if errUpdate := handler.UpdateConfig(&unchanged); errUpdate != nil {
+		t.Fatalf("apply unrelated config change: %v", errUpdate)
+	}
+	unchangedRelay, errRelay := handler.currentMediaRelay()
+	if unchangedRelay != enabledRelay || errRelay != nil {
+		t.Fatalf("unrelated config change rebuilt media relay: before=%#v after=%#v error=%v", enabledRelay, unchangedRelay, errRelay)
+	}
+	if current := handler.currentConfig(); current == nil || current.ProxyURL != "http://new-proxy.example" {
+		t.Fatalf("runtime config was not updated: %#v", current)
+	}
+	changed := *enabled
+	changed.Codex.LiveMediaRelay.MaxSessions = 2
+	if errUpdate := handler.UpdateConfig(&changed); errUpdate != nil {
+		t.Fatalf("reload media relay: %v", errUpdate)
+	}
+	changedRelay, errRelay := handler.currentMediaRelay()
+	if changedRelay == nil || changedRelay == enabledRelay || errRelay != nil {
+		t.Fatalf("changed media relay = %#v, previous=%#v error=%v", changedRelay, enabledRelay, errRelay)
+	}
+	if errUpdate := handler.UpdateConfig(&config.Config{}); errUpdate != nil {
+		t.Fatalf("disable media relay: %v", errUpdate)
+	}
+	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
+		t.Fatalf("disabled media relay = %#v, error = %v", relay, errRelay)
+	}
 }
 
 func TestIsPublicRemoteIP(t *testing.T) {

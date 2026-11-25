@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -956,6 +957,30 @@ func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
 	got := decodeCapturedRequestBodyForLogWithLimit(raw, "zstd", 1<<20)
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("an oversized window must leave the raw bytes, got %q", got)
+	}
+}
+
+// A gzip request body is decoded for the log under the same bound as zstd; truncation is marked.
+func TestDecodeCapturedGzipRequestBody(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`)
+	var compressed bytes.Buffer
+	w := gzip.NewWriter(&compressed)
+	if _, errWrite := w.Write(payload); errWrite != nil {
+		t.Fatalf("gzip write: %v", errWrite)
+	}
+	if errClose := w.Close(); errClose != nil {
+		t.Fatalf("gzip close: %v", errClose)
+	}
+
+	if got := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "gzip", 1<<20); !bytes.Equal(got, payload) {
+		t.Fatalf("gzip decoded = %q, want %q", got, payload)
+	}
+	if got := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "x-gzip", 1<<20); !bytes.Equal(got, payload) {
+		t.Fatalf("x-gzip decoded = %q, want %q", got, payload)
+	}
+	truncated := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "gzip", 8)
+	if !bytes.HasSuffix(truncated, []byte("[DECOMPRESSED REQUEST BODY TRUNCATED]")) {
+		t.Fatalf("truncated = %q, want truncation marker", truncated)
 	}
 }
 

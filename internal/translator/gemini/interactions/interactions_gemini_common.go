@@ -50,6 +50,7 @@ func convertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, s
 	copyInteractionsServiceTierDoc(outDoc, root)
 	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	errInput := appendInteractionsInput(&contentItems, root.Get("input"))
+	contentItems = translatorcommon.MergeAdjacentGeminiUserContents(contentItems)
 	translatorcommon.SetRawArrayItemsDoc(outDoc, "contents", contentItems)
 	return outDoc.Bytes(), errInput
 }

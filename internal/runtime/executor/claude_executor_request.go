@@ -640,7 +640,17 @@ func claudeBodyUsesAdvancedToolUse(body []byte) bool {
 // claudeBodyHasAdvisorTool reports whether the request body declares an
 // advisor server tool.
 func claudeBodyHasAdvisorTool(body []byte) bool {
-	tools := ojson.GetBytesNoCopy(body, "tools")
+	return claudeBodyHasAdvisorToolResult(ojson.GetBytesNoCopy(body, "tools"))
+}
+
+func claudeBodyHasAdvisorToolDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	return claudeBodyHasAdvisorToolResult(doc.Get("tools"))
+}
+
+func claudeBodyHasAdvisorToolResult(tools ojson.Result) bool {
 	if !tools.IsArray() {
 		return false
 	}

@@ -29,7 +29,7 @@ type antigravityHintPersistRequest struct {
 // one worker per account. Repeated updates replace a single queued successor,
 // rather than accumulating singleflight followers while an upstream is stalled.
 func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string) {
-	if s == nil || auth == nil || auth.ID == "" || auth.Disabled || s.antigravityHomeEnabled() {
+	if s == nil || auth == nil || auth.ID == "" || shouldSkipAntigravityModelProbe(auth, antigravityNowFunc()) || s.antigravityHomeEnabled() {
 		return
 	}
 	if ctx == nil {
@@ -110,8 +110,10 @@ func (s *Service) executeAntigravityModelRefresh(request *antigravityModelRefres
 			return
 		}
 	}
+	s.checkSeededAntigravityModelEnums(probeCtx, request.auth)
 	expectedKey, hints := s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)
 	if hints.ModelIDs != nil {
+		s.publishAntigravityModelEnums(probeCtx, request.auth, expectedKey, hints.revision)
 		s.queueAntigravityHintPersistence(request.ctx, request.auth, expectedKey, antigravityModelBaseURLs(request.auth)[0], hints)
 	}
 }
@@ -216,7 +218,7 @@ func (s *Service) antigravityAccountProbeCurrent(probe *antigravityAccountProbe)
 		}
 	}
 	token, _ := current.Metadata["access_token"].(string)
-	return !current.Disabled && current.Status != coreauth.StatusDisabled &&
+	return !shouldSkipAntigravityModelProbe(current, antigravityNowFunc()) &&
 		antigravityAuthModelSettingsEqual(current, probe.auth) &&
 		s.antigravityCapabilityKey(current) == probe.routeKey && strings.TrimSpace(token) == probe.token
 }
@@ -225,7 +227,7 @@ func (s *Service) antigravityAccountProbeCurrent(probe *antigravityAccountProbe)
 // joining this same map, so deletion cannot slip between validation and tracking.
 // Empty authID invalidates stale probes across all accounts after config changes.
 func (s *Service) queueAntigravityHintPersistence(ctx context.Context, auth *coreauth.Auth, expectedKey, endpoint string, hints antigravityModelCapabilityHints) {
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 || s.antigravityHomeEnabled() {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || isAntigravityAuthDisabled(auth) || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 || s.antigravityHomeEnabled() {
 		return
 	}
 	if ctx == nil {

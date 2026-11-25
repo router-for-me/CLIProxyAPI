@@ -1916,3 +1916,92 @@ func TestResponseInterceptRequest_SetsKindAcrossAuthManagerAndModelListPaths(t *
 		}
 	})
 }
+
+func TestHandlerAfterAuthCredentialTerminateFailover(t *testing.T) {
+	model := "handler-after-auth-cred-terminate"
+	var executedAuths []string
+	executor := &interceptorCaptureExecutor{
+		execute: func(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+			executedAuths = append(executedAuths, auth.ID)
+			return coreexecutor.Response{Payload: []byte("ok:" + auth.ID)}, nil
+		},
+	}
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	for _, id := range []string{"handler-cred-a", "handler-cred-b"} {
+		registry.GetGlobalRegistry().RegisterClient(id, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+		if _, errReg := manager.Register(context.Background(), &coreauth.Auth{
+			ID:       id,
+			Provider: executor.Identifier(),
+			Status:   coreauth.StatusActive,
+		}); errReg != nil {
+			t.Fatal(errReg)
+		}
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	var responseReqBody []byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestAfterAuth: func(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			authID, _ := req.Metadata[coreexecutor.SelectedAuthMetadataKey].(string)
+			if authID == "handler-cred-a" {
+				return pluginapi.RequestInterceptResponse{
+					Headers:        http.Header{"X-Refused-Mutation": {"should-not-leak"}},
+					Body:           []byte(`{"leaked":true}`),
+					Terminate:      true,
+					TerminateScope: "credential",
+					StatusCode:     http.StatusForbidden,
+					ResponseBody:   []byte(`{"error":"cred-a refused"}`),
+				}
+			}
+			return pluginapi.RequestInterceptResponse{}
+		},
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			responseReqBody = cloneBytes(req.RequestBody)
+			return pluginapi.ResponseInterceptResponse{}
+		},
+	})
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() errMsg = %#v", errMsg)
+	}
+	if string(body) != "ok:handler-cred-b" {
+		t.Fatalf("body = %q, want ok:handler-cred-b", string(body))
+	}
+	if len(executedAuths) != 1 || executedAuths[0] != "handler-cred-b" {
+		t.Fatalf("executedAuths = %v, want [handler-cred-b]", executedAuths)
+	}
+	if strings.Contains(string(responseReqBody), "leaked") {
+		t.Fatalf("refused credential body leaked into response interceptor: %s", string(responseReqBody))
+	}
+}
+
+func TestHandlerBeforeAuthIgnoresCredentialTerminateScope(t *testing.T) {
+	model := "handler-before-auth-ignores-scope"
+	executor := &interceptorCaptureExecutor{}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	afterCalls := 0
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(_ context.Context, _ pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{
+				Terminate:      true,
+				TerminateScope: "credential",
+				StatusCode:     http.StatusForbidden,
+				ResponseBody:   []byte(`{"error":"before-auth blocked"}`),
+			}
+		},
+		interceptRequestAfterAuth: func(_ context.Context, _ pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			afterCalls++
+			return pluginapi.RequestInterceptResponse{}
+		},
+	})
+
+	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
+	if errMsg == nil || !errMsg.DirectResponse || errMsg.StatusCode != http.StatusForbidden {
+		t.Fatalf("termination error = %#v, want 403 direct response", errMsg)
+	}
+	if afterCalls != 0 {
+		t.Fatalf("after-auth interceptor called %d times, want 0", afterCalls)
+	}
+}

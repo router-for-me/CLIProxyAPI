@@ -126,3 +126,74 @@ func TestMetaStream_ClientDisconnectBeforeTerminalEventIsFailed(t *testing.T) {
 		t.Fatalf("Fail.StatusCode = %d, want %d", record.Fail.StatusCode, clienterror.StatusClientClosedRequest)
 	}
 }
+
+func TestMetaStream_CleanEOFBeforeTerminalEventIsFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, metaTerminalDisconnectDelta)
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		ID:       t.Name(),
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	capture := &metaTerminalDisconnectUsageCapture{authID: auth.ID, records: make(chan usage.Record, 1)}
+	usage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), metaTerminalDisconnectUsageNoop{})
+	})
+
+	result, errExecute := NewMetaExecutor(&config.Config{}).ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: []byte(`{"model":"muse-wonder-1.0","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+
+	var streamed strings.Builder
+	var streamErr error
+	for chunk := range result.Chunks {
+		streamed.Write(chunk.Payload)
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if !strings.Contains(streamed.String(), "hello") {
+		t.Fatalf("partial output missing from stream: %q", streamed.String())
+	}
+	if streamErr == nil {
+		t.Fatal("clean EOF without a terminal event did not produce a stream error")
+	}
+	statusErr, okStatus := streamErr.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("stream error status = %v, want %d", streamErr, http.StatusBadGateway)
+	}
+	truncatedErr, okTruncated := streamErr.(cliproxyexecutor.StreamTruncatedError)
+	if !okTruncated || !truncatedErr.IsStreamTruncated() {
+		t.Fatalf("stream error = %T (%v), want IsStreamTruncated() = true", streamErr, streamErr)
+	}
+
+	select {
+	case record := <-capture.records:
+		if !record.Failed {
+			t.Fatal("usage record not marked failed")
+		}
+		if record.Fail.StatusCode != http.StatusBadGateway {
+			t.Fatalf("Fail.StatusCode = %d, want %d", record.Fail.StatusCode, http.StatusBadGateway)
+		}
+		if record.Fail.Code != usage.FailureStreamTruncatedCode {
+			t.Fatalf("Fail.Code = %q, want %q", record.Fail.Code, usage.FailureStreamTruncatedCode)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}

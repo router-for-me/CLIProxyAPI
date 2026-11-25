@@ -20,6 +20,32 @@ func TestConvertInteractionsRequestToGeminiStringInput(t *testing.T) {
 	}
 }
 
+func TestConvertInteractionsRequestToGeminiMergesMultipartUserInput(t *testing.T) {
+	input := []byte(`{"model":"gemini-3-flash","input":[{"type":"user_input","content":[{"type":"text","text":"What is in this image?"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}]}]}`)
+
+	out, errConvert := ConvertInteractionsRequestToGemini("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("contents length = %d, want 1. Output: %s", len(contents), string(out))
+	}
+	if role := contents[0].Get("role").String(); role != "user" {
+		t.Fatalf("contents.0.role = %q, want user. Output: %s", role, string(out))
+	}
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("contents.0.parts length = %d, want 2. Output: %s", len(parts), string(out))
+	}
+	if text := parts[0].Get("text").String(); text != "What is in this image?" {
+		t.Fatalf("contents.0.parts.0.text = %q, want question text. Output: %s", text, string(out))
+	}
+	if data := parts[1].Get("inlineData.data").String(); data != "iVBORw0KGgo=" {
+		t.Fatalf("contents.0.parts.1.inlineData.data = %q, want image data. Output: %s", data, string(out))
+	}
+}
+
 func TestConvertInteractionsRequestToGeminiSystemAndGenerationConfig(t *testing.T) {
 	out, _ := ConvertInteractionsRequestToGemini("gemini-3.5-flash", []byte(`{"model":"gemini-3.5-flash","system_instruction":{"text":"be brief"},"generation_config":{"max_output_tokens":32,"top_p":0.8},"input":"hi"}`), false)
 	if got := ojson.GetBytesNoCopy(out, "systemInstruction.parts.0.text").String(); got != "be brief" {

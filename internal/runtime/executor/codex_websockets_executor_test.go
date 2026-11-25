@@ -524,6 +524,56 @@ func TestExistingWebsocketSessionConnRequiresMatchingHealthyConnection(t *testin
 	}
 }
 
+func TestCodexWebsocketExecuteStreamHandlesNilAuthWithoutPanicking(t *testing.T) {
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		opts       cliproxyexecutor.Options
+		wantStatus int
+	}{
+		{
+			name: "compact stream",
+			ctx:  context.Background(),
+			opts: cliproxyexecutor.Options{
+				Alt: "responses/compact",
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "required websocket",
+			ctx: cliproxyexecutor.WithRequiredUpstreamWebsocket(
+				context.Background(),
+			),
+			opts: cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:         true,
+			},
+			wantStatus: http.StatusUpgradeRequired,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+			_, errExecute := exec.ExecuteStream(tc.ctx, nil, cliproxyexecutor.Request{
+				Model:   "gpt-5.4",
+				Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"hello"}]}`),
+			}, tc.opts)
+			if errExecute == nil {
+				t.Fatal("ExecuteStream() error = nil, want graceful status error")
+			}
+			status, ok := errExecute.(interface{ StatusCode() int })
+			if !ok {
+				t.Fatalf("ExecuteStream() error = %T %v, want status error", errExecute, errExecute)
+			}
+			if got := status.StatusCode(); got != tc.wantStatus {
+				t.Fatalf("ExecuteStream() status = %d, want %d", got, tc.wantStatus)
+			}
+		})
+	}
+}
+
 func TestCodexAutoExecutorRequiredUpstreamWebsocketRejectsHTTPFallback(t *testing.T) {
 	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{
