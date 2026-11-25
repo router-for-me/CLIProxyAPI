@@ -2,17 +2,23 @@ package executor
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -357,15 +363,27 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	if !ok {
 		t.Fatalf("error should expose status code, got %T", err)
 	}
-	if got := status.StatusCode(); got != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	if got := status.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	scoped, okScoped := err.(interface{ IsCredentialScoped() bool })
+	if !okScoped || !scoped.IsCredentialScoped() {
+		t.Fatalf("missing project_id error should be credential-scoped, got %T (%v)", err, err)
 	}
 }
 
 func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T) {
 	sseResponse := "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n"
 	for _, model := range []string{"claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
-		for _, level := range []string{"low", "medium", "high"} {
+		for _, tc := range []struct {
+			level string
+			want  string
+		}{
+			{level: "low", want: "LOW"},
+			{level: "medium", want: "MEDIUM"},
+			{level: "high", want: "HIGH"},
+		} {
+			level := tc.level
 			for _, stream := range []bool{false, true} {
 				modeName := "non_stream"
 				if stream {
@@ -425,8 +443,8 @@ func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T
 						}
 					}
 
-					if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
-						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, capturedBody)
+					if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.want {
+						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, tc.want, capturedBody)
 					}
 					if budget := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
 						t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
@@ -437,6 +455,103 @@ func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T
 				})
 			}
 		}
+	}
+}
+
+func TestAntigravityExecutor_Gemini4EmitsUppercaseThinkingLevelAndRespectsPayloadOverride(t *testing.T) {
+	nonStreamResponse := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+	sseResponse := "data: " + nonStreamResponse + "\n\n"
+
+	cases := []struct {
+		name     string
+		model    string
+		level    string
+		stream   bool
+		override string
+		want     string
+	}{
+		{name: "neon_xhigh_non_stream", model: "gemini-4-neon-xhigh", level: "xhigh", stream: false, want: "XHIGH"},
+		{name: "neon_xhigh_stream", model: "gemini-4-neon-xhigh", level: "xhigh", stream: true, want: "XHIGH"},
+		{name: "argon_high_non_stream", model: "gemini-4-argon-high", level: "high", stream: false, want: "HIGH"},
+		{name: "argon_high_stream", model: "gemini-4-argon-high", level: "high", stream: true, want: "HIGH"},
+		{name: "payload_override_wins_over_uppercase", model: "gemini-4-neon-xhigh", level: "xhigh", stream: false, override: "medium", want: "medium"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBody []byte
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				raw, errRead := io.ReadAll(req.Body)
+				if errRead != nil {
+					return nil, errRead
+				}
+				if errClose := req.Body.Close(); errClose != nil {
+					return nil, errClose
+				}
+				capturedBody = raw
+				contentType := "application/json"
+				bodyText := nonStreamResponse
+				if tc.stream {
+					contentType = "text/event-stream"
+					bodyText = sseResponse
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {contentType}},
+					Body:       io.NopCloser(strings.NewReader(bodyText)),
+					Request:    req,
+				}, nil
+			}))
+
+			cfg := &config.Config{}
+			if tc.override != "" {
+				cfg.Payload.Override = []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "*"}},
+					Params: map[string]any{"generationConfig.thinkingConfig.thinkingLevel": tc.override},
+				}}
+			}
+			executor := NewAntigravityExecutor(cfg)
+			auth := &cliproxyauth.Auth{
+				ID:       "ag-gemini4-thinking-level-test",
+				Provider: "antigravity",
+				Metadata: map[string]any{
+					"access_token": "token",
+					"project_id":   "project-1",
+					"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+				},
+			}
+			payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply OK"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + tc.level + `"}}}`)
+			req := cliproxyexecutor.Request{Model: tc.model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatGemini,
+				ResponseFormat:  sdktranslator.FormatGemini,
+				OriginalRequest: payload,
+				Stream:          tc.stream,
+			}
+
+			if tc.stream {
+				res, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range res.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else {
+				if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute() error = %v", errExec)
+				}
+			}
+
+			if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.want {
+				t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, tc.want, capturedBody)
+			}
+			if budget := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+				t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
+			}
+		})
 	}
 }
 
@@ -625,4 +740,940 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	if _, ok := mode["deprecated"]; ok {
 		t.Fatalf("deprecated should be removed from nested schema")
 	}
+}
+
+func assertSignedInt64RequestSessionID(t *testing.T, sessionID string) int64 {
+	t.Helper()
+	parsed, errParse := strconv.ParseInt(sessionID, 10, 64)
+	if errParse != nil || strconv.FormatInt(parsed, 10) != sessionID {
+		t.Fatalf("request.sessionId = %q, want canonical signed int64 decimal (err=%v)", sessionID, errParse)
+	}
+	return parsed
+}
+
+func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T) {
+	t.Parallel()
+
+	executor := NewAntigravityExecutor(&config.Config{})
+
+	captureSessionID := func(t *testing.T, authID, kind, model, userText string, metadata map[string]any) string {
+		t.Helper()
+		var capturedBody []byte
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			var errRead error
+			capturedBody, errRead = io.ReadAll(req.Body)
+			if errRead != nil {
+				return nil, errRead
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"captured"}}`)),
+			}, nil
+		}))
+		auth := &cliproxyauth.Auth{
+			ID: authID,
+			Metadata: map[string]any{
+				"access_token": "token",
+				"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+				"project_id":   "project-1",
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   model,
+			Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"` + userText + `"}]}]}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+			Metadata:       metadata,
+		}
+		switch kind {
+		case "execute":
+			_, _ = executor.Execute(ctx, auth, req, opts)
+		case "stream":
+			_, _ = executor.ExecuteStream(ctx, auth, req, opts)
+		default:
+			t.Fatalf("unknown route kind %q", kind)
+		}
+		if len(capturedBody) == 0 {
+			t.Fatalf("expected upstream request body to be captured for auth=%s kind=%s model=%s", authID, kind, model)
+		}
+		sessionID := ojson.GetBytes(capturedBody, "request.sessionId").String()
+		assertSignedInt64RequestSessionID(t, sessionID)
+		return sessionID
+	}
+
+	t.Run("canonical session stays stable across models and turns on same credential and rotates on failover", func(t *testing.T) {
+		meta := map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude:sess-7706",
+		}
+		authAGemini := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", "first turn text", meta)
+		authAClaude := captureSessionID(t, "auth-a", "execute", "claude-sonnet-4-6", "different compacted turn text", meta)
+		authAStream := captureSessionID(t, "auth-a", "stream", "gemini-3.7-flash-high", "stream turn text", meta)
+		if authAGemini != authAClaude || authAGemini != authAStream {
+			t.Fatalf("same credential + canonical session produced unstable request.sessionId: gemini=%q claude=%q stream=%q", authAGemini, authAClaude, authAStream)
+		}
+
+		authBGemini := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "first turn text", meta)
+		authBClaude := captureSessionID(t, "auth-b", "execute", "claude-sonnet-4-6", "first turn text", meta)
+		authBStream := captureSessionID(t, "auth-b", "stream", "gemini-3.6-flash-high", "first turn text", meta)
+		if authBGemini == authAGemini {
+			t.Fatalf("failover credential auth-b reused auth-a request.sessionId %q", authBGemini)
+		}
+		if authBGemini != authBClaude || authBGemini != authBStream {
+			t.Fatalf("failover credential auth-b produced unstable request.sessionId across paths: gemini=%q claude=%q stream=%q", authBGemini, authBClaude, authBStream)
+		}
+	})
+
+	t.Run("derived session rotates across credential failover", func(t *testing.T) {
+		meta := map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-7706",
+		}
+		authAFirst := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", "prompt", meta)
+		authASecond := captureSessionID(t, "auth-a", "stream", "claude-sonnet-4-6", "different prompt", meta)
+		if authAFirst != authASecond {
+			t.Fatalf("same credential + derived session changed: first=%q second=%q", authAFirst, authASecond)
+		}
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "prompt", meta)
+		if authB == authAFirst {
+			t.Fatalf("failover credential auth-b reused auth-a derived request.sessionId %q", authB)
+		}
+	})
+
+	t.Run("content fallback rotates across credential failover", func(t *testing.T) {
+		authAFirst := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", "shared first prompt", nil)
+		authASecond := captureSessionID(t, "auth-a", "stream", "gemini-3.7-flash-high", "shared first prompt", nil)
+		if authAFirst != authASecond {
+			t.Fatalf("same credential + content fallback changed: first=%q second=%q", authAFirst, authASecond)
+		}
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "shared first prompt", nil)
+		if authB == authAFirst {
+			t.Fatalf("failover credential auth-b reused auth-a content-fallback request.sessionId %q", authB)
+		}
+	})
+}
+
+func TestAntigravityExecutorIncomingSessionIDScopedPerCredentialAndSubagent(t *testing.T) {
+	t.Parallel()
+
+	executor := NewAntigravityExecutor(&config.Config{})
+
+	captureSessionID := func(t *testing.T, authID, kind, model string, sourceFormat sdktranslator.Format, payload []byte, enrich bool, metadata map[string]any) string {
+		t.Helper()
+		var capturedBody []byte
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			var errRead error
+			capturedBody, errRead = io.ReadAll(req.Body)
+			if errRead != nil {
+				return nil, errRead
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"captured"}}`)),
+			}, nil
+		}))
+		auth := &cliproxyauth.Auth{
+			ID: authID,
+			Metadata: map[string]any{
+				"access_token": "token",
+				"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+				"project_id":   "project-1",
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   model,
+			Payload: payload,
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sourceFormat,
+			ResponseFormat: sourceFormat,
+			Metadata:       metadata,
+		}
+		if enrich {
+			req, opts = cliproxysession.Enrich(req, opts)
+		}
+		switch kind {
+		case "execute":
+			_, _ = executor.Execute(ctx, auth, req, opts)
+		case "stream":
+			_, _ = executor.ExecuteStream(ctx, auth, req, opts)
+		default:
+			t.Fatalf("unknown route kind %q", kind)
+		}
+		if len(capturedBody) == 0 {
+			t.Fatalf("expected upstream request body to be captured for auth=%s kind=%s model=%s", authID, kind, model)
+		}
+		sessionID := ojson.GetBytes(capturedBody, "request.sessionId").String()
+		assertSignedInt64RequestSessionID(t, sessionID)
+		return sessionID
+	}
+
+	const rawSessionID = "-987654321"
+	parentGeminiPayload := []byte(`{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	workerGeminiPayload := []byte(`{"sessionId":"-987654321","metadata":{"agent_id":"swarm-worker-1"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	nestedAntigravityPayload := []byte(`{"request":{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	nestedWorkerPayload := []byte(`{"request":{"sessionId":"-987654321","metadata":{"agent_id":"swarm-worker-1"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+
+	t.Run("gemini incoming sessionId scopes per credential and isolates subagents", func(t *testing.T) {
+		authAGemini := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authAClaude := captureSessionID(t, "auth-a", "execute", "claude-sonnet-4-6", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authAStream := captureSessionID(t, "auth-a", "stream", "gemini-3.7-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		if authAGemini == rawSessionID {
+			t.Fatalf("auth-a emitted raw incoming request.sessionId %q without credential scoping", authAGemini)
+		}
+		if authAGemini != authAClaude || authAGemini != authAStream {
+			t.Fatalf("same credential + incoming sessionId unstable across paths: gemini=%q claude=%q stream=%q", authAGemini, authAClaude, authAStream)
+		}
+
+		authBFailover := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authBFailoverStream := captureSessionID(t, "auth-b", "stream", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		if authBFailover == rawSessionID || authBFailover == authAGemini {
+			t.Fatalf("failover credential auth-b leaked parent sessionId: got=%q authA=%q raw=%q", authBFailover, authAGemini, rawSessionID)
+		}
+		if authBFailover != authBFailoverStream {
+			t.Fatalf("failover credential auth-b unstable across execute/stream: exec=%q stream=%q", authBFailover, authBFailoverStream)
+		}
+
+		workerOnB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		workerOnBStream := captureSessionID(t, "auth-b", "stream", "claude-sonnet-4-6", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		if workerOnB == rawSessionID || workerOnB == authAGemini || workerOnB == authBFailover {
+			t.Fatalf("subagent on auth-b leaked parent sessionId: worker=%q authA=%q authB=%q raw=%q", workerOnB, authAGemini, authBFailover, rawSessionID)
+		}
+		if workerOnB != workerOnBStream {
+			t.Fatalf("subagent on auth-b unstable across execute/stream: exec=%q stream=%q", workerOnB, workerOnBStream)
+		}
+
+		workerOnA := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		if workerOnA == rawSessionID || workerOnA == authAGemini || workerOnA == workerOnB {
+			t.Fatalf("subagent on auth-a collided with parent or auth-b worker: workerOnA=%q authA=%q workerOnB=%q", workerOnA, authAGemini, workerOnB)
+		}
+	})
+
+	t.Run("native antigravity incoming request.sessionId scopes per credential and subagent", func(t *testing.T) {
+		authA := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatAntigravity, nestedAntigravityPayload, true, nil)
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatAntigravity, nestedAntigravityPayload, true, nil)
+		workerB := captureSessionID(t, "auth-b", "stream", "gemini-3.6-flash-high", sdktranslator.FormatAntigravity, nestedWorkerPayload, true, nil)
+		if authA == rawSessionID || authB == rawSessionID || workerB == rawSessionID {
+			t.Fatalf("native antigravity emitted raw incoming sessionId: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+		if authA == authB || workerB == authA || workerB == authB {
+			t.Fatalf("native antigravity failed to isolate credentials/subagent: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+	})
+
+	t.Run("unenriched direct call with auth ID still scopes incoming sessionId per credential", func(t *testing.T) {
+		authAFirst := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		authASecond := captureSessionID(t, "auth-a", "stream", "claude-sonnet-4-6", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		if authAFirst == rawSessionID {
+			t.Fatalf("unenriched auth-a emitted raw incoming sessionId %q", authAFirst)
+		}
+		if authAFirst != authASecond {
+			t.Fatalf("unenriched auth-a unstable across paths: first=%q second=%q", authAFirst, authASecond)
+		}
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		if authB == rawSessionID || authB == authAFirst {
+			t.Fatalf("unenriched failover credential auth-b leaked auth-a sessionId: authA=%q authB=%q", authAFirst, authB)
+		}
+	})
+
+	t.Run("anonymous auth ID preserves explicit request.sessionId verbatim", func(t *testing.T) {
+		got := captureSessionID(t, "", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		if got != rawSessionID {
+			t.Fatalf("anonymous auth ID request.sessionId = %q, want verbatim %q", got, rawSessionID)
+		}
+	})
+
+	t.Run("image model scopes incoming sessionId per credential and subagent without synthesizing when absent", func(t *testing.T) {
+		authA := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		workerB := captureSessionID(t, "auth-b", "stream", "gemini-3.1-flash-image", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		if authA == rawSessionID || authB == rawSessionID || workerB == rawSessionID {
+			t.Fatalf("image model emitted raw incoming sessionId: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+		if authA == authB || workerB == authA || workerB == authB {
+			t.Fatalf("image model failed to isolate credentials/subagent: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+
+		authAUnenriched := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		authBUnenriched := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		if authAUnenriched == rawSessionID || authBUnenriched == rawSessionID || authAUnenriched == authBUnenriched {
+			t.Fatalf("unenriched image model leaked incoming sessionId: authA=%q authB=%q", authAUnenriched, authBUnenriched)
+		}
+
+		authNoSession := &cliproxyauth.Auth{ID: "auth-a", Metadata: map[string]any{"project_id": "project-1"}}
+		docNoSession := ojson.NewDoc([]byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"draw"}]}]}}`))
+		_, finalNoSession, errNoSession := executor.buildRequestDoc(context.Background(), authNoSession, "token", "gemini-3.1-flash-image", docNoSession, false, "", "https://example.com", "-123456789")
+		if errNoSession != nil {
+			t.Fatalf("buildRequestDoc image without incoming sessionId error: %v", errNoSession)
+		}
+		if ojson.GetBytes(finalNoSession, "request.sessionId").Exists() {
+			t.Fatalf("image model without incoming sessionId should not synthesize request.sessionId: %s", string(finalNoSession))
+		}
+	})
+
+	t.Run("web_search request scopes incoming sessionId per credential and subagent without synthesizing when absent", func(t *testing.T) {
+		webSearchParent := []byte(`{"requestType":"web_search","request":{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"weather"}]}],"tools":[{"googleSearch":{}}]}}`)
+		webSearchWorker := []byte(`{"requestType":"web_search","request":{"sessionId":"-987654321","metadata":{"agent_id":"swarm-worker-1"},"contents":[{"role":"user","parts":[{"text":"weather"}]}],"tools":[{"googleSearch":{}}]}}`)
+
+		authA := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, true, nil)
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, true, nil)
+		workerB := captureSessionID(t, "auth-b", "stream", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchWorker, true, nil)
+		if authA == rawSessionID || authB == rawSessionID || workerB == rawSessionID {
+			t.Fatalf("web_search emitted raw incoming sessionId: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+		if authA == authB || workerB == authA || workerB == authB {
+			t.Fatalf("web_search failed to isolate credentials/subagent: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+
+		authAUnenriched := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, false, nil)
+		authBUnenriched := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, false, nil)
+		if authAUnenriched == rawSessionID || authBUnenriched == rawSessionID || authAUnenriched == authBUnenriched {
+			t.Fatalf("unenriched web_search leaked incoming sessionId: authA=%q authB=%q", authAUnenriched, authBUnenriched)
+		}
+
+		authNoSession := &cliproxyauth.Auth{ID: "auth-a", Metadata: map[string]any{"project_id": "project-1"}}
+		docNoSession := ojson.NewDoc([]byte(`{"requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":"weather"}]}],"tools":[{"googleSearch":{}}]}}`))
+		_, finalNoSession, errNoSession := executor.buildRequestDoc(context.Background(), authNoSession, "token", "gemini-3.1-flash-lite", docNoSession, false, "", "https://example.com", "-123456789")
+		if errNoSession != nil {
+			t.Fatalf("buildRequestDoc web_search without incoming sessionId error: %v", errNoSession)
+		}
+		if ojson.GetBytes(finalNoSession, "request.sessionId").Exists() {
+			t.Fatalf("web_search without incoming sessionId should not synthesize request.sessionId: %s", string(finalNoSession))
+		}
+	})
+
+	t.Run("payload override and filter remain final barrier with auth ID", func(t *testing.T) {
+		captureWithConfig := func(t *testing.T, cfg *config.Config) []byte {
+			t.Helper()
+			execWithCfg := NewAntigravityExecutor(cfg)
+			var capturedBody []byte
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				var errRead error
+				capturedBody, errRead = io.ReadAll(req.Body)
+				if errRead != nil {
+					return nil, errRead
+				}
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"captured"}}`)),
+				}, nil
+			}))
+			auth := &cliproxyauth.Auth{
+				ID: "auth-a",
+				Metadata: map[string]any{
+					"access_token": "token",
+					"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+					"project_id":   "project-1",
+				},
+			}
+			req, opts := cliproxysession.Enrich(
+				cliproxyexecutor.Request{Model: "gemini-3.6-flash-high", Payload: parentGeminiPayload},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini},
+			)
+			_, _ = execWithCfg.Execute(ctx, auth, req, opts)
+			if len(capturedBody) == 0 {
+				t.Fatalf("expected upstream request body to be captured")
+			}
+			return capturedBody
+		}
+
+		overrideBody := captureWithConfig(t, &config.Config{Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "gemini-*"}},
+				Params: map[string]any{"sessionId": "-42"},
+			}},
+		}})
+		if got := ojson.GetBytes(overrideBody, "request.sessionId").String(); got != "-42" {
+			t.Fatalf("payload override request.sessionId = %q, want -42", got)
+		}
+
+		filterBody := captureWithConfig(t, &config.Config{Payload: config.PayloadConfig{
+			Filter: []config.PayloadFilterRule{{
+				Models: []config.PayloadModelRule{{Name: "gemini-*"}},
+				Params: []string{"sessionId"},
+			}},
+		}})
+		if !ojson.GetBytes(filterBody, "request.contents").Exists() {
+			t.Fatalf("expected filtered upstream request to retain request.contents: %s", string(filterBody))
+		}
+		if ojson.GetBytes(filterBody, "request.sessionId").Exists() {
+			t.Fatalf("payload filter did not remove request.sessionId: %s", string(filterBody))
+		}
+	})
+}
+
+// TestAntigravityPrepareRequestAuth_DiscoveryTransportErrorIsNotClientFault
+// verifies that a project-discovery failure without an upstream HTTP status
+// (for example a proxy connect error) is reported as a transient transport
+// problem rather than an invalid-request 400, so the conductor does not halt
+// credential rotation on a request that could succeed on another credential.
+func TestAntigravityPrepareRequestAuth_DiscoveryTransportErrorIsNotClientFault(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		"access_token": "token",
+		"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("proxy connect: connection refused")
+	}))
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail on transport error")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error should expose StatusCode(), got %T (%v)", err, err)
+	}
+	if got := status.StatusCode(); got == http.StatusBadRequest {
+		t.Fatalf("status code = %d, transport failure must not masquerade as invalid-request 400", got)
+	}
+}
+
+// TestAntigravityPrepareRequestAuth_MissingRefreshTokenIsNotUpstreamAttempt
+// verifies that a credential missing a refresh token fails as a local
+// preparation error and does not mark an upstream attempt, so it cannot
+// outrank a genuine upstream rejection recorded earlier in the round.
+func TestAntigravityPrepareRequestAuth_MissingRefreshTokenIsNotUpstreamAttempt(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		// access_token present but already expired and no refresh_token: the
+		// credential fails locally before any HTTP request is issued.
+		"access_token": "expired-token",
+		"expired":      time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail without refresh token")
+	}
+	if cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatalf("missing refresh token must not mark an upstream attempt")
+	}
+}
+
+// TestAntigravityPrepareRequestAuth_OAuthRefreshFailureMarksUpstreamAttempt
+// verifies that a genuine upstream rejection during OAuth token refresh (e.g.
+// a 403 from the token endpoint) marks the request's upstream-attempt tracker,
+// so the conductor can attribute it as a real upstream error that outranks
+// later local credential-preparation failures.
+func TestAntigravityPrepareRequestAuth_OAuthRefreshFailureMarksUpstreamAttempt(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		// expired access token + refresh token: forces the OAuth refresh path,
+		// which performs a real upstream HTTP call that fails with 403.
+		"access_token":  "expired-token",
+		"refresh_token": "refresh-token",
+		"expired":       time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"access_denied"}`)),
+		}, nil
+	}))
+	ctx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail on upstream 403 during refresh")
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatalf("upstream refresh 403 should mark the upstream attempt tracker")
+	}
+}
+
+// TestAntigravityPrepareRequestAuth_SharedRefreshFailureMarksEachTracker
+// verifies that when concurrent requests share one singleflight OAuth refresh
+// that fails upstream, EACH request's own upstream-attempt tracker is marked —
+// not only the tracker of the request that led the flight.
+func TestAntigravityPrepareRequestAuth_SharedRefreshFailureMarksEachTracker(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	newAuth := func() *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "shared-refresh-token",
+			"expired":       time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+		}}
+	}
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		// Slow enough that both callers join the same singleflight refresh.
+		time.Sleep(50 * time.Millisecond)
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"access_denied"}`)),
+		}, nil
+	})
+	newCtx := func() context.Context {
+		c := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+		return cliproxyexecutor.WithUpstreamAttemptTracker(c)
+	}
+
+	ctxA, ctxB := newCtx(), newCtx()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = executor.PrepareRequestAuth(ctxA, newAuth()) }()
+	go func() { defer wg.Done(); _, _ = executor.PrepareRequestAuth(ctxB, newAuth()) }()
+	wg.Wait()
+
+	if !cliproxyexecutor.UpstreamAttempted(ctxA) {
+		t.Fatalf("request A tracker was not marked on shared upstream refresh failure")
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctxB) {
+		t.Fatalf("request B tracker was not marked on shared upstream refresh failure")
+	}
+}
+
+func TestGenerateStableSessionID_ScansAllUserPartsForMultimodalTurn1(t *testing.T) {
+	t.Parallel()
+
+	turn1Inline := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+						{"text": "describe this"}
+					]
+				}
+			]
+		}
+	}`)
+	turn1And2Inline := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+						{"text": "describe this"}
+					]
+				},
+				{
+					"role": "model",
+					"parts": [{"text": "It is a diagram."}]
+				},
+				{
+					"role": "user",
+					"parts": [{"text": "now summarize it"}]
+				}
+			]
+		}
+	}`)
+	turn1Plain := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "describe this"}]
+				}
+			]
+		}
+	}`)
+
+	idTurn1 := generateStableSessionID(turn1Inline)
+	idTurn1And2 := generateStableSessionID(turn1And2Inline)
+	idPlain := generateStableSessionID(turn1Plain)
+	if idTurn1 != idPlain {
+		t.Fatalf("multimodal turn 1 sessionId = %q, want deterministic hash %q matching text part", idTurn1, idPlain)
+	}
+	if idTurn1 != idTurn1And2 {
+		t.Fatalf("sessionId changed between turn 1 (%q) and turn 2 (%q)", idTurn1, idTurn1And2)
+	}
+
+	turn1FileAndEmpty := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"fileData": {"mimeType": "application/pdf", "fileUri": "gs://bucket/doc.pdf"}},
+						{"text": ""},
+						{"text": "summarize pdf"}
+					]
+				}
+			]
+		}
+	}`)
+	turn1And2FileAndEmpty := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"fileData": {"mimeType": "application/pdf", "fileUri": "gs://bucket/doc.pdf"}},
+						{"text": ""},
+						{"text": "summarize pdf"}
+					]
+				},
+				{
+					"role": "model",
+					"parts": [{"text": "Summary."}]
+				},
+				{
+					"role": "user",
+					"parts": [{"text": "details please"}]
+				}
+			]
+		}
+	}`)
+
+	docTurn1 := ojson.NewDoc(turn1FileAndEmpty)
+	docTurn1And2 := ojson.NewDoc(turn1And2FileAndEmpty)
+	authATurn1 := generateStableSessionIDDocForAuth(docTurn1, "auth-a")
+	authATurn2 := generateStableSessionIDDocForAuth(docTurn1And2, "auth-a")
+	authBTurn1 := generateStableSessionIDDocForAuth(docTurn1, "auth-b")
+	if authATurn1 != authATurn2 {
+		t.Fatalf("auth-scoped multimodal sessionId changed between turn 1 (%q) and turn 2 (%q)", authATurn1, authATurn2)
+	}
+	if authATurn1 == authBTurn1 {
+		t.Fatalf("different authIDs produced identical multimodal sessionId %q", authATurn1)
+	}
+}
+
+func TestAntigravityBuildRequest_CaseInsensitiveClaudeModel(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {"maxOutputTokens": 2048},
+			"tools": [
+				{
+					"functionDeclarations": [
+						{
+							"name": "pick_item",
+							"parametersJsonSchema": {
+								"type": "object",
+								"properties": {
+									"item": {
+										"anyOf": [
+											{"type": "string"},
+											{"type": "object", "properties": {"image": {"type": "string"}}},
+											{"type": "object", "properties": {"audio": {"type": "string"}}}
+										]
+									}
+								}
+							}
+						},
+						{
+							"name": "ping",
+							"parameters": {"type": "object"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	for _, modelName := range []string{"Claude-Sonnet-5-5", "CLAUDE-OPUS-5-5"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
+				t.Fatalf("model %q: mode = %q, want VALIDATED", modelName, got)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 2048 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want 2048", modelName, got)
+			}
+			firstParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.0.parameters")
+			if !firstParams.Exists() {
+				t.Fatalf("model %q: expected parameters after parametersJsonSchema rename", modelName)
+			}
+			if firstParams.Get("properties.item.anyOf").Exists() {
+				t.Fatalf("model %q: expected Claude multi-branch anyOf union to be flattened, got %s", modelName, firstParams.Raw)
+			}
+			secondParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.1.parameters")
+			if !secondParams.Get("properties.reason").Exists() {
+				t.Fatalf("model %q: expected Antigravity placeholder property on empty object schema, got %s", modelName, secondParams.Raw)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_CaseInsensitiveClaudeCapsMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {"maxOutputTokens": 100000}
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	for _, modelName := range []string{"claude-sonnet-4-6", "Claude-Sonnet-4-6"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want capped 64000", modelName, got)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_ThinkingGroupPreservesSmallerMaxOutputTokensAndClampsBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, budgetPath, payload string
+		wantMax, wantBudget       int64
+	}{
+		{"camel case budget with smaller caller limit", "thinkingBudget", `{"maxOutputTokens":32000,"thinkingConfig":{"thinkingBudget":40000}}`, 32000, 31999},
+		{"snake case output and budget with smaller caller limit", "thinking_budget", `{"max_output_tokens":32000,"thinkingConfig":{"thinking_budget":40000}}`, 32000, 31999},
+		{"caller limit above group cap", "thinkingBudget", `{"maxOutputTokens":70000,"thinkingConfig":{"thinkingBudget":68000}}`, 65536, 65535},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":` + tc.payload + `}}`)
+			executor := &AntigravityExecutor{}
+			auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+			selection := cliproxyauth.AntigravityModelSelection{ID: "claude-sonnet-4-6-high", MaxOutputTokens: 65536}
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestForModelDoc(context.Background(), auth, "token", selection, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestForModelDoc error: %v", errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens"); got.Exists() {
+				t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != tc.wantMax {
+				t.Fatalf("maxOutputTokens = %d, want %d", got, tc.wantMax)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig."+tc.budgetPath).Int(); got != tc.wantBudget {
+				t.Fatalf("%s = %d, want %d", tc.budgetPath, got, tc.wantBudget)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_CapsThinkingBudgetWithMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"maxOutputTokens": 100000,
+				"thinkingConfig": {"thinkingBudget": 64000}
+			}
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	for _, modelName := range []string{"claude-sonnet-4-6", "Claude-Sonnet-4-6", "claude-opus-4-6-thinking"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want capped 64000", modelName, got)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+				t.Fatalf("model %q: thinkingBudget = %d, want 63999", modelName, got)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_CaseInsensitiveGeminiProAndImageModels(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+
+	proPayload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {"maxOutputTokens": 2048},
+			"tools": [
+				{
+					"functionDeclarations": [
+						{
+							"name": "pick_item",
+							"parameters": {
+								"type": "object",
+								"properties": {
+									"item": {
+										"anyOf": [
+											{"type": "string"},
+											{"type": "object", "properties": {"image": {"type": "string"}}},
+											{"type": "object", "properties": {"audio": {"type": "string"}}}
+										]
+									}
+								}
+							}
+						},
+						{
+							"name": "ping",
+							"parameters": {"type": "object"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	for _, modelName := range []string{"Gemini-3-Pro", "Gemini-3.1-Pro"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(proPayload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").Exists() {
+				t.Fatalf("model %q: unexpected VALIDATED mode on Gemini model", modelName)
+			}
+			if ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Exists() {
+				t.Fatalf("model %q: maxOutputTokens should be removed for non-Claude model", modelName)
+			}
+			firstParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.0.parameters")
+			if got := len(firstParams.Get("properties.item.anyOf").Array()); got != 3 {
+				t.Fatalf("model %q: expected preserved 3-branch anyOf union, got %d (%s)", modelName, got, firstParams.Raw)
+			}
+			secondParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.1.parameters")
+			if !secondParams.Get("properties.reason").Exists() {
+				t.Fatalf("model %q: expected Antigravity placeholder property on empty object schema, got %s", modelName, secondParams.Raw)
+			}
+		})
+	}
+
+	t.Run("Gemini-3.1-Flash-Image", func(t *testing.T) {
+		doc := ojson.NewDoc([]byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`))
+		_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "Gemini-3.1-Flash-Image", doc, false, "", "https://example.com")
+		if errBuild != nil {
+			t.Fatalf("buildRequestDoc image model error: %v", errBuild)
+		}
+		if got := ojson.GetBytes(finalPayload, "requestType").String(); got != "image_gen" {
+			t.Fatalf("requestType = %q, want image_gen", got)
+		}
+		if got := ojson.GetBytes(finalPayload, "requestId").String(); !strings.HasPrefix(got, "image_gen/") {
+			t.Fatalf("requestId = %q, want image_gen/ prefix", got)
+		}
+		if ojson.GetBytes(finalPayload, "request.sessionId").Exists() {
+			t.Fatalf("image model request should not set request.sessionId: %s", string(finalPayload))
+		}
+	})
+}
+
+func TestAntigravityExecute_CaseInsensitiveGeminiRouteToStreamHelper(t *testing.T) {
+	t.Parallel()
+
+	for _, modelName := range []string{"Gemini-3-Pro", "Gemini-3.1-Flash-Image"} {
+		t.Run(modelName, func(t *testing.T) {
+			var capturedPath string
+			rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				capturedPath = req.URL.Path
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n")),
+				}, nil
+			})
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+			executor := &AntigravityExecutor{cfg: &config.Config{}}
+			auth := &cliproxyauth.Auth{
+				ID: "auth-case-route",
+				Metadata: map[string]any{
+					"access_token": "token",
+					"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+					"project_id":   "project-1",
+				},
+			}
+			req := cliproxyexecutor.Request{
+				Model:   modelName,
+				Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatGemini,
+				ResponseFormat: sdktranslator.FormatGemini,
+			}
+
+			_, errExec := executor.Execute(ctx, auth, req, opts)
+			if errExec != nil {
+				t.Fatalf("Execute(%q) error: %v", modelName, errExec)
+			}
+			if !strings.Contains(capturedPath, "streamGenerateContent") {
+				t.Fatalf("Execute(%q) hit path %q, want streamGenerateContent via executeClaudeNonStream", modelName, capturedPath)
+			}
+		})
+	}
+}
+
+func TestAntigravitySessionIDDistributionIncludesPositiveAndNegative(t *testing.T) {
+	t.Parallel()
+
+	t.Run("generateSessionID emits signed int64 values with both signs", func(t *testing.T) {
+		var pos, neg int
+		for i := 0; i < 128; i++ {
+			val := assertSignedInt64RequestSessionID(t, generateSessionID())
+			if val > 0 {
+				pos++
+			} else if val < 0 {
+				neg++
+			}
+		}
+		if pos == 0 || neg == 0 {
+			t.Fatalf("generateSessionID produced skewed signs: pos=%d neg=%d", pos, neg)
+		}
+	})
+
+	t.Run("generateStableSessionIDFromContentsForAuth matches FNV-1a signed int64 with both signs", func(t *testing.T) {
+		var unauthPos, unauthNeg int
+		var authPos, authNeg int
+		for i := 0; i < 64; i++ {
+			unauthPrompt := fmt.Sprintf("conversation-%d: explain topic", i)
+			unauthDoc := ojson.NewDoc([]byte(fmt.Sprintf(`{"request":{"contents":[{"role":"user","parts":[{"text":%q}]}]}}`, unauthPrompt)))
+
+			unauthID := generateStableSessionIDDocForAuth(unauthDoc, "")
+			wantUnauth := helps.HashAntigravitySessionID([]byte(unauthPrompt))
+			if unauthID != wantUnauth {
+				t.Fatalf("unauthenticated stable sessionId = %q, want %q", unauthID, wantUnauth)
+			}
+			unauthVal := assertSignedInt64RequestSessionID(t, unauthID)
+			if unauthVal > 0 {
+				unauthPos++
+			} else if unauthVal < 0 {
+				unauthNeg++
+			}
+
+			// Sequential trailing-digit prompts still avalanche across both signs when auth-scoped.
+			authPrompt := fmt.Sprintf("user prompt %d", i)
+			authDoc := ojson.NewDoc([]byte(fmt.Sprintf(`{"request":{"contents":[{"role":"user","parts":[{"text":%q}]}]}}`, authPrompt)))
+			authID := generateStableSessionIDDocForAuth(authDoc, "auth-a")
+			wantAuth := helps.HashAntigravitySessionID([]byte(authPrompt + "\x00auth-a\x00cli-proxy-api:antigravity:content-session"))
+			if authID != wantAuth {
+				t.Fatalf("auth-scoped stable sessionId = %q, want %q", authID, wantAuth)
+			}
+			authVal := assertSignedInt64RequestSessionID(t, authID)
+			if authVal > 0 {
+				authPos++
+			} else if authVal < 0 {
+				authNeg++
+			}
+		}
+		if unauthPos == 0 || unauthNeg == 0 {
+			t.Fatalf("unauthenticated generateStableSessionIDDocForAuth produced skewed signs: pos=%d neg=%d", unauthPos, unauthNeg)
+		}
+		if authPos == 0 || authNeg == 0 {
+			t.Fatalf("auth-scoped generateStableSessionIDDocForAuth produced skewed signs: pos=%d neg=%d", authPos, authNeg)
+		}
+	})
 }

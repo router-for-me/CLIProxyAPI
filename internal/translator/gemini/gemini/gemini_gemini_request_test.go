@@ -444,3 +444,155 @@ func TestConvertGeminiRequestToGemini_NormalizesParametersNumericConstraints_Iss
 		t.Errorf("responseJsonSchema.properties.Summary.minLength = %v (type %v), want number 5", got.Raw, got.Type)
 	}
 }
+
+func TestConvertGeminiRequestToGemini_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search",
+				"parameters": {
+					"type": 6,
+					"properties": {
+						"query": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}},
+						"limit": {"type": 3},
+						"verbose": {"type": 4}
+					},
+					"required": ["query"]
+				}
+			}]
+		}],
+		"generationConfig": {
+			"responseSchema": {
+				"type": 6,
+				"properties": {
+					"score": {"type": 2},
+					"empty": {"type": 7}
+				}
+			}
+		}
+	}`)
+
+	out, err := ConvertGeminiRequestToGemini("gemini-3-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToGemini returned error: %v", err)
+	}
+
+	params := ojson.GetBytesNoCopy(out, "tools.0.function_declarations.0.parametersJsonSchema")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.query.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+		{"properties.limit.type", "integer"},
+		{"properties.verbose.type", "boolean"},
+	} {
+		got := params.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("parametersJsonSchema.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+
+	respSchema := ojson.GetBytesNoCopy(out, "generationConfig.responseJsonSchema")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.score.type", "number"},
+		{"properties.empty.type", "null"},
+	} {
+		got := respSchema.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("responseJsonSchema.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+
+	t.Run("snake_case parameters_json_schema and generation_config response_json_schema", func(t *testing.T) {
+		snakeInput := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"tools": [{
+				"function_declarations": [{
+					"name": "search",
+					"parameters_json_schema": {
+						"type": 6,
+						"properties": {
+							"tags": {"type": 5, "items": {"type": 1}}
+						}
+					}
+				}]
+			}],
+			"generation_config": {
+				"response_json_schema": {
+					"type": 6,
+					"properties": {
+						"score": {"type": 2}
+					}
+				}
+			}
+		}`)
+		snakeOut, errSnake := ConvertGeminiRequestToGemini("gemini-3-flash", snakeInput, false)
+		if errSnake != nil {
+			t.Fatalf("ConvertGeminiRequestToGemini returned error: %v", errSnake)
+		}
+		snakeParams := ojson.GetBytesNoCopy(snakeOut, "tools.0.function_declarations.0.parameters_json_schema")
+		for _, tc := range []struct {
+			path string
+			want string
+		}{
+			{"type", "object"},
+			{"properties.tags.type", "array"},
+			{"properties.tags.items.type", "string"},
+		} {
+			got := snakeParams.Get(tc.path)
+			if got.Type != ojson.String || got.String() != tc.want {
+				t.Errorf("parameters_json_schema.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+			}
+		}
+		snakeResp := ojson.GetBytesNoCopy(snakeOut, "generation_config.response_json_schema")
+		for _, tc := range []struct {
+			path string
+			want string
+		}{
+			{"type", "object"},
+			{"properties.score.type", "number"},
+		} {
+			got := snakeResp.Get(tc.path)
+			if got.Type != ojson.String || got.String() != tc.want {
+				t.Errorf("generation_config.response_json_schema.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+			}
+		}
+	})
+
+	t.Run("snake_case generation_config response_schema converted to response_json_schema", func(t *testing.T) {
+		snakeInput := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generation_config": {
+				"response_schema": {
+					"type": 6,
+					"properties": {
+						"title": {"type": 1}
+					}
+				}
+			}
+		}`)
+		snakeOut, errSnake := ConvertGeminiRequestToGemini("gemini-3-flash", snakeInput, false)
+		if errSnake != nil {
+			t.Fatalf("ConvertGeminiRequestToGemini returned error: %v", errSnake)
+		}
+		if ojson.GetBytesNoCopy(snakeOut, "generation_config.response_schema").Exists() {
+			t.Fatalf("expected generation_config.response_schema to be replaced by response_json_schema: %s", snakeOut)
+		}
+		snakeResp := ojson.GetBytesNoCopy(snakeOut, "generation_config.response_json_schema")
+		if got := snakeResp.Get("type"); got.Type != ojson.String || got.String() != "object" {
+			t.Errorf("generation_config.response_json_schema.type = %s (type %v), want string object", got.Raw, got.Type)
+		}
+		if got := snakeResp.Get("properties.title.type"); got.Type != ojson.String || got.String() != "string" {
+			t.Errorf("generation_config.response_json_schema.properties.title.type = %s (type %v), want string", got.Raw, got.Type)
+		}
+	})
+}

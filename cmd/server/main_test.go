@@ -1,17 +1,11 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"io/fs"
-	"os"
+	"bytes"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/yaml.v3"
 )
 
 func TestArgvEnablesBoolFlag(t *testing.T) {
@@ -229,74 +223,18 @@ func TestResolveManagementBaseURL(t *testing.T) {
 	}
 }
 
-const seededConfigTestSecret = "git-seed-plaintext-secret"
-
-// persistSeededConfigForTest seeds content into configFilePath and returns what each
-// persist call found in that file.
-func persistSeededConfigForTest(t *testing.T, configFilePath, content string) ([]string, error) {
-	t.Helper()
-	if errMkdir := os.MkdirAll(filepath.Dir(configFilePath), 0o700); errMkdir != nil {
-		t.Fatalf("create config directory: %v", errMkdir)
+func TestLoadPluginBootstrapConfigDoesNotRewriteFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("port: 8317\nmanagement:\n  secret-key: bootstrap-secret\n")
+	if errCreate := config.CreateConfigFile(path, raw); errCreate != nil {
+		t.Fatal(errCreate)
 	}
-	if errWrite := os.WriteFile(configFilePath, []byte(content), 0o600); errWrite != nil {
-		t.Fatalf("write config: %v", errWrite)
+	cfg := loadPluginBootstrapConfig(path)
+	if cfg.Port != 8317 || cfg.ServerID != "" {
+		t.Fatalf("plugin config port = %d, server ID = %q", cfg.Port, cfg.ServerID)
 	}
-	var persisted []string
-	errPersist := persistSeededConfig(context.Background(), configFilePath, func(context.Context) error {
-		data, errRead := os.ReadFile(configFilePath)
-		if errRead != nil {
-			return errRead
-		}
-		persisted = append(persisted, string(data))
-		return nil
-	})
-	return persisted, errPersist
-}
-
-func TestPersistSeededConfigHashesSecretBeforePersisting(t *testing.T) {
-	configFilePath := filepath.Join(t.TempDir(), "config", "config.yaml")
-	persisted, errPersist := persistSeededConfigForTest(t, configFilePath, "port: 8317\nremote-management:\n  secret-key: "+seededConfigTestSecret+"\n")
-	if errPersist != nil {
-		t.Fatalf("persistSeededConfig() error = %v", errPersist)
-	}
-	if len(persisted) != 1 {
-		t.Fatalf("persist calls = %d, want 1", len(persisted))
-	}
-	if strings.Contains(persisted[0], seededConfigTestSecret) {
-		t.Fatalf("persisted the plaintext management secret:\n%s", persisted[0])
-	}
-	var doc struct {
-		RemoteManagement struct {
-			SecretKey string `yaml:"secret-key"`
-		} `yaml:"remote-management"`
-	}
-	if errParse := yaml.Unmarshal([]byte(persisted[0]), &doc); errParse != nil {
-		t.Fatalf("parse persisted config: %v", errParse)
-	}
-	if errCompare := bcrypt.CompareHashAndPassword([]byte(doc.RemoteManagement.SecretKey), []byte(seededConfigTestSecret)); errCompare != nil {
-		t.Fatalf("persisted secret %q is not the bcrypt hash of the plaintext secret", doc.RemoteManagement.SecretKey)
-	}
-}
-
-// The template copy is removed when refused, so the next start seeds again and fails
-// again instead of running from a config the repository never received.
-func TestPersistSeededConfigRefusesConfigThatKeepsPlaintextSecret(t *testing.T) {
-	for name, content := range map[string]string{
-		"unparsable":      "remote-management:\n  secret-key: " + seededConfigTestSecret + "\nport: [8317\n",
-		"anchored secret": "defaults: &management\n  secret-key: " + seededConfigTestSecret + "\nmanagement: *management\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			configFilePath := filepath.Join(t.TempDir(), "config", "config.yaml")
-			persisted, errPersist := persistSeededConfigForTest(t, configFilePath, content)
-			if errPersist == nil {
-				t.Fatal("persistSeededConfig() succeeded, want the seed refused")
-			}
-			if len(persisted) != 0 {
-				t.Fatalf("persisted a config that still holds the plaintext secret:\n%s", persisted[0])
-			}
-			if _, errStat := os.Stat(configFilePath); !errors.Is(errStat, fs.ErrNotExist) {
-				t.Fatalf("refused template copy left in place (stat error = %v)", errStat)
-			}
-		})
+	got, errRead := config.ReadConfigFile(path)
+	if errRead != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("plugin bootstrap changed the config: %q, %v", got, errRead)
 	}
 }

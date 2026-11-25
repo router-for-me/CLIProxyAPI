@@ -54,6 +54,14 @@ const ErrorCodeCredentialQuota = "credential_quota"
 
 const credentialQuotaErrorCode = ErrorCodeCredentialQuota
 
+// ErrorCodeHomeExecutorPluginUnavailable identifies a local Home executor selection failure.
+const ErrorCodeHomeExecutorPluginUnavailable = "home_executor_plugin_unavailable"
+
+func isHomeExecutorPluginUnavailableError(err error) bool {
+	authErr, ok := errors.AsType[*Error](err)
+	return ok && authErr != nil && authErr.Code == ErrorCodeHomeExecutorPluginUnavailable
+}
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -496,8 +504,8 @@ func withTrustedRetryAfter(err error, retryAfter *time.Duration) error {
 	if err == nil || retryAfter == nil || *retryAfter <= 0 {
 		return err
 	}
-	if _, ok := err.(*upstreamExecutionAttemptError); ok {
-		return markUpstreamExecutionAttemptWithProvider(withTrustedRetryAfter(unwrapUpstreamExecutionAttempt(err), retryAfter), upstreamAttemptProviderFromError(err))
+	if marked, ok := err.(*upstreamExecutionAttemptError); ok && marked != nil {
+		return markUpstreamExecutionAttemptWithProviderAndID(withTrustedRetryAfter(unwrapUpstreamExecutionAttempt(err), retryAfter), upstreamAttemptProviderFromError(err), marked.attemptID)
 	}
 	if bootstrap, ok := err.(*streamBootstrapError); ok && bootstrap != nil {
 		wrapped := withTrustedRetryAfter(bootstrap.cause, retryAfter)

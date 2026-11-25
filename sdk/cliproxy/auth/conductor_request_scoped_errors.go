@@ -57,6 +57,11 @@ func (e requestStopError) IsRequestStop() bool {
 	return true
 }
 
+// IsRequestStopError reports whether err signals an explicit request-scoped stop.
+func IsRequestStopError(err error) bool {
+	return isRequestStopError(err)
+}
+
 func isRequestStopError(err error) bool {
 	if err == nil {
 		return false
@@ -69,11 +74,56 @@ func isRequestStopError(err error) bool {
 }
 
 func unwrapRequestStopError(err error) error {
-	var stopErr requestStopError
-	if errors.As(err, &stopErr) {
-		return stopErr.error
+	unwrapped, _ := unwrapRequestStopErrorChanged(err)
+	return unwrapped
+}
+
+func unwrapRequestStopErrorChanged(err error) (error, bool) {
+	if err == nil {
+		return nil, false
 	}
-	return err
+	switch wrapped := err.(type) {
+	case requestStopError:
+		inner, _ := unwrapRequestStopErrorChanged(wrapped.error)
+		return inner, true
+	case requestScopedContinueError:
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.error)
+		if !changed {
+			return err, false
+		}
+		return requestScopedContinueError{error: inner}, true
+	case *streamHeaderError:
+		if wrapped == nil {
+			return nil, false
+		}
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.cause)
+		if !changed {
+			return err, false
+		}
+		return newStreamHeaderError(inner, wrapped.headers), true
+	case *streamBootstrapError:
+		if wrapped == nil {
+			return nil, false
+		}
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.cause)
+		if !changed {
+			return err, false
+		}
+		copied := *wrapped
+		copied.cause = inner
+		return &copied, true
+	case *upstreamExecutionAttemptError:
+		if wrapped == nil {
+			return nil, false
+		}
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.cause)
+		if !changed {
+			return err, false
+		}
+		return markUpstreamExecutionAttemptWithProviderAndID(inner, wrapped.provider, wrapped.attemptID), true
+	default:
+		return err, false
+	}
 }
 
 func wrapRequestStopError(err error) error {
@@ -305,36 +355,49 @@ func extractRequestScopedErrorRules(auth *Auth, cfg *internalconfig.Config) []in
 			compatName = strings.TrimPrefix(provider, "openai-compatibility:")
 		}
 	}
-	if compatName != "" || providerKey != "" || provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatibility:") || strings.HasPrefix(provider, "openai-compatible") {
-		if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
-			return entry.RequestScopedErrors
+	if compatName == "" {
+		switch provider {
+		case "claude":
+			if index >= 0 && index < len(cfg.ClaudeKey) {
+				return cfg.ClaudeKey[index].RequestScopedErrors
+			}
+			return nil
+		case "codex":
+			if index >= 0 && index < len(cfg.CodexKey) {
+				return cfg.CodexKey[index].RequestScopedErrors
+			}
+			return nil
+		case "xai":
+			if index >= 0 && index < len(cfg.XAIKey) {
+				return cfg.XAIKey[index].RequestScopedErrors
+			}
+			return nil
+		case "meta":
+			if index >= 0 && index < len(cfg.MetaKey) {
+				return cfg.MetaKey[index].RequestScopedErrors
+			}
+			return nil
+		case "gemini":
+			if index >= 0 && index < len(cfg.GeminiKey) {
+				return cfg.GeminiKey[index].RequestScopedErrors
+			}
+			return nil
+		case "interactions", "gemini-interactions":
+			if index >= 0 && index < len(cfg.InteractionsKey) {
+				return cfg.InteractionsKey[index].RequestScopedErrors
+			}
+			return nil
+		case "vertex":
+			if index >= 0 && index < len(cfg.VertexCompatAPIKey) {
+				return cfg.VertexCompatAPIKey[index].RequestScopedErrors
+			}
+			return nil
 		}
 	}
 
-	switch provider {
-	case "claude":
-		if index >= 0 && index < len(cfg.ClaudeKey) {
-			return cfg.ClaudeKey[index].RequestScopedErrors
-		}
-	case "codex":
-		if index >= 0 && index < len(cfg.CodexKey) {
-			return cfg.CodexKey[index].RequestScopedErrors
-		}
-	case "xai":
-		if index >= 0 && index < len(cfg.XAIKey) {
-			return cfg.XAIKey[index].RequestScopedErrors
-		}
-	case "meta":
-		if index >= 0 && index < len(cfg.MetaKey) {
-			return cfg.MetaKey[index].RequestScopedErrors
-		}
-	case "gemini":
-		if index >= 0 && index < len(cfg.GeminiKey) {
-			return cfg.GeminiKey[index].RequestScopedErrors
-		}
-	case "interactions", "gemini-interactions":
-		if index >= 0 && index < len(cfg.InteractionsKey) {
-			return cfg.InteractionsKey[index].RequestScopedErrors
+	if compatName != "" || providerKey != "" || provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatibility:") || strings.HasPrefix(provider, "openai-compatible") {
+		if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
+			return entry.RequestScopedErrors
 		}
 	}
 
@@ -372,11 +435,17 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
 		return "", false
 	}
+	if _, rejected := errors.AsType[antigravityTargetRejectedError](err); rejected {
+		return "", false
+	}
 	return MatchRequestScopedErrorRules(extractRequestScopedErrorRules(auth, cfg), err)
 }
 
 func applyRequestScopedActionToResult(action string, okAction bool, result *Result) {
 	if !okAction || result == nil || result.Error == nil {
+		return
+	}
+	if isTOSViolationResultError(result.Error) {
 		return
 	}
 	if action == RequestScopedActionStop || action == RequestScopedActionContinue {
@@ -398,6 +467,54 @@ func (m *Manager) ApplyRequestScopedErrorResult(ctx context.Context, auth *Auth,
 	return action, okAction
 }
 
+type requestScopedContinueError struct {
+	error
+}
+
+func (e requestScopedContinueError) Unwrap() error {
+	return e.error
+}
+
+func (e requestScopedContinueError) IsRequestScopedContinue() bool {
+	return true
+}
+
+// IsRequestScopedContinueError reports whether err matched a request-scoped continue rule.
+func IsRequestScopedContinueError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type continueChecker interface {
+		IsRequestScopedContinue() bool
+	}
+	var cc continueChecker
+	return errors.As(err, &cc) && cc != nil && cc.IsRequestScopedContinue()
+}
+
+func wrapRequestScopedContinueError(err error) error {
+	if err == nil || IsRequestScopedContinueError(err) {
+		return err
+	}
+	if marked, ok := err.(*upstreamExecutionAttemptError); ok && marked != nil && marked.cause != nil {
+		return markUpstreamExecutionAttemptWithProviderAndID(requestScopedContinueError{error: marked.cause}, marked.provider, marked.attemptID)
+	}
+	return requestScopedContinueError{error: err}
+}
+
 func isRequestScopedStop(action string, okAction bool) bool {
 	return okAction && (action == RequestScopedActionStop || action == RequestScopedActionStopAndCooldown)
+}
+
+// isTerminalRequestStopError reports whether err must terminate request retries
+// and credential failover immediately (an explicit request-stop error, or a
+// preserved terminal response that is neither credential-scoped nor overridden
+// by a request-scoped continue rule).
+func isTerminalRequestStopError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRequestStopError(err) || isHomeExecutorPluginUnavailableError(err) {
+		return true
+	}
+	return isRequestTerminatedError(err) && !isCredentialScopedError(err) && !IsRequestScopedContinueError(err)
 }

@@ -126,6 +126,13 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
+			if inherited := stringSliceValue(entry["input_modalities"]); len(inherited) > 0 {
+				filtered := filterCodexInputModalities(inherited)
+				entry["input_modalities"] = filtered
+				if !hasImageModality(filtered) {
+					delete(entry, "supports_image_detail_original")
+				}
+			}
 			info := registry.LookupModelInfo(id)
 			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
 			applyCodexClientDisplayName(entry, model)
@@ -580,7 +587,10 @@ func nullCodexClientRequiredOptions(entry map[string]any) {
 	entry["availability_nux"] = nil
 }
 
-const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
+const (
+	codexClientFallbackInstructions         = "You are Codex, a coding agent. You and the user share one workspace."
+	codexClientFallbackMinimalClientVersion = "0.124.0"
+)
 
 // useCompactCodexClientInstructions replaces cloned template prompts with a short literal.
 // Both the legacy and canonical instruction fields must be present for catalog decoding.
@@ -665,8 +675,8 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	thinkingSupport := codexClientThinkingSupport(model)
 
 	if info != nil {
-		if info.DisplayName != "" {
-			displayName = info.DisplayName
+		if displayName == "" {
+			displayName = strings.TrimSpace(info.DisplayName)
 		}
 		if info.Description != "" {
 			description = info.Description
@@ -674,15 +684,21 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if contextWindow <= 0 && info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
-		if info.Type == registry.OpenAIImageModelType {
-			entry["visibility"] = "hide"
-			delete(entry, "input_modalities")
-			delete(entry, "supports_image_detail_original")
-		} else {
-			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
-		}
 		if thinkingSupport == nil {
 			thinkingSupport = info.Thinking
+		}
+	}
+	if info != nil && info.Type == registry.OpenAIImageModelType {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+	} else {
+		entry["visibility"] = "list"
+		if inherited := stringSliceValue(entry["input_modalities"]); len(inherited) > 0 {
+			applyCodexClientInputModalitiesMetadata(entry, inherited)
+		}
+		if info != nil {
+			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
 	}
 	applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
@@ -701,6 +717,8 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["slug"] = id
 	entry["display_name"] = displayName
 	entry["description"] = description
+	entry["minimal_client_version"] = codexClientFallbackMinimalClientVersion
+	entry["supported_in_api"] = true
 	entry["prefer_websockets"] = false
 	if optimizeMultiAgentV2 {
 		entry["multi_agent_version"] = "v2"
@@ -994,6 +1012,23 @@ func codexClientModelPriority(model map[string]any) int {
 		return int(priority)
 	}
 	return 100
+}
+
+func stringSliceValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func stringModelValue(model map[string]any, key string) string {

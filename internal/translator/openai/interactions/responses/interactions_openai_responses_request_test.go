@@ -1,10 +1,12 @@
 package responses
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 )
 
@@ -900,5 +902,52 @@ func TestConvertOpenAIResponsesRequestKeepsDevinSealedReasoning(t *testing.T) {
 	}
 	if got := ojson.GetBytesNoCopy(out, "input.2.type").String(); got != "function_call" {
 		t.Fatalf("foreign reasoning item must stay dropped, input.2.type = %q. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestDevinGeminiThoughtSignature(t *testing.T) {
+	tink := append([]byte{0x01, 0x8f, 0x3d, 0x6b, 0x5f}, bytes.Repeat([]byte{0x5a}, 64)...)
+	sig := base64.StdEncoding.EncodeToString(tink)
+	doc := ojson.NewDocString(`{
+		"model":"devin/gemini-4-neon",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"checked tool plan"}],"encrypted_content":""},
+			{"type":"reasoning","summary":[],"encrypted_content":""},
+			{"type":"reasoning","summary":[],"encrypted_content":""},
+			{"type":"function_call","name":"ping","call_id":"c1","arguments":"{}"}
+		]
+	}`)
+	_ = doc.Set("input.1.encrypted_content", sig)
+	_ = doc.Set("input.2.encrypted_content", "google#"+sig)
+	_ = doc.Set("input.3.encrypted_content", "claude#"+sig)
+	raw := doc.Bytes()
+
+	nonDevin, errNonDevin := convertOpenAIResponsesRequestToInteractions("devin/gemini-4-neon", raw, false, false)
+	if errNonDevin != nil {
+		t.Fatalf("convert without replayDevin: %v", errNonDevin)
+	}
+	if got := ojson.GetBytesNoCopy(nonDevin, "input.1.type").String(); got != "function_call" {
+		t.Fatalf("without replayDevin, Gemini reasoning must be dropped; input.1.type = %q. Output: %s", got, string(nonDevin))
+	}
+
+	devinOut, errDevin := convertOpenAIResponsesRequestToInteractions("devin/gemini-4-neon", raw, false, true)
+	if errDevin != nil {
+		t.Fatalf("convert with replayDevin: %v", errDevin)
+	}
+	if got := ojson.GetBytesNoCopy(devinOut, "input.1.type").String(); got != "thought" {
+		t.Fatalf("with replayDevin, input.1.type = %q, want thought. Output: %s", got, string(devinOut))
+	}
+	if got := ojson.GetBytesNoCopy(devinOut, "input.1.signature").String(); got != sig {
+		t.Fatalf("signature = %q, want %q. Output: %s", got, sig, string(devinOut))
+	}
+	if got := ojson.GetBytesNoCopy(devinOut, "input.1.signature_type").String(); got != "gemini" {
+		t.Fatalf("signature_type = %q, want gemini. Output: %s", got, string(devinOut))
+	}
+	if got := ojson.GetBytesNoCopy(devinOut, "input.1.content.0.text").String(); got != "checked tool plan" {
+		t.Fatalf("thought text = %q, want %q", got, "checked tool plan")
+	}
+	if got := ojson.GetBytesNoCopy(devinOut, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("prefixed signatures must stay dropped, input.2.type = %q. Output: %s", got, string(devinOut))
 	}
 }

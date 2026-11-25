@@ -4,7 +4,43 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 )
+
+func TestApplyAuthFailureState_TOSViolationIsAlwaysTerminal(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name           string
+		httpStatus     int
+		disableCooling bool
+	}{
+		{name: "disabled cooling", httpStatus: http.StatusForbidden, disableCooling: true},
+		{name: "service unavailable", httpStatus: http.StatusServiceUnavailable},
+		{name: "request error status", httpStatus: http.StatusBadRequest},
+		{name: "missing http status"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &Auth{Status: StatusActive}
+			applyAuthFailureState(auth, &Error{
+				HTTPStatus: tt.httpStatus,
+				Code:       "tos_violation",
+				Message:    "TOS_VIOLATION",
+			}, nil, now, tt.disableCooling)
+
+			if !auth.Disabled || auth.Status != StatusDisabled {
+				t.Fatalf("disabled=%v status=%q, want true / %q", auth.Disabled, auth.Status, StatusDisabled)
+			}
+			if !auth.Unavailable {
+				t.Fatal("auth.Unavailable = false, want true")
+			}
+			if !auth.NextRetryAfter.IsZero() {
+				t.Fatalf("auth.NextRetryAfter = %v, want zero", auth.NextRetryAfter)
+			}
+		})
+	}
+}
 
 // TestMarkResult_TOSViolation_DisablesCredential verifies that a 403
 // PERMISSION_DENIED carrying the tos_violation error code (produced by the
@@ -219,5 +255,217 @@ func TestMarkResult_TOSViolation_SameAccountRefreshApplies(t *testing.T) {
 	updated, _ := manager.GetByID(auth.ID)
 	if updated.Status != StatusDisabled || !updated.Disabled {
 		t.Fatalf("same-account TOS result dropped after refresh: status=%q disabled=%v", updated.Status, updated.Disabled)
+	}
+}
+
+// TestMarkResult_TOSViolation_MultiModelPreservesUnavailableAndSkipsInferenceVerified
+// verifies that suspending a credential with active sibling models in ModelStates
+// keeps auth.Unavailable=true immediately and across late in-flight successes,
+// and never marks a suspended credential InferenceVerified=true.
+func TestMarkResult_TOSViolation_MultiModelPreservesUnavailableAndSkipsInferenceVerified(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auth := &Auth{ID: "tos-multi-model", Provider: "antigravity", Status: StatusActive}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Prior success populates an active sibling model entry in auth.ModelStates.
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "antigravity",
+		Model:    "gemini-3.8-flash",
+		Success:  true,
+	})
+
+	// Another model on the same credential hits 403 TOS_VIOLATION.
+	manager.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        "antigravity",
+		Model:           "gemini-4-neon",
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			HTTPStatus: http.StatusForbidden,
+			Code:       "tos_violation",
+			Message:    "TOS_VIOLATION",
+		},
+	})
+
+	afterTOS, ok := manager.GetByID(auth.ID)
+	if !ok || afterTOS == nil {
+		t.Fatal("auth not found after TOS MarkResult")
+	}
+	if !afterTOS.Disabled || afterTOS.Status != StatusDisabled {
+		t.Fatalf("after TOS: disabled=%v status=%q, want true / %q", afterTOS.Disabled, afterTOS.Status, StatusDisabled)
+	}
+	if !afterTOS.Unavailable {
+		t.Fatal("after TOS: auth.Unavailable = false, want true (must not be cleared by active sibling model)")
+	}
+	if afterTOS.InferenceVerified || !afterTOS.LastInferenceVerifiedAt.IsZero() {
+		t.Fatalf("after TOS: InferenceVerified=%v LastInferenceVerifiedAt=%v, want false / zero", afterTOS.InferenceVerified, afterTOS.LastInferenceVerifiedAt)
+	}
+
+	// Late in-flight success on the sibling model must not clear Unavailable or set InferenceVerified.
+	manager.MarkResult(ctx, Result{
+		AuthID:            auth.ID,
+		Provider:          "antigravity",
+		Model:             "gemini-3.8-flash",
+		Success:           true,
+		CompletedResponse: true,
+	})
+
+	afterSiblingSuccess, _ := manager.GetByID(auth.ID)
+	if !afterSiblingSuccess.Disabled || afterSiblingSuccess.Status != StatusDisabled {
+		t.Fatalf("after late sibling success: disabled=%v status=%q, want true / %q", afterSiblingSuccess.Disabled, afterSiblingSuccess.Status, StatusDisabled)
+	}
+	if !afterSiblingSuccess.Unavailable {
+		t.Fatal("after late sibling success: auth.Unavailable = false, want true")
+	}
+	if afterSiblingSuccess.InferenceVerified || !afterSiblingSuccess.LastInferenceVerifiedAt.IsZero() {
+		t.Fatalf("after late sibling success: InferenceVerified=%v LastInferenceVerifiedAt=%v, want false / zero", afterSiblingSuccess.InferenceVerified, afterSiblingSuccess.LastInferenceVerifiedAt)
+	}
+
+	// Late in-flight success on the suspended model itself must also preserve its disabled model state.
+	manager.MarkResult(ctx, Result{
+		AuthID:            auth.ID,
+		Provider:          "antigravity",
+		Model:             "gemini-4-neon",
+		Success:           true,
+		CompletedResponse: true,
+	})
+
+	afterSameModelSuccess, _ := manager.GetByID(auth.ID)
+	if !afterSameModelSuccess.Unavailable || afterSameModelSuccess.InferenceVerified {
+		t.Fatalf("after late same-model success: unavailable=%v inferenceVerified=%v, want true / false", afterSameModelSuccess.Unavailable, afterSameModelSuccess.InferenceVerified)
+	}
+	neonState := afterSameModelSuccess.ModelStates["gemini-4-neon"]
+	if neonState == nil || neonState.Status != StatusDisabled || !neonState.Unavailable {
+		t.Fatalf("after late same-model success: gemini-4-neon state = %+v, want StatusDisabled and Unavailable=true", neonState)
+	}
+}
+
+// TestMarkResult_StatusDisabledOnly_LateSuccessDoesNotReviveOrVerify verifies that
+// a credential marked StatusDisabled (even if Disabled is false) rejects late
+// model-scoped and model-less successes from reviving or verifying it.
+func TestMarkResult_StatusDisabledOnly_LateSuccessDoesNotReviveOrVerify(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auth := &Auth{
+		ID:          "status-disabled-only",
+		Provider:    "antigravity",
+		Status:      StatusDisabled,
+		Unavailable: true,
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.MarkResult(ctx, Result{
+		AuthID:            auth.ID,
+		Provider:          "antigravity",
+		Model:             "gemini-3.8-flash",
+		Success:           true,
+		CompletedResponse: true,
+	})
+	manager.MarkResult(ctx, Result{
+		AuthID:            auth.ID,
+		Provider:          "antigravity",
+		Success:           true,
+		CompletedResponse: true,
+	})
+
+	updated, _ := manager.GetByID(auth.ID)
+	if updated.Status != StatusDisabled {
+		t.Fatalf("auth.Status = %q, want %q", updated.Status, StatusDisabled)
+	}
+	if !updated.Unavailable {
+		t.Fatal("auth.Unavailable = false, want true")
+	}
+	if updated.InferenceVerified || !updated.LastInferenceVerifiedAt.IsZero() {
+		t.Fatalf("InferenceVerified=%v LastInferenceVerifiedAt=%v, want false / zero", updated.InferenceVerified, updated.LastInferenceVerifiedAt)
+	}
+}
+
+// TestMarkResult_TOSViolation_ModelLessWithExistingModelStatesPreservesUnavailable
+// verifies that a credential-scoped model-less TOS_VIOLATION keeps Unavailable=true
+// even when auth.ModelStates already contains active models.
+func TestMarkResult_TOSViolation_ModelLessWithExistingModelStatesPreservesUnavailable(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auth := &Auth{ID: "tos-modelless-multi", Provider: "antigravity", Status: StatusActive}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "antigravity",
+		Model:    "gemini-3.8-flash",
+		Success:  true,
+	})
+
+	manager.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        "antigravity",
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			HTTPStatus: http.StatusForbidden,
+			Code:       "tos_violation",
+			Message:    "TOS_VIOLATION",
+		},
+	})
+
+	updated, _ := manager.GetByID(auth.ID)
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("disabled=%v status=%q, want true / %q", updated.Disabled, updated.Status, StatusDisabled)
+	}
+	if !updated.Unavailable {
+		t.Fatal("auth.Unavailable = false, want true")
+	}
+}
+
+// TestMarkResult_TOSViolation_DisableCoolingPreservesUnavailable verifies that
+// disable_cooling does not clear Unavailable on the credential or model state
+// after a terminal TOS_VIOLATION.
+func TestMarkResult_TOSViolation_DisableCoolingPreservesUnavailable(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auth := &Auth{
+		ID:       "tos-disable-cooling",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: "antigravity",
+		Model:    "gemini-3.8-flash",
+		Success:  true,
+	})
+	manager.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        "antigravity",
+		Model:           "gemini-4-neon",
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			HTTPStatus: http.StatusForbidden,
+			Code:       "tos_violation",
+			Message:    "TOS_VIOLATION",
+		},
+	})
+
+	updated, _ := manager.GetByID(auth.ID)
+	if !updated.Disabled || updated.Status != StatusDisabled || !updated.Unavailable {
+		t.Fatalf("after TOS with disable_cooling: disabled=%v status=%q unavailable=%v", updated.Disabled, updated.Status, updated.Unavailable)
+	}
+	if state := updated.ModelStates["gemini-4-neon"]; state == nil || state.Status != StatusDisabled || !state.Unavailable {
+		t.Fatalf("gemini-4-neon state = %+v, want StatusDisabled and Unavailable=true", state)
 	}
 }

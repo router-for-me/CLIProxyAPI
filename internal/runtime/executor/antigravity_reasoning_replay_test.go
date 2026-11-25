@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,10 +13,12 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -1246,6 +1249,109 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 	}
 }
 
+func TestAntigravityReasoningReplayIgnoresClaudeCodeAttributionSystemBlock(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model = "gemini-4-neon"
+		sig1  = "claude-attribution-signature-one-123456"
+	)
+	headers := http.Header{"X-Claude-Code-Session-Id": []string{"claude-attribution-session"}}
+
+	turn1Original := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli; cch=11111; cc_prompt_id=prompt-1;"},{"type":"text","text":"You are Claude Code."}],"thinking":{"type":"enabled"}}`)
+	turn1Doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"first prompt"}]}]}`)
+	scope1, replayReq1, _, errPrepare1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn1Original},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: turn1Original, SourceFormat: sdktranslator.FormatClaude},
+		turn1Doc,
+	)
+	if errPrepare1 != nil {
+		t.Fatal(errPrepare1)
+	}
+	accumulator1 := newAntigravityReasoningReplayAccumulator(scope1, replayReq1)
+	accumulator1.observeResponsePayload([]byte(`{"candidates":[{"content":{"parts":[{"text":"first reply"},{"text":"","thoughtSignature":"` + sig1 + `"}]},"finishReason":"STOP"}]}`))
+	accumulator1.Commit(context.Background())
+
+	// Next prompt updates per-request cch and cc_prompt_id in the attribution system block.
+	turn2Original := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]},{"role":"assistant","content":[{"type":"text","text":"first reply"}]},{"role":"user","content":[{"type":"text","text":"second prompt"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli; cch=22222; cc_prompt_id=prompt-2;"},{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"enabled"}}`)
+	turn2Doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"first prompt"}]},{"role":"model","parts":[{"text":"first reply"}]},{"role":"user","parts":[{"text":"second prompt"}]}]}`)
+	scope2, _, changed2, errPrepare2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn2Original},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: turn2Original, SourceFormat: sdktranslator.FormatClaude},
+		turn2Doc,
+	)
+	if errPrepare2 != nil {
+		t.Fatal(errPrepare2)
+	}
+	if scope2.sessionKey != scope1.sessionKey {
+		t.Fatalf("replay scope changed across attribution block updates: turn1=%q turn2=%q", scope1.sessionKey, scope2.sessionKey)
+	}
+	if !changed2 {
+		t.Fatalf("expected turn2 replay to restore cached text thoughtSignature, body=%s", turn2Doc.String())
+	}
+	if got := turn2Doc.Get("contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+		t.Fatalf("replayed text thoughtSignature = %q, want %q; body=%s", got, sig1, turn2Doc.String())
+	}
+
+	// A request without the attribution block must share the same lane as requests with it.
+	strippedOriginal := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]}],"system":[{"type":"text","text":"You are Claude Code."}]}`)
+	strippedScope := antigravityReasoningReplayScopeFromRequest(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: strippedOriginal},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: strippedOriginal, SourceFormat: sdktranslator.FormatClaude},
+		nil,
+	)
+	if strippedScope.sessionKey != scope1.sessionKey {
+		t.Fatalf("scope without attribution block = %q, want %q", strippedScope.sessionKey, scope1.sessionKey)
+	}
+
+	// Auxiliary requests with different non-attribution system prompts must remain separated.
+	titleOriginal := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli; cch=33333; cc_prompt_id=prompt-3;"},{"type":"text","text":"Generate a concise title that summarizes this session."}]}`)
+	titleScope := antigravityReasoningReplayScopeFromRequest(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: titleOriginal},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: titleOriginal, SourceFormat: sdktranslator.FormatClaude},
+		nil,
+	)
+	if titleScope.sessionKey == scope1.sessionKey {
+		t.Fatalf("auxiliary title scope collided with main scope: %q", titleScope.sessionKey)
+	}
+}
+
+func TestAntigravityClaudeReplaySystemLaneAttributionEdgeCases(t *testing.T) {
+	stringOnly := []byte(`{"system":"x-anthropic-billing-header: cc_version=2.1.321; cch=11111;"}`)
+	if lane := antigravityClaudeReplaySystemLane(stringOnly); lane != "" {
+		t.Fatalf("attribution-only string system lane = %q, want empty", lane)
+	}
+
+	arrayOnly := []byte(`{"system":[{"type":"text","text":"  x-anthropic-billing-header: cc_version=2.1.321; cch=11111;"}]}`)
+	if lane := antigravityClaudeReplaySystemLane(arrayOnly); lane != "" {
+		t.Fatalf("attribution-only array system lane = %q, want empty", lane)
+	}
+
+	plainString := []byte(`{"system":"You are Claude Code."}`)
+	if lane := antigravityClaudeReplaySystemLane(plainString); lane == "" {
+		t.Fatal("non-attribution string system lane = empty, want non-empty hash")
+	}
+
+	withAttrA := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cch=aaaaa; cc_prompt_id=p1;"},{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}]}`)
+	withAttrB := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cch=bbbbb; cc_prompt_id=p2;"},{"type":"text","text":"You are Claude Code."}]}`)
+	withoutAttr := []byte(`{"system":[{"type":"text","text":"You are Claude Code."}]}`)
+	laneA := antigravityClaudeReplaySystemLane(withAttrA)
+	laneB := antigravityClaudeReplaySystemLane(withAttrB)
+	lanePlain := antigravityClaudeReplaySystemLane(withoutAttr)
+	if laneA == "" || laneA != laneB || laneA != lanePlain {
+		t.Fatalf("lanes diverged: withAttrA=%q withAttrB=%q withoutAttr=%q", laneA, laneB, lanePlain)
+	}
+}
+
 func TestAntigravityReasoningReplayScopeSeparatesClaudeAgents(t *testing.T) {
 	opts := cliproxyexecutor.Options{Headers: http.Header{
 		"X-Claude-Code-Session-Id": []string{"claude-session"},
@@ -1263,8 +1369,28 @@ func TestAntigravityReasoningReplayScopeUsesStableSessionWithoutSessionId(t *tes
 	if !scope.valid() {
 		t.Fatal("scope should be valid from stable session hash")
 	}
-	if !strings.HasPrefix(scope.sessionKey, "session:") {
-		t.Fatalf("sessionKey = %q", scope.sessionKey)
+	wantKey := "session:" + generateStableSessionID(payload)
+	if scope.sessionKey != wantKey {
+		t.Fatalf("sessionKey = %q, want %q", scope.sessionKey, wantKey)
+	}
+	docScope := antigravityReasoningReplayScopeFromDoc("gemini-3-flash-agent", ojson.NewDoc(payload))
+	if docScope.sessionKey != wantKey {
+		t.Fatalf("doc sessionKey = %q, want %q", docScope.sessionKey, wantKey)
+	}
+
+	// Verify negative signed FNV-1a session IDs keep their leading minus sign in replay keys.
+	negPayload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"a"}]}]}}`)
+	negStable := generateStableSessionID(negPayload)
+	if !strings.HasPrefix(negStable, "-") {
+		t.Fatalf("expected negative signed FNV-1a ID for test fixture, got %q", negStable)
+	}
+	negScope := antigravityReasoningReplayScopeFromPayload("gemini-3-flash-agent", negPayload)
+	if negScope.sessionKey != "session:"+negStable {
+		t.Fatalf("negative payload sessionKey = %q, want %q", negScope.sessionKey, "session:"+negStable)
+	}
+	negDocScope := antigravityReasoningReplayScopeFromDoc("gemini-3-flash-agent", ojson.NewDoc(negPayload))
+	if negDocScope.sessionKey != "session:"+negStable {
+		t.Fatalf("negative doc sessionKey = %q, want %q", negDocScope.sessionKey, "session:"+negStable)
 	}
 }
 
@@ -2133,6 +2259,174 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(
 	}
 }
 
+func TestPrepareAntigravityGeminiReasoningReplayDegradesAndCommitsNextTurn(t *testing.T) {
+	modes := []struct {
+		name  string
+		useKV bool
+	}{
+		{name: "memory", useKV: false},
+		{name: "kv", useKV: true},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			homekv.ClearCurrent()
+			internalcache.ClearAntigravityReasoningReplayCache()
+			if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+				t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+			}
+			var dbPath string
+			if mode.useKV {
+				// Allocate TempDir before registering ShutdownLocal cleanup so LIFO
+				// order closes bbolt before removing the directory (required on Windows).
+				dbPath = filepath.Join(t.TempDir(), "issue7997-kv.db")
+			}
+			t.Cleanup(func() {
+				internalcache.ClearAntigravityReasoningReplayCache()
+				homekv.ClearCurrent()
+				if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+					t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+				}
+			})
+			if mode.useKV {
+				if errCfg := kvstore.ConfigureLocal(true, dbPath); errCfg != nil {
+					t.Fatalf("kvstore.ConfigureLocal() error = %v", errCfg)
+				}
+			}
+
+			const model = "gemini-3.6-flash-high"
+			const args = `{"file_path":"/tmp/a"}`
+			payload := []byte(`{"sessionId":"sess-pairing-break-commit-` + mode.name + `","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+			payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+			if err := internalsignature.ValidateGeminiFunctionCallPairing(payload); err != nil {
+				t.Fatalf("original payload pairing invalid: %v", err)
+			}
+
+			badItem := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"call_id":"call_native_1","name":"Read","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+			sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+			if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{badItem}) {
+				t.Fatal("failed to cache bad replay item")
+			}
+
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FromString("claude"),
+				OriginalRequest: []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`),
+			}
+			out, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+				context.Background(),
+				model,
+				cliproxyexecutor.Request{Model: model, Payload: payload},
+				opts,
+				payload,
+			)
+			if errPrepare != nil {
+				t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v, want graceful degradation", errPrepare)
+			}
+			if !bytes.Equal(out, payload) {
+				t.Fatalf("out = %s, want original payload %s", out, payload)
+			}
+			if !scope.valid() {
+				t.Fatalf("returned scope is invalid: %+v", scope)
+			}
+
+			_, foundAfterDegrade, errPeekAfterDegrade := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+			if errPeekAfterDegrade != nil || foundAfterDegrade {
+				t.Fatalf("cache after pairing degradation = (found=%v, err=%v), want (false, nil)", foundAfterDegrade, errPeekAfterDegrade)
+			}
+
+			const newSig = "FreshSignatureAfterPairingDegradation1234567890"
+			responseBody := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"checking next step"},{"thoughtSignature":"` + newSig + `","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},"finishReason":"STOP"}]}}`)
+			cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, out, responseBody)
+
+			committedItems, foundAfterCommit, errPeekAfterCommit := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+			if errPeekAfterCommit != nil || !foundAfterCommit || len(committedItems) == 0 {
+				t.Fatalf("cache after degraded turn commit = (len=%d, found=%v, err=%v), want committed replay items", len(committedItems), foundAfterCommit, errPeekAfterCommit)
+			}
+			hasNewSig := false
+			for _, item := range committedItems {
+				if ojson.GetBytesNoCopy(item, "thoughtSignature").String() == newSig {
+					hasNewSig = true
+					break
+				}
+			}
+			if !hasNewSig {
+				t.Fatalf("committed items missing %q: %q", newSig, committedItems)
+			}
+
+			nextTurnPayload := []byte(`{"sessionId":"sess-pairing-break-commit-` + mode.name + `","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"Grep","response":{"result":"match"}}}]}]}}`)
+			nextTurnPayload = normalizeAntigravityGeminiFunctionResponseRoles(nextTurnPayload)
+			replayedNext, _, errNext := prepareAntigravityGeminiReasoningReplayPayload(
+				context.Background(),
+				model,
+				cliproxyexecutor.Request{Model: model, Payload: nextTurnPayload},
+				opts,
+				nextTurnPayload,
+			)
+			if errNext != nil {
+				t.Fatalf("next turn prepare error: %v", errNext)
+			}
+			if gotSig := ojson.GetBytesNoCopy(replayedNext, "request.contents.2.parts.0.thoughtSignature").String(); gotSig != newSig {
+				t.Fatalf("next turn replayed signature = %q, want %q", gotSig, newSig)
+			}
+		})
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradedCommitDoesNotClobberConcurrentWrite(t *testing.T) {
+	homekv.ClearCurrent()
+	internalcache.ClearAntigravityReasoningReplayCache()
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+	}
+	t.Cleanup(func() {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		homekv.ClearCurrent()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+		}
+	})
+
+	const model = "gemini-3.6-flash-high"
+	const args = `{"file_path":"/tmp/a"}`
+	payload := []byte(`{"sessionId":"sess-pairing-break-concurrent","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+
+	badItem := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"call_id":"call_native_1","name":"Read","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{badItem}) {
+		t.Fatal("failed to cache bad replay item")
+	}
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`),
+	}
+	out, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: payload},
+		opts,
+		payload,
+	)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v", errPrepare)
+	}
+
+	const concurrentSig = "ConcurrentTurnSignatureMustSurvive1234567890"
+	concurrentItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"` + concurrentSig + `"}`)
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{concurrentItem}) {
+		t.Fatal("failed to cache concurrent replay item")
+	}
+
+	responseBody := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"DegradedStaleSignatureShouldDrop1234567890","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},"finishReason":"STOP"}]}}`)
+	cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, out, responseBody)
+
+	items, found, errPeek := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+	if errPeek != nil || !found || len(items) != 1 || ojson.GetBytesNoCopy(items[0], "thoughtSignature").String() != concurrentSig {
+		t.Fatalf("concurrent replay item was clobbered: items=%q found=%v err=%v", items, found, errPeek)
+	}
+}
+
 func TestAntigravityStreamChunksHaveTerminalCommitEvent(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -2302,4 +2596,516 @@ func TestCountTokensReasoningReplayPeeksWithoutReservingTombstone(t *testing.T) 
 	if !ok || len(got) != 1 {
 		t.Fatalf("GetAntigravityReasoningReplayItems after countTokens peek = %v, ok=%v", got, ok)
 	}
+}
+
+func TestAntigravityReasoningReplayScopeIsolatesBodySubagentsAndCanonicalSession(t *testing.T) {
+	const model = "gemini-3.8-flash-high"
+
+	t.Run("camelCase_sessionId_with_metadata_agent_id_enriched_and_direct", func(t *testing.T) {
+		payload1 := []byte(`{"sessionId":"root-swarm","metadata":{"agent_id":"worker-1"},"request":{"contents":[{"role":"user","parts":[{"text":"shared swarm prompt"}]}]}}`)
+		payload2 := []byte(`{"sessionId":"root-swarm","metadata":{"agent_id":"worker-2"},"request":{"contents":[{"role":"user","parts":[{"text":"shared swarm prompt"}]}]}}`)
+
+		req1 := cliproxyexecutor.Request{Model: model, Payload: payload1}
+		req2 := cliproxyexecutor.Request{Model: model, Payload: payload2}
+		opts1 := cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:root-swarm:agent:worker-1",
+			},
+		}
+		opts2 := cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:root-swarm:agent:worker-2",
+			},
+		}
+
+		scope1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req1, opts1, req1.Payload)
+		scope2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req2, opts2, req2.Payload)
+		if !scope1.valid() || !scope2.valid() {
+			t.Fatalf("expected valid scopes, got scope1=%+v scope2=%+v", scope1, scope2)
+		}
+		if scope1.sessionKey == scope2.sessionKey {
+			t.Fatalf("parallel workers collided on replay scope: %q", scope1.sessionKey)
+		}
+		if !strings.Contains(scope1.sessionKey, "worker-1") || !strings.Contains(scope2.sessionKey, "worker-2") {
+			t.Fatalf("expected agent IDs in replay scopes, got scope1=%q scope2=%q", scope1.sessionKey, scope2.sessionKey)
+		}
+
+		docScope1 := antigravityReasoningReplayScopeFromRequestDoc(context.Background(), model, req1, opts1, ojson.NewDoc(payload1))
+		docScope2 := antigravityReasoningReplayScopeFromRequestDoc(context.Background(), model, req2, opts2, ojson.NewDoc(payload2))
+		if docScope1.sessionKey != scope1.sessionKey || docScope2.sessionKey != scope2.sessionKey {
+			t.Fatalf("doc scopes diverged: doc=(%q,%q) raw=(%q,%q)", docScope1.sessionKey, docScope2.sessionKey, scope1.sessionKey, scope2.sessionKey)
+		}
+
+		// Direct unenriched calls without CanonicalSessionIDMetadataKey must still isolate
+		// via body session extraction and match the enriched key format.
+		directScope1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req1, cliproxyexecutor.Options{}, req1.Payload)
+		directScope2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req2, cliproxyexecutor.Options{}, req2.Payload)
+		if directScope1.sessionKey == directScope2.sessionKey {
+			t.Fatalf("unenriched parallel workers collided on replay scope: %q", directScope1.sessionKey)
+		}
+		if directScope1.sessionKey != scope1.sessionKey || directScope2.sessionKey != scope2.sessionKey {
+			t.Fatalf("unenriched keys diverged from canonical keys: direct=(%q,%q) canonical=(%q,%q)",
+				directScope1.sessionKey, directScope2.sessionKey, scope1.sessionKey, scope2.sessionKey)
+		}
+	})
+
+	t.Run("snake_case_session_id_with_metadata_subagent_id", func(t *testing.T) {
+		payload1 := []byte(`{"session_id":"root-swarm","metadata":{"subagent_id":"sub-1"},"request":{"contents":[{"role":"user","parts":[{"text":"shared swarm prompt"}]}]}}`)
+		payload2 := []byte(`{"session_id":"root-swarm","metadata":{"subagent_id":"sub-2"},"request":{"contents":[{"role":"user","parts":[{"text":"shared swarm prompt"}]}]}}`)
+
+		req1, opts1 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payload1}, cliproxyexecutor.Options{})
+		req2, opts2 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payload2}, cliproxyexecutor.Options{})
+
+		enriched1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req1, opts1, payload1)
+		enriched2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req2, opts2, payload2)
+		if enriched1.sessionKey == enriched2.sessionKey {
+			t.Fatalf("snake_case session_id subagents collided: %q", enriched1.sessionKey)
+		}
+		if !strings.Contains(enriched1.sessionKey, "sub-1") || !strings.Contains(enriched2.sessionKey, "sub-2") {
+			t.Fatalf("expected subagent IDs in replay scopes, got %q vs %q", enriched1.sessionKey, enriched2.sessionKey)
+		}
+
+		direct1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload1}, cliproxyexecutor.Options{}, payload1)
+		direct2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload2}, cliproxyexecutor.Options{}, payload2)
+		if direct1.sessionKey != enriched1.sessionKey || direct2.sessionKey != enriched2.sessionKey {
+			t.Fatalf("unenriched snake_case subagent keys diverged: direct=(%q,%q) enriched=(%q,%q)",
+				direct1.sessionKey, direct2.sessionKey, enriched1.sessionKey, enriched2.sessionKey)
+		}
+	})
+
+	t.Run("request_metadata_canonical_session_id_fallback", func(t *testing.T) {
+		payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template"}]}]}}`)
+		req1 := cliproxyexecutor.Request{
+			Model:    model,
+			Payload:  payload,
+			Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:swarm:agent:req-1"},
+		}
+		req2 := cliproxyexecutor.Request{
+			Model:    model,
+			Payload:  payload,
+			Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:swarm:agent:req-2"},
+		}
+		scope1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req1, cliproxyexecutor.Options{}, payload)
+		scope2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req2, cliproxyexecutor.Options{}, payload)
+		if scope1.sessionKey == scope2.sessionKey || !strings.Contains(scope1.sessionKey, "req-1") || !strings.Contains(scope2.sessionKey, "req-2") {
+			t.Fatalf("req.Metadata CanonicalSessionIDMetadataKey not isolated: %q vs %q", scope1.sessionKey, scope2.sessionKey)
+		}
+	})
+
+	t.Run("claude_code_body_agent_id_preserves_lane_and_isolates_workers", func(t *testing.T) {
+		headers := http.Header{"X-Claude-Code-Session-Id": []string{"claude-swarm-sess"}}
+		payload1 := []byte(`{"metadata":{"agent_id":"worker-1"},"system":[{"type":"text","text":"You are Claude Code."}],"messages":[{"role":"user","content":"hi"}]}`)
+		payload2 := []byte(`{"metadata":{"user_id":"{\"session_id\":\"claude-swarm-sess\",\"agent_id\":\"worker-2\"}"},"system":[{"type":"text","text":"You are Claude Code."}],"messages":[{"role":"user","content":"hi"}]}`)
+
+		scope1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload1}, cliproxyexecutor.Options{Headers: headers}, payload1)
+		scope2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload2}, cliproxyexecutor.Options{Headers: headers}, payload2)
+		if scope1.sessionKey == scope2.sessionKey {
+			t.Fatalf("Claude body subagents collided: %q", scope1.sessionKey)
+		}
+		if !strings.HasPrefix(scope1.sessionKey, "claude:claude-swarm-sess:agent:worker-1:context:") ||
+			!strings.HasPrefix(scope2.sessionKey, "claude:claude-swarm-sess:agent:worker-2:context:") {
+			t.Fatalf("unexpected Claude body subagent keys: %q vs %q", scope1.sessionKey, scope2.sessionKey)
+		}
+	})
+
+	t.Run("canonical_prefix_normalization_matches_existing_namespaces", func(t *testing.T) {
+		plain := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:plain-id"},
+		}, nil)
+		if plain.sessionKey != "session:plain-id" {
+			t.Fatalf("canonical session:* key = %q, want session:plain-id", plain.sessionKey)
+		}
+		execOnly := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "execution:exec-only"},
+		}, nil)
+		if execOnly.sessionKey != "execution:exec-only" {
+			t.Fatalf("canonical execution:* key = %q, want execution:exec-only", execOnly.sessionKey)
+		}
+		derivedOnly := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "derived:ctx:v1:abc"},
+		}, nil)
+		if derivedOnly.sessionKey != "derived:ctx:v1:abc" {
+			t.Fatalf("canonical derived:* key = %q, want derived:ctx:v1:abc", derivedOnly.sessionKey)
+		}
+	})
+}
+
+func TestAntigravityReasoningReplayScopeIsolatesBodyTaskThreadConversationAndLCP(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.8-flash-high"
+
+	cases := []struct {
+		name      string
+		payloadA  []byte
+		payloadB  []byte
+		optsA     cliproxyexecutor.Options
+		optsB     cliproxyexecutor.Options
+		enrich    bool
+		wantPartA string
+		wantPartB string
+	}{
+		{
+			name:      "task_id_body_direct",
+			payloadA:  []byte(`{"task_id":"task-alpha","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB:  []byte(`{"task_id":"task-beta","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			wantPartA: "task:task-alpha",
+			wantPartB: "task:task-beta",
+		},
+		{
+			name:      "task_id_body_enriched",
+			payloadA:  []byte(`{"task_id":"task-alpha","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB:  []byte(`{"task_id":"task-beta","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			enrich:    true,
+			wantPartA: "task:task-alpha",
+			wantPartB: "task:task-beta",
+		},
+		{
+			name:      "thread_id_body_direct",
+			payloadA:  []byte(`{"thread_id":"thread-alpha","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB:  []byte(`{"thread_id":"thread-beta","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			wantPartA: "thread:thread-alpha",
+			wantPartB: "thread:thread-beta",
+		},
+		{
+			name:      "conversation_id_body_direct",
+			payloadA:  []byte(`{"conversation_id":"conv-alpha","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB:  []byte(`{"conversation_id":"conv-beta","request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			wantPartA: "conv:conv-alpha",
+			wantPartB: "conv:conv-beta",
+		},
+		{
+			name:     "lcp_canonical_session_without_derived",
+			payloadA: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			optsA: cliproxyexecutor.Options{
+				Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "lcp:v1:branch-alpha"},
+			},
+			optsB: cliproxyexecutor.Options{
+				Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "lcp:v1:branch-beta"},
+			},
+			wantPartA: "lcp:v1:branch-alpha",
+			wantPartB: "lcp:v1:branch-beta",
+		},
+		{
+			name:     "lcp_canonical_session_overrides_shared_derived",
+			payloadA: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			optsA: cliproxyexecutor.Options{
+				Metadata: map[string]any{
+					cliproxyexecutor.CanonicalSessionIDMetadataKey: "lcp:v1:branch-alpha",
+					cliproxyexecutor.DerivedSessionIDMetadataKey:   "ctx:v1:shared-root",
+				},
+			},
+			optsB: cliproxyexecutor.Options{
+				Metadata: map[string]any{
+					cliproxyexecutor.CanonicalSessionIDMetadataKey: "lcp:v1:branch-beta",
+					cliproxyexecutor.DerivedSessionIDMetadataKey:   "ctx:v1:shared-root",
+				},
+			},
+			wantPartA: "lcp:v1:branch-alpha",
+			wantPartB: "lcp:v1:branch-beta",
+		},
+		{
+			name:     "lcp_affinity_metadata_without_canonical",
+			payloadA: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			payloadB: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`),
+			optsA: cliproxyexecutor.Options{
+				Metadata: map[string]any{cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:affinity-alpha"},
+			},
+			optsB: cliproxyexecutor.Options{
+				Metadata: map[string]any{cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:affinity-beta"},
+			},
+			wantPartA: "lcp:v1:affinity-alpha",
+			wantPartB: "lcp:v1:affinity-beta",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqA := cliproxyexecutor.Request{Model: model, Payload: tc.payloadA}
+			reqB := cliproxyexecutor.Request{Model: model, Payload: tc.payloadB}
+			optsA, optsB := tc.optsA, tc.optsB
+			if tc.enrich {
+				reqA, optsA = cliproxysession.Enrich(reqA, optsA)
+				reqB, optsB = cliproxysession.Enrich(reqB, optsB)
+			}
+			scopeA := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqA, optsA, tc.payloadA)
+			scopeB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqB, optsB, tc.payloadB)
+			if !scopeA.valid() || !scopeB.valid() {
+				t.Fatalf("expected valid scopes, got A=%+v B=%+v", scopeA, scopeB)
+			}
+			if scopeA.sessionKey == scopeB.sessionKey {
+				t.Fatalf("parallel agents collided on %q", scopeA.sessionKey)
+			}
+			if !strings.Contains(scopeA.sessionKey, tc.wantPartA) || !strings.Contains(scopeB.sessionKey, tc.wantPartB) {
+				t.Fatalf("unexpected keys: A=%q (want %q), B=%q (want %q)", scopeA.sessionKey, tc.wantPartA, scopeB.sessionKey, tc.wantPartB)
+			}
+		})
+	}
+
+	// End-to-end replay isolation: committing worker-1's thoughtSignature must not
+	// leak into worker-2 sharing the same prompt template and parent sessionId.
+	turn1Worker1 := []byte(`{"sessionId":"root-swarm","metadata":{"agent_id":"worker-1"},"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+	turn2Worker2 := []byte(`{"sessionId":"root-swarm","metadata":{"agent_id":"worker-2"},"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]},{"role":"model","parts":[{"text":"same reply"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	req1, opts1 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: turn1Worker1}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	req2, opts2 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: turn2Worker2}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+
+	_, scope1, errPrepare1 := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req1, opts1, turn1Worker1)
+	if errPrepare1 != nil {
+		t.Fatalf("prepare worker-1: %v", errPrepare1)
+	}
+	acc1 := newAntigravityReasoningReplayAccumulator(scope1, turn1Worker1)
+	acc1.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"same reply"},{"text":"","thoughtSignature":"worker-1-private-signature-123456"}]},"finishReason":"STOP"}]}}`))
+	acc1.Commit(context.Background())
+
+	out2, _, errPrepare2 := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req2, opts2, turn2Worker2)
+	if errPrepare2 != nil {
+		t.Fatalf("prepare worker-2: %v", errPrepare2)
+	}
+	if leaked := ojson.GetBytes(out2, "request.contents.1.parts.0.thoughtSignature").String(); leaked != "" {
+		t.Fatalf("worker-1 thoughtSignature leaked into worker-2 replay payload: %q", leaked)
+	}
+}
+
+func TestAntigravityReasoningReplayScopeIsolatesCodexSubagentsSharingSessionIDHeader(t *testing.T) {
+	const model = "gemini-3.8-flash-high"
+	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"codex swarm prompt"}]}]}}`)
+
+	headers1 := http.Header{
+		"Session-Id":            []string{"codex-root-sess"},
+		"X-Codex-Turn-Metadata": []string{`{"agent_name":"worker-1","subagent_kind":"thread_spawn"}`},
+	}
+	headers2 := http.Header{
+		"Session-Id":            []string{"codex-root-sess"},
+		"X-Codex-Turn-Metadata": []string{`{"agent_name":"worker-2","subagent_kind":"thread_spawn"}`},
+	}
+
+	// Direct unenriched call
+	scope1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{Headers: headers1}, payload)
+	scope2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{Headers: headers2}, payload)
+	if scope1.sessionKey == scope2.sessionKey {
+		t.Fatalf("Codex subagents sharing Session-Id collided: %q", scope1.sessionKey)
+	}
+	if !strings.Contains(scope1.sessionKey, "worker-1") || !strings.Contains(scope2.sessionKey, "worker-2") {
+		t.Fatalf("expected Codex agent names in keys, got %q vs %q", scope1.sessionKey, scope2.sessionKey)
+	}
+
+	// Enriched call must match unenriched key
+	req1, opts1 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{Headers: headers1})
+	req2, opts2 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{Headers: headers2})
+	enriched1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req1, opts1, payload)
+	enriched2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req2, opts2, payload)
+	if enriched1.sessionKey != scope1.sessionKey || enriched2.sessionKey != scope2.sessionKey {
+		t.Fatalf("enriched Codex subagent keys diverged: enriched=(%q,%q) direct=(%q,%q)",
+			enriched1.sessionKey, enriched2.sessionKey, scope1.sessionKey, scope2.sessionKey)
+	}
+
+	// Normal single-agent Session-Id with benign turn metadata keeps responses:<id>
+	normalHeaders := http.Header{
+		"Session-Id":            []string{"codex-root-sess"},
+		"X-Codex-Turn-Metadata": []string{`{"turn_id":"turn-1"}`},
+	}
+	normalReq, normalOpts := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{Headers: normalHeaders})
+	normalScope := antigravityReasoningReplayScopeFromRequest(context.Background(), model, normalReq, normalOpts, payload)
+	if normalScope.sessionKey != "responses:codex-root-sess" {
+		t.Fatalf("normal Session-Id replay scope = %q, want responses:codex-root-sess", normalScope.sessionKey)
+	}
+}
+
+func TestAntigravityReasoningReplayScopePreservesPriorityInvariantsWithCanonicalMetadata(t *testing.T) {
+	const model = "gemini-3.8-flash-high"
+
+	// 1. ExecutionSessionMetadataKey remains ahead of prompt_cache_key even after session.Enrich sets pck:* canonical ID.
+	pckPayload := []byte(`{"prompt_cache_key":"shared-cache-bucket"}`)
+	reqExec, optsExec := cliproxysession.Enrich(
+		cliproxyexecutor.Request{Model: model, Payload: pckPayload},
+		cliproxyexecutor.Options{
+			OriginalRequest: pckPayload,
+			Metadata:        map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "socket-session"},
+		},
+	)
+	execScope := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqExec, optsExec, nil)
+	if execScope.sessionKey != "execution:socket-session" {
+		t.Fatalf("enriched execution+prompt_cache_key scope = %q, want execution:socket-session", execScope.sessionKey)
+	}
+
+	// 2. prompt_cache_key alone preserves prompt-cache:<value> namespace even after session.Enrich.
+	reqPCK, optsPCK := cliproxysession.Enrich(
+		cliproxyexecutor.Request{Model: model, Payload: []byte(`{"prompt_cache_key":"same-value"}`)},
+		cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"same-value"}`)},
+	)
+	pckScope := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqPCK, optsPCK, nil)
+	if pckScope.sessionKey != "prompt-cache:same-value" {
+		t.Fatalf("enriched prompt_cache_key scope = %q, want prompt-cache:same-value", pckScope.sessionKey)
+	}
+
+	// 3. Claude Code keeps :context:<lane> even when CanonicalSessionIDMetadataKey is populated.
+	claudePayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"system":[{"type":"text","text":"You are Claude Code."}]}`)
+	claudeReq, claudeOpts := cliproxysession.Enrich(
+		cliproxyexecutor.Request{Model: model, Payload: claudePayload},
+		cliproxyexecutor.Options{
+			Headers:         http.Header{"X-Claude-Code-Session-Id": []string{"claude-sess-priority"}},
+			OriginalRequest: claudePayload,
+		},
+	)
+	claudeScope := antigravityReasoningReplayScopeFromRequest(context.Background(), model, claudeReq, claudeOpts, nil)
+	if !strings.HasPrefix(claudeScope.sessionKey, "claude:claude-sess-priority:agent:main:context:") {
+		t.Fatalf("enriched Claude Code scope = %q, want claude:claude-sess-priority:agent:main:context:<lane>", claudeScope.sessionKey)
+	}
+
+	// 4. CallerScope still isolates identical CanonicalSessionIDMetadataKey values across callers.
+	callerA := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:shared:agent:worker-1",
+			cliproxyexecutor.CallerScopeMetadataKey:        cliproxysession.CallerScope("caller-A"),
+		},
+	}, nil)
+	callerB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:shared:agent:worker-1",
+			cliproxyexecutor.CallerScopeMetadataKey:        cliproxysession.CallerScope("caller-B"),
+		},
+	}, nil)
+	if !callerA.valid() || !callerB.valid() || callerA.sessionKey == callerB.sessionKey {
+		t.Fatalf("caller isolation failed for canonical sessions: A=%q B=%q", callerA.sessionKey, callerB.sessionKey)
+	}
+	if !strings.Contains(callerA.sessionKey, "session:shared:agent:worker-1") || !strings.Contains(callerB.sessionKey, "session:shared:agent:worker-1") {
+		t.Fatalf("caller-scoped canonical keys dropped canonical session ID: A=%q B=%q", callerA.sessionKey, callerB.sessionKey)
+	}
+}
+
+func TestAntigravityReasoningReplayScopeReviewFindingsRegressions(t *testing.T) {
+	const model = "gemini-3.8-flash-high"
+
+	t.Run("shared_session_id_with_distinct_thread_id_enriched_and_direct", func(t *testing.T) {
+		payloadA := []byte(`{"session_id":"root","thread_id":"thread-A","request":{"contents":[{"role":"user","parts":[{"text":"shared prompt"}]}]}}`)
+		payloadB := []byte(`{"session_id":"root","thread_id":"thread-B","request":{"contents":[{"role":"user","parts":[{"text":"shared prompt"}]}]}}`)
+
+		reqA, optsA := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payloadA}, cliproxyexecutor.Options{})
+		reqB, optsB := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: payloadB}, cliproxyexecutor.Options{})
+
+		enrichedA := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqA, optsA, payloadA)
+		enrichedB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqB, optsB, payloadB)
+		if enrichedA.sessionKey == enrichedB.sessionKey {
+			t.Fatalf("enriched shared session_id with distinct thread_id collided: %q", enrichedA.sessionKey)
+		}
+		if !strings.Contains(enrichedA.sessionKey, "thread:thread-A") || !strings.Contains(enrichedB.sessionKey, "thread:thread-B") {
+			t.Fatalf("expected thread-scoped keys, got A=%q B=%q", enrichedA.sessionKey, enrichedB.sessionKey)
+		}
+
+		directA := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payloadA}, cliproxyexecutor.Options{}, payloadA)
+		directB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payloadB}, cliproxyexecutor.Options{}, payloadB)
+		if directA.sessionKey == directB.sessionKey {
+			t.Fatalf("direct shared session_id with distinct thread_id collided: %q", directA.sessionKey)
+		}
+		if directA.sessionKey != enrichedA.sessionKey || directB.sessionKey != enrichedB.sessionKey {
+			t.Fatalf("direct and enriched thread keys diverged: direct=(%q,%q) enriched=(%q,%q)",
+				directA.sessionKey, directB.sessionKey, enrichedA.sessionKey, enrichedB.sessionKey)
+		}
+	})
+
+	t.Run("plain_user_id_does_not_override_execution_session_or_collapse_conversations", func(t *testing.T) {
+		payload := []byte(`{"metadata":{"user_id":"alice"},"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+
+		reqA, optsA := cliproxysession.Enrich(
+			cliproxyexecutor.Request{Model: model, Payload: payload},
+			cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-A"}},
+		)
+		reqB, optsB := cliproxysession.Enrich(
+			cliproxyexecutor.Request{Model: model, Payload: payload},
+			cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-B"}},
+		)
+		enrichedA := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqA, optsA, payload)
+		enrichedB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqB, optsB, payload)
+		if enrichedA.sessionKey != "execution:exec-A" || enrichedB.sessionKey != "execution:exec-B" {
+			t.Fatalf("enriched plain metadata.user_id overrode execution sessions: A=%q B=%q", enrichedA.sessionKey, enrichedB.sessionKey)
+		}
+
+		directA := antigravityReasoningReplayScopeFromRequest(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: payload},
+			cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-A"}},
+			payload,
+		)
+		directB := antigravityReasoningReplayScopeFromRequest(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: payload},
+			cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-B"}},
+			payload,
+		)
+		if directA.sessionKey != "execution:exec-A" || directB.sessionKey != "execution:exec-B" {
+			t.Fatalf("direct plain metadata.user_id overrode execution sessions: A=%q B=%q", directA.sessionKey, directB.sessionKey)
+		}
+
+		// Without execution session, two unrelated conversations for the same plain user_id
+		// must not collapse onto a shared user:alice replay key.
+		conv1 := []byte(`{"metadata":{"user_id":"alice"},"request":{"contents":[{"role":"user","parts":[{"text":"topic one"}]}]}}`)
+		conv2 := []byte(`{"metadata":{"user_id":"alice"},"request":{"contents":[{"role":"user","parts":[{"text":"topic two"}]}]}}`)
+		req1, opts1 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: conv1}, cliproxyexecutor.Options{})
+		req2, opts2 := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: conv2}, cliproxyexecutor.Options{})
+		scope1 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req1, opts1, conv1)
+		scope2 := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req2, opts2, conv2)
+		if scope1.sessionKey == scope2.sessionKey || strings.Contains(scope1.sessionKey, "user:alice") {
+			t.Fatalf("plain user_id collapsed distinct conversations: scope1=%q scope2=%q", scope1.sessionKey, scope2.sessionKey)
+		}
+	})
+
+	t.Run("standalone_fork_source_without_child_session_skips_replay", func(t *testing.T) {
+		forkA := []byte(`{"forkSource":{"sessionId":"parent-A"},"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+		forkB := []byte(`{"forkSource":{"sessionId":"parent-B"},"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+		nestedFork := []byte(`{"request":{"forkSource":{"sessionId":"parent-C"},"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+
+		for _, tc := range []struct {
+			name    string
+			payload []byte
+			enrich  bool
+		}{
+			{name: "forkA_direct", payload: forkA},
+			{name: "forkA_enriched", payload: forkA, enrich: true},
+			{name: "forkB_direct", payload: forkB},
+			{name: "nested_fork_direct", payload: nestedFork},
+		} {
+			req := cliproxyexecutor.Request{Model: model, Payload: tc.payload}
+			opts := cliproxyexecutor.Options{}
+			if tc.enrich {
+				req, opts = cliproxysession.Enrich(req, opts)
+			}
+			scope := antigravityReasoningReplayScopeFromRequest(context.Background(), model, req, opts, tc.payload)
+			if scope.valid() {
+				t.Fatalf("%s: expected replay to be skipped for unidentified fork, got %q", tc.name, scope.sessionKey)
+			}
+			docScope := antigravityReasoningReplayScopeFromRequestDoc(context.Background(), model, req, opts, ojson.NewDoc(tc.payload))
+			if docScope.valid() {
+				t.Fatalf("%s (doc): expected replay to be skipped for unidentified fork, got %q", tc.name, docScope.sessionKey)
+			}
+		}
+
+		// IsForkMetadataKey without any child session identity must also skip replay.
+		plainBody := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+		metaForkScope := antigravityReasoningReplayScopeFromRequest(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: plainBody},
+			cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.IsForkMetadataKey: true}},
+			plainBody,
+		)
+		if metaForkScope.valid() {
+			t.Fatalf("IsForkMetadataKey without child session should skip replay, got %q", metaForkScope.sessionKey)
+		}
+
+		// A fork with an explicit child sessionId remains isolated and valid.
+		childForkA := []byte(`{"sessionId":"child-A","forkSource":{"sessionId":"parent-A"},"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+		childForkB := []byte(`{"sessionId":"child-B","forkSource":{"sessionId":"parent-A"},"request":{"contents":[{"role":"user","parts":[{"text":"shared template prompt"}]}]}}`)
+		reqChildA, optsChildA := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: childForkA}, cliproxyexecutor.Options{})
+		reqChildB, optsChildB := cliproxysession.Enrich(cliproxyexecutor.Request{Model: model, Payload: childForkB}, cliproxyexecutor.Options{})
+		scopeChildA := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqChildA, optsChildA, childForkA)
+		scopeChildB := antigravityReasoningReplayScopeFromRequest(context.Background(), model, reqChildB, optsChildB, childForkB)
+		if !scopeChildA.valid() || !scopeChildB.valid() || scopeChildA.sessionKey == scopeChildB.sessionKey {
+			t.Fatalf("identified child forks should stay valid and isolated: A=%+v B=%+v", scopeChildA, scopeChildB)
+		}
+	})
 }

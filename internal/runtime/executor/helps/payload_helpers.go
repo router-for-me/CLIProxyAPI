@@ -3,6 +3,7 @@ package helps
 import (
 	"net/http"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -46,8 +47,9 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 }
 
 // ApplyPayloadConfigWithRequestDoc applies payload config in place on doc using source protocol and request header gates.
-func ApplyPayloadConfigWithRequestDoc(cfg *config.Config, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel string, requestPath string, headers http.Header) {
-	_ = ApplyPayloadConfigWithRequestTrackedDoc(cfg, model, protocol, fromProtocol, root, doc, original, requestedModel, requestPath, headers, "")
+// Source model IDs can also be matched alongside the upstream and requested names.
+func ApplyPayloadConfigWithRequestDoc(cfg *config.Config, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel string, requestPath string, headers http.Header, sourceModelIDs ...string) {
+	applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, "", model, protocol, fromProtocol, root, doc, original, requestedModel, requestPath, headers, nil, sourceModelIDs)
 }
 
 // ApplyPayloadConfigWithRequestForExecutor applies payload config with explicit target executor context.
@@ -101,10 +103,10 @@ func ApplyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 }
 
 func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel, requestPath string, headers http.Header, trackedPaths ...string) (map[string]bool, bool) {
-	return applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, targetExecutor, model, protocol, fromProtocol, root, doc, original, requestedModel, requestPath, headers, nil, trackedPaths...)
+	return applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, targetExecutor, model, protocol, fromProtocol, root, doc, original, requestedModel, requestPath, headers, nil, nil, trackedPaths...)
 }
 
-func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel, requestPath string, headers http.Header, auth *cliproxyauth.Auth, trackedPaths ...string) (map[string]bool, bool) {
+func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel, requestPath string, headers http.Header, auth *cliproxyauth.Auth, sourceModelIDs []string, trackedPaths ...string) (map[string]bool, bool) {
 	payloadConfigEvaluations.Add(1)
 	touched := make(map[string]bool)
 	if doc == nil || doc.Len() == 0 {
@@ -146,8 +148,8 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Replace) != 0 || len(rules.Filter) != 0
 	if hasPayloadRules {
 		model = strings.TrimSpace(model)
-		requestedModel = strings.TrimSpace(requestedModel)
-		if model != "" || requestedModel != "" {
+		candidates := payloadModelCandidates(model, requestedModel, sourceModelIDs...)
+		if len(candidates) > 0 {
 			toolsPath := buildPayloadPath(root, "tools")
 			toolChoicePath := buildPayloadPath(root, "tool_choice")
 			autoInjectedToolIdx := -1
@@ -201,7 +203,6 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 					}
 				}
 			}
-			candidates := payloadModelCandidates(model, requestedModel)
 			appliedDefaults := make(map[string]struct{})
 			var createdByDefault map[string]struct{}
 			var initialArrayLengths map[string]int
@@ -583,20 +584,7 @@ func payloadModelRulesMatchDoc(rules []config.PayloadModelRule, protocol string,
 	}
 	for _, model := range models {
 		for _, entry := range rules {
-			name := strings.TrimSpace(entry.Name)
-			if name == "" {
-				continue
-			}
-			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
-				continue
-			}
-			if !payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) {
-				continue
-			}
-			if !payloadHeadersMatch(headers, entry.Headers) {
-				continue
-			}
-			if !matchModelPattern(name, model) {
+			if !payloadModelSelectorMatches(entry, model, protocol, fromProtocol, headers) {
 				continue
 			}
 			if payloadModelRuleConditionsMatchDoc(doc, root, entry) {
@@ -605,6 +593,11 @@ func payloadModelRulesMatchDoc(rules []config.PayloadModelRule, protocol string,
 		}
 	}
 	return false
+}
+
+func payloadModelSelectorMatches(entry config.PayloadModelRule, model, protocol, fromProtocol string, headers http.Header) bool {
+	name, ep := strings.TrimSpace(entry.Name), strings.TrimSpace(entry.Protocol)
+	return name != "" && (ep == "" || protocol == "" || strings.EqualFold(ep, protocol)) && payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) && payloadHeadersMatch(headers, entry.Headers) && matchModelPattern(name, model)
 }
 
 func payloadModelRuleConditionsMatchDoc(doc *ojson.Doc, root string, rule config.PayloadModelRule) bool {
@@ -829,13 +822,13 @@ func payloadHeaderValues(headers http.Header, key string) []string {
 	return values
 }
 
-func payloadModelCandidates(model, requestedModel string) []string {
+func payloadModelCandidates(model, requestedModel string, sourceModelIDs ...string) []string {
 	model = strings.TrimSpace(model)
 	requestedModel = strings.TrimSpace(requestedModel)
-	if model == "" && requestedModel == "" {
+	if model == "" && requestedModel == "" && len(sourceModelIDs) == 0 {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
+	candidates := make([]string, 0, 3+len(sourceModelIDs))
 	seen := make(map[string]struct{}, 3)
 	addCandidate := func(value string) {
 		value = strings.TrimSpace(value)
@@ -860,6 +853,12 @@ func payloadModelCandidates(model, requestedModel string) []string {
 		}
 		if parsed.HasSuffix {
 			addCandidate(requestedModel)
+		}
+	}
+	// Selectors are case-sensitive, so keep the canonical source spelling even if the request differs only by case.
+	for _, id := range sourceModelIDs {
+		if id := strings.TrimSpace(id); id != "" && !slices.Contains(candidates, id) {
+			candidates = append(candidates, id)
 		}
 	}
 	return candidates

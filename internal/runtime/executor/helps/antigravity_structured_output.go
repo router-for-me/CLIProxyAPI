@@ -10,7 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-var claude55Model = regexp.MustCompile(`^claude-(opus|sonnet)-5-5(?:-(high|reasoning))?(?:-[0-9]{8})?(?:\[[^\[\]]+\])?$`)
+var antigravityClaude55Model = regexp.MustCompile(`^claude-(opus|sonnet)-5-5(?:-(low|medium|high|max|reasoning))?(?:-[0-9]{8})?(?:\[[^\[\]]+\])?$`)
 
 // PrepareAntigravityClaudeStructuredOutput replaces native output schemas with
 // best-effort prompt instructions for Claude 5.5, which rejects forced tool use.
@@ -34,7 +34,7 @@ func PrepareAntigravityClaudeStructuredOutputDoc(model string, doc *ojson.Doc) b
 		return false
 	}
 	model = strings.ToLower(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
-	if !claude55Model.MatchString(model) {
+	if !antigravityClaude55Model.MatchString(model) {
 		return false
 	}
 
@@ -56,8 +56,10 @@ func PrepareAntigravityClaudeStructuredOutputDoc(model string, doc *ojson.Doc) b
 		return false
 	}
 
-	// Wrap the untouched schema as a format, not as format settings themselves.
-	format := ojson.Parse(`{"type":"json_schema","schema":` + schema.Raw + `}`)
+	// Normalize protobuf-encoded numeric constraints/types before embedding as JSON Schema.
+	formatDoc := ojson.NewDocString(`{"type":"json_schema"}`)
+	_ = formatDoc.SetRaw("schema", util.NormalizeJSONSchemaNumericConstraints(schema.Raw))
+	format := ojson.Parse(formatDoc.String())
 	instruction := common.BuildClaudeStructuredOutputInstruction(format)
 	systemPath := "request.systemInstruction"
 	if !doc.Get(systemPath).Exists() && doc.Get("request.system_instruction").Exists() {

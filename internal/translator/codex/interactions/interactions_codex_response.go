@@ -66,7 +66,7 @@ func ConvertCodexResponseToInteractions(ctx context.Context, modelName string, o
 		return appendCodexInteractionsCreated(nil, st, root.Get("response"))
 	case "response.output_item.added":
 		return codexOutputItemAddedToInteractions(st, root)
-	case "response.output_text.delta":
+	case "response.output_text.delta", "response.refusal.delta":
 		return codexOutputTextDeltaToInteractions(st, root)
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		return codexReasoningDeltaToInteractions(st, root)
@@ -212,6 +212,7 @@ func codexOutputItemAddedToInteractions(st *codexToInteractionsStreamState, root
 	item := root.Get("item")
 	switch item.Get("type").String() {
 	case "message":
+		st.HasOutputText = false
 		return ensureCodexInteractionsStep(out, st, "model_output", item)
 	case "reasoning":
 		return ensureCodexInteractionsStep(out, st, "thought", item)
@@ -226,10 +227,13 @@ func codexOutputItemAddedToInteractions(st *codexToInteractionsStreamState, root
 func codexOutputTextDeltaToInteractions(st *codexToInteractionsStreamState, root ojson.Result) [][]byte {
 	out := appendCodexInteractionsCreated(nil, st, root.Get("response"))
 	out = ensureCodexInteractionsStep(out, st, "model_output", ojson.Result{})
+	deltaText := root.Get("delta").String()
 	deltaDoc := ojson.NewDocString(`{"index":0,"delta":{"text":"","type":"text"},"event_type":"step.delta"}`)
 	_ = deltaDoc.Set("index", st.ActiveStepIndex)
-	_ = deltaDoc.Set("delta.text", root.Get("delta").String())
-	st.HasOutputText = true
+	_ = deltaDoc.Set("delta.text", deltaText)
+	if deltaText != "" {
+		st.HasOutputText = true
+	}
 	return append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
 }
 
@@ -262,7 +266,9 @@ func codexOutputItemDoneToInteractions(st *codexToInteractionsStreamState, item 
 	out := appendCodexInteractionsCreated(nil, st, ojson.Result{})
 	switch item.Get("type").String() {
 	case "message":
-		if st.HasOutputText {
+		hadOutputText := st.HasOutputText
+		st.HasOutputText = false
+		if hadOutputText {
 			return appendCodexInteractionsStepStop(out, st)
 		}
 		out = appendCodexMessageItemToInteractionsStream(out, st, item)
@@ -473,8 +479,12 @@ func codexContentToInteractionsContent(content ojson.Result) []byte {
 }
 
 func codexContentText(content ojson.Result) string {
-	for _, path := range []string{"text", "content"} {
-		if value := content.Get(path); value.Exists() && value.Type == ojson.String {
+	paths := []string{"text", "content", "refusal"}
+	if content.Get("type").String() == "refusal" {
+		paths = []string{"refusal", "text", "content"}
+	}
+	for _, path := range paths {
+		if value := content.Get(path); value.Exists() && value.Type == ojson.String && value.String() != "" {
 			return value.String()
 		}
 	}

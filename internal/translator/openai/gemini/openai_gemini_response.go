@@ -53,7 +53,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		*param = &ConvertOpenAIResponseToGeminiParams{
 			ToolCallsAccumulator: nil,
 			ContentAccumulator:   strings.Builder{},
-			IsFirstChunk:         false,
+			IsFirstChunk:         true,
 		}
 	}
 
@@ -78,7 +78,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		// Handle empty choices array (usage-only chunk)
 		if len(choices.Array()) == 0 {
 			// This is a usage-only chunk, handle usage and return
-			if usage := root.Get("usage"); usage.Exists() {
+			if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
 				templateDoc := ojson.NewDocString(`{"candidates":[],"usageMetadata":{}}`)
 
 				// Set model if available
@@ -96,58 +96,64 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 		choices.ForEach(func(choiceIndex, choice ojson.Result) bool {
 			// Base Gemini response template without finishReason; set when known
-			template := []byte(`{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`)
+			baseTemplateDoc := ojson.NewDocString(`{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`)
 
 			// Set model if available
 			if model := root.Get("model"); model.Exists() {
-				template, _ = ojson.SetBytes(template, "model", model.String())
+				_ = baseTemplateDoc.Set("model", model.String())
 			}
 
 			_ = int(choice.Get("index").Int()) // choiceIdx not used in streaming
 			delta := choice.Get("delta")
-			baseTemplate := append([]byte(nil), template...)
+			baseTemplate := baseTemplateDoc.Bytes()
 
-			// Handle role (only in first chunk)
+			// Handle role (first chunk typically has role: "assistant")
 			if role := delta.Get("role"); role.Exists() && (*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk {
-				// OpenAI assistant -> Gemini model
-				if role.String() == "assistant" {
-					template, _ = ojson.SetBytes(template, "candidates.0.content.role", "model")
-				}
 				(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
-				results = append(results, template)
-				return true
+				if !hasOpenAIDeltaPayload(choice, delta, root) {
+					roleDoc := ojson.NewDoc(baseTemplate)
+					// OpenAI assistant -> Gemini model
+					if role.String() == "assistant" {
+						_ = roleDoc.Set("candidates.0.content.role", "model")
+					}
+					results = append(results, roleDoc.Bytes())
+					return true
+				}
 			}
 
 			var chunkOutputs [][]byte
 
 			// Handle reasoning/thinking delta
-			if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range extractReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					reasoningDoc := ojson.NewDoc(baseTemplate)
-					_ = reasoningDoc.Set("candidates.0.content.parts.0.thought", true)
-					_ = reasoningDoc.Set("candidates.0.content.parts.0.text", reasoningText)
-					chunkOutputs = append(chunkOutputs, reasoningDoc.Bytes())
+			for _, reasoningText := range collectOpenAIObjectReasoningTexts(delta) {
+				if reasoningText == "" {
+					continue
 				}
+				reasoningDoc := ojson.NewDoc(baseTemplate)
+				_ = reasoningDoc.Set("candidates.0.content.parts.0.thought", true)
+				_ = reasoningDoc.Set("candidates.0.content.parts.0.text", reasoningText)
+				chunkOutputs = append(chunkOutputs, reasoningDoc.Bytes())
 			}
 
 			// Handle content delta
-			if content := delta.Get("content"); content.Exists() && content.String() != "" {
-				contentText := content.String()
-				(*param).(*ConvertOpenAIResponseToGeminiParams).ContentAccumulator.WriteString(contentText)
-
-				// Create text part for this delta
-				contentTemplate := append([]byte(nil), baseTemplate...)
-				contentTemplate, _ = ojson.SetBytes(contentTemplate, "candidates.0.content.parts.0.text", contentText)
-				chunkOutputs = append(chunkOutputs, contentTemplate)
-			}
+			forEachOpenAIContentSegment(delta.Get("content"), func(isReasoning bool, segText string) {
+				if segText == "" {
+					return
+				}
+				partDoc := ojson.NewDoc(baseTemplate)
+				if isReasoning {
+					_ = partDoc.Set("candidates.0.content.parts.0.thought", true)
+					_ = partDoc.Set("candidates.0.content.parts.0.text", segText)
+				} else {
+					(*param).(*ConvertOpenAIResponseToGeminiParams).ContentAccumulator.WriteString(segText)
+					_ = partDoc.Set("candidates.0.content.parts.0.text", segText)
+				}
+				chunkOutputs = append(chunkOutputs, partDoc.Bytes())
+			})
 
 			if len(chunkOutputs) > 0 {
 				results = append(results, chunkOutputs...)
 				finishReason := choice.Get("finish_reason")
-				if !delta.Get("tool_calls").Exists() && (finishReason.Type != ojson.String || finishReason.String() == "") {
+				if !delta.Get("tool_calls").Exists() && (finishReason.Type != ojson.String || finishReason.String() == "") && !hasOpenAIUsageObject(root) {
 					return true
 				}
 			}
@@ -207,15 +213,17 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 				})
 
 				if finishReason := choice.Get("finish_reason"); finishReason.Type != ojson.String || finishReason.String() == "" {
-					// Don't output anything for tool call deltas - wait for completion
-					return true
+					if !hasOpenAIUsageObject(root) {
+						// Don't output anything for tool call deltas - wait for completion
+						return true
+					}
 				}
 			}
 
 			// Handle finish reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
-				templateDoc := ojson.NewDoc(template)
+				templateDoc := ojson.NewDoc(baseTemplate)
 				_ = templateDoc.Set("candidates.0.finishReason", geminiFinishReason)
 
 				// If we have accumulated tool calls, output them now
@@ -248,13 +256,16 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 				}
 
+				if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
+					setGeminiUsageMetadataFromOpenAIUsageDoc(templateDoc, usage)
+				}
 				results = append(results, templateDoc.Bytes())
 				return true
 			}
 
 			// Handle usage information
-			if usage := root.Get("usage"); usage.Exists() {
-				templateDoc := ojson.NewDoc(template)
+			if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
+				templateDoc := ojson.NewDoc(baseTemplate)
 				setGeminiUsageMetadataFromOpenAIUsageDoc(templateDoc, usage)
 				results = append(results, templateDoc.Bytes())
 				return true
@@ -262,9 +273,39 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			return true
 		})
+		(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
 		return results
 	}
 	return [][]byte{}
+}
+
+func hasOpenAIDeltaPayload(choice, delta, root ojson.Result) bool {
+	for _, reasoningText := range collectOpenAIObjectReasoningTexts(delta) {
+		if reasoningText != "" {
+			return true
+		}
+	}
+	hasContent := false
+	forEachOpenAIContentSegment(delta.Get("content"), func(_ bool, segText string) {
+		if segText != "" {
+			hasContent = true
+		}
+	})
+	if hasContent {
+		return true
+	}
+	if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+		return true
+	}
+	if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
+		return true
+	}
+	return hasOpenAIUsageObject(root)
+}
+
+func hasOpenAIUsageObject(root ojson.Result) bool {
+	usage := root.Get("usage")
+	return usage.Exists() && usage.IsObject()
 }
 
 func openAIToolCallThoughtSignature(toolCall ojson.Result) string {
@@ -577,50 +618,46 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 		_ = outDoc.Set("model", model.String())
 	}
 
-	var allParts [][]byte
-
 	// Process choices
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
-		choices.ForEach(func(choiceIndex, choice ojson.Result) bool {
-			choiceIdx := int(choice.Get("index").Int())
+		var candidates [][]byte
+		candidatePos := 0
+		choices.ForEach(func(_, choice ojson.Result) bool {
+			choiceIdx := candidatePos
+			if idx := choice.Get("index"); idx.Exists() && idx.Type == ojson.Number {
+				choiceIdx = int(idx.Int())
+			}
+			candidatePos++
 			message := choice.Get("message")
 
-			// Set role
-			if role := message.Get("role"); role.Exists() {
-				if role.String() == "assistant" {
-					_ = outDoc.Set("candidates.0.content.role", "model")
-				}
-			}
+			candDoc := ojson.NewDocString(`{"content":{"parts":[],"role":"model"},"index":0}`)
 
-			partIndex := 0
-			ensurePartDoc := func(idx int) *ojson.Doc {
-				for len(allParts) <= idx {
-					allParts = append(allParts, []byte(`{}`))
-				}
-				return ojson.NewDoc(allParts[idx])
-			}
+			var parts [][]byte
 
 			// Handle reasoning content before visible text
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range extractReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					partDoc := ensurePartDoc(partIndex)
-					_ = partDoc.Set("thought", true)
-					_ = partDoc.Set("text", reasoningText)
-					allParts[partIndex] = partDoc.Bytes()
-					partIndex++
+			for _, reasoningText := range collectOpenAIObjectReasoningTexts(message) {
+				if reasoningText == "" {
+					continue
 				}
+				partDoc := ojson.NewDocString(`{"thought":true,"text":""}`)
+				_ = partDoc.Set("text", reasoningText)
+				parts = append(parts, partDoc.Bytes())
 			}
 
-			// Handle content first
-			if content := message.Get("content"); content.Exists() && content.String() != "" {
-				partDoc := ensurePartDoc(partIndex)
-				_ = partDoc.Set("text", content.String())
-				allParts[partIndex] = partDoc.Bytes()
-				partIndex++
-			}
+			// Handle visible and inline reasoning content segments
+			forEachOpenAIContentSegment(message.Get("content"), func(isReasoning bool, segText string) {
+				if segText == "" {
+					return
+				}
+				var partDoc *ojson.Doc
+				if isReasoning {
+					partDoc = ojson.NewDocString(`{"thought":true,"text":""}`)
+				} else {
+					partDoc = ojson.NewDocString(`{"text":""}`)
+				}
+				_ = partDoc.Set("text", segText)
+				parts = append(parts, partDoc.Bytes())
+			})
 
 			// Handle tool calls
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
@@ -631,7 +668,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 						functionArgs := function.Get("arguments").String()
 						functionID := toolCall.Get("id").String()
 
-						partDoc := ensurePartDoc(partIndex)
+						partDoc := ojson.NewDocString(`{"functionCall":{"name":""}}`)
 						if functionID != "" {
 							_ = partDoc.Set("functionCall.id", functionID)
 						}
@@ -640,32 +677,36 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 						if thoughtSig := openAIToolCallThoughtSignature(toolCall); thoughtSig != "" {
 							_ = partDoc.Set("thoughtSignature", thoughtSig)
 						}
-						allParts[partIndex] = partDoc.Bytes()
-						partIndex++
+						parts = append(parts, partDoc.Bytes())
 					}
 					return true
 				})
 			}
 
+			if len(parts) > 0 {
+				_ = candDoc.SetRawBytes("content.parts", translatorcommon.JoinRawArray(parts))
+			}
+
 			// Handle finish reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
-				_ = outDoc.Set("candidates.0.finishReason", geminiFinishReason)
+				_ = candDoc.Set("finishReason", geminiFinishReason)
 			}
 
 			// Set index
-			_ = outDoc.Set("candidates.0.index", choiceIdx)
+			_ = candDoc.Set("index", choiceIdx)
 
+			candidates = append(candidates, candDoc.Bytes())
 			return true
 		})
 
-		if len(allParts) > 0 {
-			_ = outDoc.SetRawBytes("candidates.0.content.parts", translatorcommon.JoinRawArray(allParts))
+		if len(candidates) > 0 {
+			_ = outDoc.SetRawBytes("candidates", translatorcommon.JoinRawArray(candidates))
 		}
 	}
 
 	// Handle usage information
-	if usage := root.Get("usage"); usage.Exists() {
+	if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
 		setGeminiUsageMetadataFromOpenAIUsageDoc(outDoc, usage)
 	}
 
@@ -732,6 +773,69 @@ func cachedTokensFromUsage(usage ojson.Result) int64 {
 	return 0
 }
 
+func collectOpenAIObjectReasoningTexts(obj ojson.Result) []string {
+	if !obj.Exists() {
+		return nil
+	}
+	for _, path := range []string{"reasoning_content", "reasoning", "reasoning_details"} {
+		if texts := extractReasoningTexts(obj.Get(path)); len(texts) > 0 {
+			return texts
+		}
+	}
+	return nil
+}
+
+func extractOpenAIContentPartThinkingText(part ojson.Result) string {
+	for _, field := range []string{"thinking", "reasoning", "reasoning_content", "text"} {
+		if texts := extractReasoningTexts(part.Get(field)); len(texts) > 0 {
+			return strings.Join(texts, "")
+		}
+	}
+	return ""
+}
+
+func forEachOpenAIContentSegment(content ojson.Result, emit func(isReasoning bool, text string)) {
+	if !content.Exists() {
+		return
+	}
+	if content.IsArray() {
+		content.ForEach(func(_, part ojson.Result) bool {
+			if part.Type == ojson.String {
+				emit(false, part.String())
+				return true
+			}
+			switch part.Get("type").String() {
+			case "thinking", "reasoning", "thought", "reasoning.text", "reasoning_text":
+				emit(true, extractOpenAIContentPartThinkingText(part))
+			case "text", "output_text":
+				if text := part.Get("text"); text.Type == ojson.String {
+					emit(false, text.String())
+				}
+			case "refusal":
+				refusalText := ""
+				if refusal := part.Get("refusal"); refusal.Type == ojson.String {
+					refusalText = refusal.String()
+				}
+				if refusalText == "" {
+					if text := part.Get("text"); text.Type == ojson.String {
+						refusalText = text.String()
+					}
+				}
+				emit(false, refusalText)
+			default:
+				if text := part.Get("text"); text.Type == ojson.String {
+					emit(false, text.String())
+				}
+			}
+			return true
+		})
+		return
+	}
+	if content.Type == ojson.String {
+		emit(false, content.String())
+	}
+}
+
 func extractReasoningTexts(node ojson.Result) []string {
 	var texts []string
 	if !node.Exists() {
@@ -748,10 +852,20 @@ func extractReasoningTexts(node ojson.Result) []string {
 
 	switch node.Type {
 	case ojson.String:
-		texts = append(texts, node.String())
+		if text := node.String(); text != "" {
+			texts = append(texts, text)
+		}
 	case ojson.JSON:
-		if text := node.Get("text"); text.Exists() {
-			texts = append(texts, text.String())
+		if text := node.Get("text"); text.Exists() && text.Type == ojson.String {
+			if textStr := text.String(); textStr != "" {
+				texts = append(texts, textStr)
+			}
+		} else if node.Get("type").String() == "reasoning.summary" {
+			if summary := node.Get("summary"); summary.Exists() && summary.Type == ojson.String {
+				if summaryStr := summary.String(); summaryStr != "" {
+					texts = append(texts, summaryStr)
+				}
+			}
 		} else if raw := strings.TrimSpace(node.Raw); raw != "" && !strings.HasPrefix(raw, "{") && !strings.HasPrefix(raw, "[") {
 			texts = append(texts, raw)
 		}

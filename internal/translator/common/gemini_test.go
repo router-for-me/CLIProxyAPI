@@ -384,3 +384,89 @@ func TestSetGeminiFunctionResponseResult(t *testing.T) {
 		}
 	})
 }
+
+func TestSetGeminiFunctionCallArgsDoc(t *testing.T) {
+	// Nil doc must be a safe no-op.
+	SetGeminiFunctionCallArgsDoc(nil, "functionCall.args", ojson.Parse(`{"a":1}`))
+
+	tests := []struct {
+		name    string
+		value   ojson.Result
+		wantRaw string
+	}{
+		{
+			name:    "valid object preserved",
+			value:   ojson.Parse(`{"city":"Tokyo","count":2}`),
+			wantRaw: `{"city":"Tokyo","count":2}`,
+		},
+		{
+			name:    "JSON-encoded object string unwrapped",
+			value:   ojson.Parse(`" {\"city\":\"Tokyo\"} "`),
+			wantRaw: `{"city":"Tokyo"}`,
+		},
+		{
+			name:    "JSON-encoded array string falls back to empty object",
+			value:   ojson.Parse(`"[1,2]"`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "JSON-encoded scalar string falls back to empty object",
+			value:   ojson.Parse(`"123"`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "JSON-encoded null string falls back to empty object",
+			value:   ojson.Parse(`"null"`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "empty string falls back to empty object",
+			value:   ojson.Parse(`""`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "invalid JSON string falls back to empty object",
+			value:   ojson.Parse(`"{bad"`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "null falls back to empty object",
+			value:   ojson.Parse(`null`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "array falls back to empty object",
+			value:   ojson.Parse(`[1,2]`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "number falls back to empty object",
+			value:   ojson.Parse(`42`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "boolean falls back to empty object",
+			value:   ojson.Parse(`true`),
+			wantRaw: `{}`,
+		},
+		{
+			name:    "missing value falls back to empty object",
+			value:   ojson.Result{},
+			wantRaw: `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := ojson.NewDocString(`{"functionCall":{"name":"fn","args":{}}}`)
+			SetGeminiFunctionCallArgsDoc(doc, "functionCall.args", tt.value)
+			args := ojson.GetBytesNoCopy(doc.Bytes(), "functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object", args.Raw, args.Type)
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s", args.Raw, tt.wantRaw)
+			}
+		})
+	}
+}

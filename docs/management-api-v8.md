@@ -12,6 +12,21 @@ Send `Authorization: Bearer <management-key>` or `X-Management-Key: <management-
 OAuth callbacks validate a pending login state and do not require a management-key
 header. Home mode disables local management endpoints for both versions.
 
+Authenticated management responses include `X-CPA-SERVER-ID` when an identity
+is available, including on v0 routes that use the management key. Cross-origin
+clients can read the header. Authentication failures, CORS preflights, OAuth
+callbacks without key authentication, and non-management routes do not expose it.
+
+`GET /v8/management/server/server-id` returns the active server identity:
+
+```json
+{"server-id":"20fb88e4-73ab-44db-b5b5-4e7120ba3368"}
+```
+
+The endpoint and its header use the same authenticated request snapshot. The
+identity is distinct from the Home node identifier: Home config updates do not
+replace the local runtime identity.
+
 ## Configuration endpoints
 
 All paths below are relative to `/v8/management`.
@@ -26,6 +41,28 @@ GET renders the persisted configuration in the v8 layout without migrating the
 file or adding omitted runtime defaults. Successful v8 configuration writes save
 the latest layout; reads and rejected writes leave the file unchanged.
 Historical v8 paths and request bodies remain accepted as aliases.
+
+`server.server-id` is a nonzero, hyphenated UUID. Successful v8 writes trim and
+lowercase an explicit UUID. If the resulting identity is missing, null, blank,
+or invalid, the write saves a fresh UUIDv4. For example, deleting
+`/config/server/server-id` rotates the identity, while an unrelated PATCH keeps
+an existing valid ID. Include the current ID when using a full replacement if
+clients should continue to see the same deployment. Successful writes return
+`status`, `config-version`, and the saved `server-id`; the response header matches
+the saved value. A read-only configuration without an explicit ID can show its
+process-local ID in the read view without persisting it. Set an explicit UUID
+if a read-only deployment needs the same ID across restarts.
+
+Only the first YAML document supplies runtime settings. JSON and path writes
+preserve the remaining documents byte-for-byte; YAML PUT replaces the complete
+stream and preserves the trailing documents supplied in that request. Invalid
+YAML in any document rejects the write without modifying the file.
+
+Configuration GET responses and successful writes return a strong `ETag` for
+the exact stored bytes. Use it as `If-Match` to guard against lost updates. A
+stale conditional write returns `412 Precondition Failed`; an unconditional
+write whose file snapshot changes during processing returns `409 Conflict`.
+Re-read the configuration before retrying either response.
 
 JSON writes accept the value directly, without a `{ "value": ... }` envelope.
 PUT replaces its target. PATCH merges objects and replaces lists and scalars.
@@ -130,6 +167,7 @@ retain the corresponding business operation's fields.
 | Path | Methods | Description |
 | --- | --- | --- |
 | `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
+| `/server/server-id` | GET | Get the active deployment UUID. |
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
@@ -164,7 +202,7 @@ retain the corresponding business operation's fields.
 
 The login URL is shared by all providers. Set the required `provider` query
 parameter to `claude`, `codex`, `antigravity`, `kimi`, `kimi-ai`, `xai`, `devin`,
-`meta`, or a registered plugin provider ID. For example:
+`copilot`, `meta`, or a registered plugin provider ID. For example:
 
 ```http
 GET /v8/management/oauth/auth-url?provider=codex
@@ -289,7 +327,9 @@ operations in this release.
 
 ## v0 compatibility
 
-The `/v0/management` endpoints keep their original paths and payloads, including
+The `/v0/management` endpoints keep their original paths and payloads. In
+particular, `GET /v0/management/config` does not add `server-id` to its JSON.
+Existing contracts include
 provider-specific OAuth login URLs, callbacks, status queries, and cancellation.
 For example, `GET /v0/management/codex-auth-url` and
 `GET /v8/management/oauth/auth-url?provider=codex` start the same login flow.

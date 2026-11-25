@@ -51,6 +51,10 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	if syncMetaPromptCacheRetentionDoc(origDoc, originalPayload) {
 		origChanged = true
 	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) &&
+		helps.StripResponsesIncludeValuesDoc(origDoc, "output.encrypted_content", "web_search_call.results") {
+		origChanged = true
+	}
 	if origChanged {
 		originalTranslated = origDoc.Bytes()
 	}
@@ -70,6 +74,9 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	helps.SetBoolIfDifferentDoc(doc, "stream", stream)
 	_ = doc.Delete("generate")
 	syncMetaPromptCacheRetentionDoc(doc, req.Payload)
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		helps.StripResponsesIncludeValuesDoc(doc, "output.encrypted_content", "web_search_call.results")
+	}
 	_ = doc.Delete("safety_identifier")
 	_ = doc.Delete("stream_options")
 	_ = doc.Delete("client_metadata")
@@ -267,8 +274,9 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-			case "response.completed", "response.incomplete":
+			case "response.completed", "response.incomplete", "response.done":
 				completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				_, completedData = normalizeMetaTerminalEventForTranslation(completedData, eventType)
 				upstreamUsage.ObserveResponsesStream(completedData)
 				var param any
 				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
@@ -507,15 +515,36 @@ func metaStreamEventError(eventData []byte) error {
 	return wrapMetaUpstreamError(statusCode, eventData)
 }
 
+func isMetaTerminalResponseEvent(eventType string) bool {
+	return eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done"
+}
+
+func normalizeMetaTerminalEventForTranslation(eventData []byte, eventType string) (string, []byte) {
+	if eventType != "response.done" {
+		return eventType, eventData
+	}
+	targetType := "response.completed"
+	if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "response.status").String()), "incomplete") {
+		targetType = "response.incomplete"
+	}
+	doc := ojson.NewDoc(eventData)
+	if errSet := doc.Set("type", targetType); errSet != nil {
+		return eventType, eventData
+	}
+	return targetType, doc.Bytes()
+}
+
 func metaAsCompletedEvent(data []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(data)
 	if !ojson.ValidBytes(trimmed) {
 		return nil, false
 	}
 	root := util.ParseGJSONBytesNoCopy(trimmed)
-	switch root.Get("type").String() {
-	case "response.completed", "response.incomplete":
-		return trimmed, true
+	eventType := root.Get("type").String()
+	switch eventType {
+	case "response.completed", "response.incomplete", "response.done":
+		_, normalized := normalizeMetaTerminalEventForTranslation(trimmed, eventType)
+		return normalized, true
 	}
 	if root.Get("object").String() == "response" || root.Get("output").Exists() {
 		wrapped, errSet := ojson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)

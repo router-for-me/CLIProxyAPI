@@ -632,6 +632,23 @@ func TestDetectClaudeCodeRequestRecognizesAgentSDKHaiku55Helpers(t *testing.T) {
 			if detection.Entrypoint != tc.entrypoint || detection.Subclient != tc.subclient || detection.AgentSDKVersion != "0.3.276" {
 				t.Fatalf("detection identity = %#v, want %s / %s / 0.3.276", detection, tc.entrypoint, tc.subclient)
 			}
+
+			proxyBetas := strings.Replace(tc.betas, "prompt-caching-scope-2026-01-05,", "", 1)
+			headers.Set("Anthropic-Beta", proxyBetas)
+			if det := DetectClaudeCodeRequest(headers, tc.payload, false, tc.cfg); !det.Confirmed || !det.HelperProfile {
+				t.Fatalf("without prompt-caching-scope: want confirmed helper, got %+v", det)
+			}
+			for _, required := range []string{"interleaved-thinking-2025-05-14", "thinking-token-count-2026-05-13", "context-management-2025-06-27"} {
+				headers.Set("Anthropic-Beta", strings.Replace(proxyBetas, required+",", "", 1))
+				if det := DetectClaudeCodeRequest(headers, tc.payload, false, tc.cfg); det.Confirmed || det.HelperProfile {
+					t.Errorf("without %s: want unconfirmed helper, got %+v", required, det)
+				}
+			}
+			headers.Set("Anthropic-Beta", proxyBetas)
+			headers.Set(ClaudeCodeSessionHeader, "33333333-4444-4555-8666-777777777777")
+			if det := DetectClaudeCodeRequest(headers, tc.payload, false, tc.cfg); det.Confirmed || det.HelperProfile {
+				t.Errorf("mismatched session: want unconfirmed helper, got %+v", det)
+			}
 		})
 	}
 }

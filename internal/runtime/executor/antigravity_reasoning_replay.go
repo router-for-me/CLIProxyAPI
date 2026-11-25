@@ -122,12 +122,7 @@ func antigravityRequestIsSymmetricForReasoningReplay(opts cliproxyexecutor.Optio
 func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromPayload(payload)
 	if sessionID == "" {
-		if stable := strings.TrimSpace(generateStableSessionID(payload)); stable != "" {
-			sessionID = strings.TrimPrefix(stable, "-")
-			if sessionID == "" {
-				sessionID = stable
-			}
-		}
+		sessionID = strings.TrimSpace(generateStableSessionID(payload))
 	}
 	if sessionID == "" {
 		return antigravityReasoningReplayScope{}
@@ -141,12 +136,7 @@ func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte
 func antigravityReasoningReplayScopeFromDoc(modelName string, doc *ojson.Doc) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromDoc(doc)
 	if sessionID == "" {
-		if stable := strings.TrimSpace(generateStableSessionIDDoc(doc)); stable != "" {
-			sessionID = strings.TrimPrefix(stable, "-")
-			if sessionID == "" {
-				sessionID = stable
-			}
-		}
+		sessionID = strings.TrimSpace(generateStableSessionIDDoc(doc))
 	}
 	if sessionID == "" {
 		return antigravityReasoningReplayScope{}
@@ -167,6 +157,10 @@ func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName s
 	scope := antigravityReasoningReplayScope{modelName: modelName}
 	if sessionKey := antigravityReasoningReplayClientSessionKey(ctx, req, opts); sessionKey != "" {
 		scope.sessionKey = sessionKey
+	} else if antigravityReplayHasForkIndicator(req, opts, payload, nil) {
+		if sessionID := antigravityReplayExplicitPayloadSessionID(payload, req.Payload); sessionID != "" {
+			scope.sessionKey = "session:" + sessionID
+		}
 	} else {
 		scope = antigravityReasoningReplayScopeFromPayload(modelName, payload)
 		if !scope.valid() {
@@ -197,6 +191,10 @@ func antigravityReasoningReplayScopeFromRequestDoc(ctx context.Context, modelNam
 	scope := antigravityReasoningReplayScope{modelName: modelName}
 	if sessionKey := antigravityReasoningReplayClientSessionKey(ctx, req, opts); sessionKey != "" {
 		scope.sessionKey = sessionKey
+	} else if antigravityReplayHasForkIndicator(req, opts, nil, doc) {
+		if sessionID := antigravityReplayExplicitDocSessionID(doc, req.Payload); sessionID != "" {
+			scope.sessionKey = "session:" + sessionID
+		}
 	} else {
 		scope = antigravityReasoningReplayScopeFromDoc(modelName, doc)
 		if !scope.valid() {
@@ -240,25 +238,64 @@ func antigravitySessionHeaderValue(headers http.Header, names ...string) string 
 }
 
 func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
-	for _, raw := range [][]byte{opts.OriginalRequest, req.Payload} {
+	payloads := antigravityReplayRawPayloads(opts.OriginalRequest, req.Payload)
+	for _, raw := range payloads {
 		if scope, ok := helps.ClaudeCodeExecutionScope(ctx, raw, opts.Headers); ok {
+			if strings.HasSuffix(scope, ":agent:"+helps.ClaudeCodeMainAgentID) {
+				if agentID := antigravityReplayClaudeBodyAgentID(raw); agentID != "" {
+					scope = strings.TrimSuffix(scope, helps.ClaudeCodeMainAgentID) + agentID
+				}
+			}
 			if lane := antigravityClaudeReplaySystemLane(raw); lane != "" {
 				return scope + ":context:" + lane
 			}
 			return scope
 		}
 	}
+	canonicalID := antigravityCanonicalSessionMetadata(opts.Metadata, req.Metadata)
 	if value := antigravitySessionHeaderValue(opts.Headers, "Session-Id", "Session_id"); value != "" {
+		if key := antigravityCodexQualifiedSessionKey(opts.Headers, payloads, canonicalID, value); key != "" {
+			return key
+		}
 		return "responses:" + value
 	}
-	for _, raw := range [][]byte{opts.OriginalRequest, req.Payload} {
+	for _, raw := range payloads {
 		if len(raw) == 0 {
 			continue
 		}
 		for _, path := range []string{"session_id", "metadata.session_id"} {
 			if value := strings.TrimSpace(ojson.GetBytesNoCopy(raw, path).String()); value != "" {
+				effectiveID := canonicalID
+				if effectiveID == "" || antigravityIsLowPriorityCanonicalSession(effectiveID) {
+					if info, ok := antigravityExtractReplaySessionInfo(opts.Headers, payloads, nil, nil); ok {
+						effectiveID = info.SessionID
+					}
+				}
+				baseSessionID := session.BoundSessionIdentity("session:" + value)
+				if effectiveID != "" && effectiveID != baseSessionID && !antigravityIsLowPriorityCanonicalSession(effectiveID) {
+					if key := antigravityFormatCanonicalReplaySessionKey(effectiveID); key != "" {
+						return key
+					}
+				}
+				if agentID := antigravityReplayBodyAgentID(opts.Headers, raw); agentID != "" {
+					return session.BoundSessionIdentity("session:" + strings.Clone(value) + ":agent:" + agentID)
+				}
 				return "responses:" + strings.Clone(value)
 			}
+		}
+	}
+	// Prefer reconciled canonical or ingress-extracted session identities (including
+	// body subagent/task/thread/conversation and LCP identities), while keeping
+	// ExecutionSessionMetadataKey ahead of prompt_cache_key and derived identities.
+	resolvedID := canonicalID
+	if resolvedID == "" {
+		if info, ok := antigravityExtractReplaySessionInfo(opts.Headers, payloads, opts.Metadata, req.Metadata); ok {
+			resolvedID = info.SessionID
+		}
+	}
+	if resolvedID != "" && !antigravityIsLowPriorityCanonicalSession(resolvedID) {
+		if key := antigravityFormatCanonicalReplaySessionKey(resolvedID); key != "" {
+			return key
 		}
 	}
 	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
@@ -267,20 +304,284 @@ func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliprox
 	if value := metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return "execution:" + value
 	}
-	for _, raw := range [][]byte{opts.OriginalRequest, req.Payload} {
+	if strings.HasPrefix(resolvedID, "execution:") || strings.HasPrefix(resolvedID, "pck:") {
+		if key := antigravityFormatCanonicalReplaySessionKey(resolvedID); key != "" {
+			return key
+		}
+	}
+	for _, raw := range payloads {
+		if len(raw) == 0 {
+			continue
+		}
 		if value := strings.TrimSpace(ojson.GetBytesNoCopy(raw, "prompt_cache_key").String()); value != "" {
 			return "prompt-cache:" + strings.Clone(value)
 		}
 	}
-	// Reuse ingress extraction for explicit session aliases before falling back
-	// to inferred roots. Keep the established session/execution priorities above.
-	if info, ok := session.ExtractSessionInfo(opts.Headers, nil, nil); ok && info.SessionID != "" {
-		return "client:" + info.SessionID
+	if strings.HasPrefix(resolvedID, "derived:") {
+		if key := antigravityFormatCanonicalReplaySessionKey(resolvedID); key != "" {
+			return key
+		}
 	}
 	if value := helps.DerivedSessionID(opts.Metadata, req.Metadata); value != "" {
 		return "derived:" + value
 	}
 	return ""
+}
+
+func antigravityReplayRawPayloads(originalReq, reqPayload []byte) [][]byte {
+	payloads := make([][]byte, 0, 2)
+	if len(originalReq) > 0 {
+		payloads = append(payloads, originalReq)
+	}
+	if len(reqPayload) > 0 && !antigravitySameByteSlice(originalReq, reqPayload) {
+		payloads = append(payloads, reqPayload)
+	}
+	if len(payloads) == 0 {
+		payloads = append(payloads, nil)
+	}
+	return payloads
+}
+
+func antigravityCanonicalSessionMetadata(metadataSets ...map[string]any) string {
+	for _, metadata := range metadataSets {
+		if value := metadataString(metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func antigravityIsLowPriorityCanonicalSession(id string) bool {
+	return strings.HasPrefix(id, "pck:") ||
+		strings.HasPrefix(id, "execution:") ||
+		strings.HasPrefix(id, "user:") ||
+		strings.HasPrefix(id, "derived:")
+}
+
+func antigravityFormatCanonicalReplaySessionKey(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.HasPrefix(id, "user:") {
+		return ""
+	}
+	if value, ok := strings.CutPrefix(id, "session:"); ok {
+		if value = strings.TrimSpace(value); value != "" {
+			return "session:" + value
+		}
+		return ""
+	}
+	if value, ok := strings.CutPrefix(id, "pck:"); ok {
+		if value = strings.TrimSpace(value); value != "" {
+			return "prompt-cache:" + value
+		}
+		return ""
+	}
+	if value, ok := strings.CutPrefix(id, "execution:"); ok {
+		if value = strings.TrimSpace(value); value != "" {
+			return "execution:" + value
+		}
+		return ""
+	}
+	if value, ok := strings.CutPrefix(id, "derived:"); ok {
+		if value = strings.TrimSpace(value); value != "" {
+			return "derived:" + value
+		}
+		return ""
+	}
+	return "client:" + id
+}
+
+func antigravityReplayBodyAgentID(headers http.Header, raw []byte) string {
+	if len(raw) > 0 {
+		for _, path := range []string{"metadata.agent_id", "metadata.subagent_id"} {
+			if agentID := session.NormalizeExplicitID(ojson.GetBytesNoCopy(raw, path).String()); agentID != "" && agentID != helps.ClaudeCodeMainAgentID {
+				return agentID
+			}
+		}
+	}
+	if headers != nil {
+		for _, name := range []string{"X-Claude-Code-Agent-Id", "x-agent-id"} {
+			if agentID := session.NormalizeExplicitID(antigravitySessionHeaderValue(headers, name)); agentID != "" && agentID != helps.ClaudeCodeMainAgentID {
+				return agentID
+			}
+		}
+	}
+	if len(raw) > 0 && ojson.GetBytesNoCopy(raw, "request").Exists() && !ojson.GetBytesNoCopy(raw, "contents").Exists() {
+		for _, path := range []string{"request.metadata.agent_id", "request.metadata.subagent_id"} {
+			if agentID := session.NormalizeExplicitID(ojson.GetBytesNoCopy(raw, path).String()); agentID != "" && agentID != helps.ClaudeCodeMainAgentID {
+				return agentID
+			}
+		}
+	}
+	return ""
+}
+
+func antigravityReplayClaudeBodyAgentID(raw []byte) string {
+	if agentID := antigravityReplayBodyAgentID(nil, raw); agentID != "" {
+		return agentID
+	}
+	if _, _, agentID := session.ClaudeMetadataIdentities(raw); agentID != "" && agentID != helps.ClaudeCodeMainAgentID {
+		return agentID
+	}
+	return ""
+}
+
+func antigravityCodexQualifiedSessionKey(headers http.Header, payloads [][]byte, canonicalID, sessionHeaderValue string) string {
+	baseCodexID := session.BoundSessionIdentity("codex:" + sessionHeaderValue)
+	if canonicalID != "" {
+		if strings.HasPrefix(canonicalID, "codex:") && canonicalID != baseCodexID {
+			return "client:" + canonicalID
+		}
+		return ""
+	}
+	if !antigravityHasCodexSessionQualifier(headers, payloads) {
+		return ""
+	}
+	if info, ok := antigravityExtractReplaySessionInfo(headers, payloads, nil, nil); ok &&
+		strings.HasPrefix(info.SessionID, "codex:") && info.SessionID != baseCodexID {
+		return "client:" + info.SessionID
+	}
+	return ""
+}
+
+func antigravityHasCodexSessionQualifier(headers http.Header, payloads [][]byte) bool {
+	if antigravitySessionHeaderValue(
+		headers,
+		"Thread-Id",
+		"Thread_id",
+		"X-Codex-Turn-Metadata",
+		"X-Openai-Subagent",
+		"X-Codex-Parent-Thread-Id",
+	) != "" {
+		return true
+	}
+	for _, raw := range payloads {
+		if len(raw) == 0 {
+			continue
+		}
+		for _, path := range []string{
+			"thread_id", "threadId", "metadata.thread_id",
+			"request.thread_id", "request.threadId", "request.metadata.thread_id",
+			"forked_from_thread_id", "forked_from_id",
+			"metadata.forked_from_thread_id", "metadata.forked_from_id",
+			"extra_body.forked_from_thread_id", "extra_body.forked_from_id",
+			"request.metadata.forked_from_thread_id", "request.metadata.forked_from_id",
+			"request.extra_body.forked_from_thread_id", "request.extra_body.forked_from_id",
+		} {
+			if strings.TrimSpace(ojson.GetBytesNoCopy(raw, path).String()) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func antigravityExtractReplaySessionInfo(headers http.Header, payloads [][]byte, optsMeta, reqMeta map[string]any) (session.SessionInfo, bool) {
+	for _, raw := range payloads {
+		if info, ok := session.ExtractSessionInfo(headers, raw, nil); ok && info.SessionID != "" {
+			return info, true
+		}
+	}
+	for _, meta := range []map[string]any{optsMeta, reqMeta} {
+		if len(meta) == 0 {
+			continue
+		}
+		if info, ok := session.ExtractSessionInfo(nil, nil, meta); ok && info.SessionID != "" {
+			return info, true
+		}
+	}
+	return session.SessionInfo{}, false
+}
+
+func antigravitySameByteSlice(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	return &a[0] == &b[0] || bytes.Equal(a, b)
+}
+
+var antigravityReplayForkIndicatorPaths = []string{
+	"forked_from_thread_id", "forked_from_id",
+	"forkSource.sessionId", "fork_source.session_id",
+	"previousSessionId", "previous_session_id",
+	"metadata.forked_from_thread_id", "metadata.forked_from_id",
+	"metadata.forkSource.sessionId", "metadata.fork_source.session_id",
+	"metadata.previousSessionId", "metadata.previous_session_id",
+	"extra_body.forked_from_thread_id", "extra_body.forked_from_id",
+	"extra_body.forkSource.sessionId", "extra_body.fork_source.session_id",
+	"extra_body.previousSessionId", "extra_body.previous_session_id",
+}
+
+func antigravityReplayHasForkIndicator(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte, doc *ojson.Doc) bool {
+	for _, metadata := range []map[string]any{opts.Metadata, req.Metadata} {
+		if metadata != nil {
+			if isFork, _ := metadata[cliproxyexecutor.IsForkMetadataKey].(bool); isFork {
+				return true
+			}
+		}
+	}
+	if doc != nil && antigravityDocHasForkIndicator(doc) {
+		return true
+	}
+	for _, raw := range antigravityReplayRawPayloads(opts.OriginalRequest, req.Payload) {
+		if antigravityBytesHasForkIndicator(raw) {
+			return true
+		}
+	}
+	if len(payload) > 0 && !antigravitySameByteSlice(payload, opts.OriginalRequest) && !antigravitySameByteSlice(payload, req.Payload) {
+		if antigravityBytesHasForkIndicator(payload) {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravityBytesHasForkIndicator(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	hasNestedReq := ojson.GetBytesNoCopy(raw, "request").Exists() && !ojson.GetBytesNoCopy(raw, "contents").Exists()
+	for _, path := range antigravityReplayForkIndicatorPaths {
+		if session.NormalizeExplicitID(ojson.GetBytesNoCopy(raw, path).String()) != "" {
+			return true
+		}
+		if hasNestedReq && session.NormalizeExplicitID(ojson.GetBytesNoCopy(raw, "request."+path).String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravityDocHasForkIndicator(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	hasNestedReq := doc.Get("request").Exists() && !doc.Get("contents").Exists()
+	for _, path := range antigravityReplayForkIndicatorPaths {
+		if session.NormalizeExplicitID(doc.Get(path).String()) != "" {
+			return true
+		}
+		if hasNestedReq && session.NormalizeExplicitID(doc.Get("request."+path).String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravityReplayExplicitPayloadSessionID(payload, reqPayload []byte) string {
+	if sessionID := antigravityReplaySessionIDFromPayload(payload); sessionID != "" {
+		return sessionID
+	}
+	return antigravityReplaySessionIDFromPayload(reqPayload)
+}
+
+func antigravityReplayExplicitDocSessionID(doc *ojson.Doc, reqPayload []byte) string {
+	if sessionID := antigravityReplaySessionIDFromDoc(doc); sessionID != "" {
+		return sessionID
+	}
+	return antigravityReplaySessionIDFromPayload(reqPayload)
 }
 
 func antigravityClaudeReplaySystemLane(payload []byte) string {
@@ -292,13 +593,47 @@ func antigravityClaudeReplaySystemLane(payload []byte) string {
 	if errUnmarshal := json.Unmarshal([]byte(system.Raw), &value); errUnmarshal != nil {
 		return ""
 	}
-	value = antigravityClaudeReplayNormalizeSystem(value)
+	switch typed := value.(type) {
+	case string:
+		if util.IsClaudeCodeAttributionSystemText(typed) {
+			return ""
+		}
+	case []any:
+		filtered := make([]any, 0, len(typed))
+		removed := false
+		for _, child := range typed {
+			if antigravityClaudeReplayIsAttributionBlock(child) {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, antigravityClaudeReplayNormalizeSystem(child))
+		}
+		if removed && len(filtered) == 0 {
+			return ""
+		}
+		value = filtered
+	default:
+		value = antigravityClaudeReplayNormalizeSystem(value)
+	}
 	normalized, errMarshal := json.Marshal(value)
 	if errMarshal != nil {
 		return ""
 	}
 	sum := sha256.Sum256(normalized)
 	return fmt.Sprintf("%x", sum[:16])
+}
+
+func antigravityClaudeReplayIsAttributionBlock(value any) bool {
+	block, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	blockType, okType := block["type"].(string)
+	if !okType || blockType != "text" {
+		return false
+	}
+	text, okText := block["text"].(string)
+	return okText && util.IsClaudeCodeAttributionSystemText(text)
 }
 
 func antigravityClaudeReplayNormalizeSystem(value any) any {
@@ -543,8 +878,10 @@ func prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx context.Co
 		}
 		originalPairingValid := internalsignature.ValidateGeminiFunctionCallPairing(origWrapped) == nil
 		if replayApplied && originalPairingValid && scope.valid() && reserveOnMiss {
-			if _, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
+			if nextSnapshot, deleted, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchangedWithSnapshot(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
 				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
+			} else if deleted {
+				scope.cacheSnapshot = nextSnapshot
 			}
 			log.Warnf("antigravity executor: reasoning replay broke Gemini function call pairing (%v); degrading to original payload", errPairing)
 			if originalContentsRaw != "" {
@@ -3315,21 +3652,27 @@ func (a *antigravityReasoningReplayAccumulator) Commit(ctx context.Context) {
 		// nothing to the ledger and its tool IDs become unresolvable.
 		return
 	}
+	// Detach caller cancellation so a client disconnect after terminal
+	// completion cannot abort KV persistence.
+	commitCtx := context.Background()
+	if ctx != nil {
+		commitCtx = context.WithoutCancel(ctx)
+	}
 	if a.overflow {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 		return
 	}
 	a.appendPendingThoughtSignatures()
 	if a.overflow {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 		return
 	}
 	if len(a.items) == 0 {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 		return
 	}
-	if _, errReplace := internalcache.ReplaceAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot, a.items); errReplace != nil {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+	if _, errReplace := internalcache.ReplaceAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot, a.items); errReplace != nil {
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 	}
 }
 

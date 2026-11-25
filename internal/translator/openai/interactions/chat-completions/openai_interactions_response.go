@@ -94,7 +94,9 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 		translatorcommon.SetRawArrayItemsDoc(outDoc, "choices.0.message.tool_calls", toolCalls)
 	}
 	if sawToolCall {
-		_ = outDoc.Set("choices.0.message.content", nil)
+		if textBuilder.Len() == 0 {
+			_ = outDoc.Set("choices.0.message.content", nil)
+		}
 		_ = outDoc.Set("choices.0.finish_reason", "tool_calls")
 	}
 	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())

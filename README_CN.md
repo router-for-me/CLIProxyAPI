@@ -68,12 +68,12 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>感谢 APIKEY.FUN 赞助本项目！APIKEY.FUN 是一家专业的企业级 AI 中转站，致力于为企业和个人开发者提供稳定、高效、低成本的 AI 模型 API 接入服务。平台支持 Claude、OpenAI、Gemini 等主流热门模型，价格低至官方原价的 7%。通过本项目<a href="https://apikey.fan/register?aff=CLIProxyAPI">专属链接</a>注册，还可享受最高 <b>充值永久 95 折</b> 专属优惠。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://api.fenno.ai/s/Cvf0"><img src="./assets/fennoai.png" alt="FennoAI" width="150"></a></td>
-<td>FennoAI 是一家稳定、高效的API 中转服务商，目前主要提供 Codex 中转服务，兼容OpenAI 及 Anthropic 协议，可灵活接入 Codex、Claude Code、OpenCode等主流编程工具，可稳定支撑千亿Token/日的企业级调用需求，支持国内及海外主体公对公结算、开票。FennoAI 为 CLIProxyAPI 的用户提供了专属福利：通过<a href="https://api.fenno.ai/s/Cvf0">专属链接</a>购买订阅，仅需 1.99 美元即可获得价值 50 美元的 Coding Plan 额度。同时支持邀请奖励，邀请好友购买最高可获得 20% 返佣，邀请越多，奖励越高。</td>
+<td width="180"><a href="https://api.fenno.ai/s/9LRu"><img src="./assets/fennoai.png" alt="Fenno.ai" width="150"></a></td>
+<td>感谢 <strong>Fenno.ai</strong> 赞助本项目！Fenno.ai 是面向编程场景的 API 中转服务商，主营 Codex 中转，把 GPT、Claude、Grok 等编程模型统一到一个 API Key 下，兼容 OpenAI 与 Anthropic 双协议，可直连 Codex、Claude Code、Cline、OpenCode 等主流编程工具，支持国内及海外主体公对公结算与开票。<strong>新用户<a href="https://api.fenno.ai/s/9LRu">1.99 美元体验 50 美元额度</a>；邀请好友最高 20% 返佣，多邀多得。</strong></td>
 </tr>
 <tr>
 <td width="180"><a href="https://s.qiniu.com/7zUJri"><img src="./assets/qiniucloud.png" alt="七牛云AI" width="150"></a></td>
-<td>感谢 <a href="https://s.qiniu.com/7zUJri">七牛云AI</a> 赞助本项目！七牛云AI 是七牛云(02567.HK)旗下企业级大模型MaaS平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过 169 万企业及开发者用户。专属福利：企业用户免费领 <b>1200万 Token</b>，邀请好友最高得百亿 Token。</td>
+<td>感谢 <strong>七牛云</strong> 赞助本项目！七牛云（02567.HK）旗下企业级 MaaS 平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过 180 万企业级开发者用户。<strong>企业新用户免费领 2000 万 Token；年终回馈，新用户<a href="https://www.qiniu.com/ai/free-models/conatus-2026?utm_source=CLIProxyAPI&amp;utm_medium=oss&amp;utm_campaign=comatus_202611&amp;utm_content=readme">最高免费享 10 亿 Token/日</a>。</strong></td>
 </tr>
 <tr>
 <td width="180"><a href="https://cubence.com/signup?code=CLIPROXYAPI&source=cpa"><img src="./assets/cubence.png" alt="Cubence" width="150"></a></td>
@@ -82,10 +82,6 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <tr>
 <td width="180"><a href="https://www.swiftproxy.net/?code=PR67S9A95"><img src="./assets/swiftproxy.png" alt="Swiftproxy" width="150"></a></td>
 <td>Swiftproxy 提供 9000万+ 纯净住宅 IP，覆盖全球 220+ 个国家和地区，支持 HTTP(S)/SOCKS5、IP 轮换、Sticky Session 及精准地域定位。帮助 AI API 工具和自动化工作流从不同地区稳定访问在线服务，适用于 API 请求、网页访问、数据采集及地域测试等场景。住宅代理低至 &#36;0.7/GB，支持免费测试，使用优惠码 PROXY90 可享 9 折优惠。<a href="https://www.swiftproxy.net/?code=PR67S9A95">立即体验 Swiftproxy</a>。</td>
-</tr>
-<tr>
-<td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
-<td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> 是一家专为自动化和多账户运营打造的高性能代理服务商，提供纯净住宅代理和原生静态 ISP IP。RapidProxy 拥有遍布全球的 9000 万+住宅 IP，并支持智能轮换、稳定会话和高并发，是网页抓取、浏览器自动化、社交媒体账户管理、电商运营、批量账户注册等场景的理想选择。住宅代理仅 &#36;0.55/GB 起，流量永不过期。使用优惠码 RAPID10 可享 9 折优惠，<a href="https://www.rapidproxy.io/?code=KHM9B6E6M">立即开始免费试用</a>。</td>
 </tr>
 <tr>
 <td width="180"><a href="https://pateway.ai/?ch=jjvdb"><img src="./assets/patewayai.png" alt="PatewayAI" width="150"></a></td>
@@ -121,6 +117,26 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <tr>
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜国内版 OpenRouter，一个 API 接入国内外主流大模型。</strong> 覆盖 <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong>，多供应商智能选路、故障自动切换，<strong>失败请求不收费，价格公开、账单可复算</strong>。适配 Claude Code、Codex 等编程工具，支持 <strong><a href="https://visioncoder.cn/me/keys">CC Switch 和 WorkBuddy 一键导入</a></strong>。企业统一采购，按席位下发订阅套餐、收回再分配，支持对公转账与开票。<strong>供应商入驻开放：上架线路，按质量拿流量；月结对公、用量可查，用户侧计费开票交给平台。</strong> 更有 <a href="https://visioncoder.cn/challenge">VibeCoding 挑战赛</a>，每期奖励合计 <strong>2,350 元加油包</strong>，一等奖 <strong>1,000 元加油包</strong>。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>“用一把钥匙，召唤全世界的 AI～”<br>10dian-API 提供全品类主流 AI 模型与协议的 API 聚合接入，兼容常见客户端，个人开发者、AI 热爱者和团队用户均可低门槛使用。价格透明、低价不复杂；模型真实、倍率透明、不偷换模型；高并发稳定接入，并支持主流 AI 订阅代充。全品类一站式，支持多种充值方式，个人与团队同权，高并发接入门槛更低。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">点击注册</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 一站式 AI 模型平台：注册即送 100 万免费 Token！</strong>
+<p>🎁 免费试用: <a href="https://subrouter.ai/register?aff=nP93">立即注册</a>，即可领取 100 万免费 Token 用于测试！</p>
+<ul>
+<li>主流模型一站接入：用一个 API 密钥即可在 Claude、GPT、Gemini、Grok 和 DeepSeek 之间自由切换。</li>
+<li>智能路由与自动故障切换：节点发生故障时，负载均衡系统会自动切换到可用节点，确保请求顺利执行。</li>
+<li>计费完全透明：每次 API 调用均可查看实际路由路径和实时费用。</li>
+<li>余额永不过期：按量付费，未用完的额度不会按月清零。</li>
+<li>充值方式灵活：支持 USDT、Visa、微信支付和支付宝。</li>
+</ul>
+👉 领取 100 万免费 Token: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>

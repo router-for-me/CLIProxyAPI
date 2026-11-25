@@ -13,14 +13,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
-func resolveThinkingSignature(modelName, thinkingText, rawSignature string) string {
-	signature, errSignature := resolveThinkingSignatureRequired(context.Background(), modelName, thinkingText, rawSignature)
+func resolveThinkingSignature(ctx context.Context, modelName, thinkingText, rawSignature string) string {
+	signature, errSignature := resolveThinkingSignatureRequired(ctx, modelName, thinkingText, rawSignature)
 	if errSignature != nil {
 		return ""
 	}
@@ -306,17 +307,20 @@ func logDroppedAntigravityToolUseSignature(modelName string, messageIndex, conte
 //   - []byte: The transformed request data in Antigravity API format
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToAntigravity(modelName, inputRawJSON, stream)
-
 }
 
 // convertClaudeRequestToAntigravity also reports an attachment Antigravity
 // cannot receive when it leaves a user turn with nothing to send.
-func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToAntigravityWithWebSearchContext(cache.RequireSignatureCacheScope(context.Background()), modelName, inputRawJSON, stream, nil)
+}
+
+func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, modelName string, inputRawJSON []byte, _ bool, webSearch *bool) ([]byte, error) {
 	enableThoughtTranslate := true
 	// The internal commentary marker must be restored as assistant text before
 	// any thinking handling, so it is never dropped or treated as reasoning.
 	rawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
-	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
+	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON, webSearch) {
 		return buildAntigravityWebSearchRequest(modelName, rawJSON), nil
 	}
 	var drops translatorcommon.UserTurnDrops
@@ -332,20 +336,20 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == ojson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
-				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+				if systemPrompt == "" || util.IsClaudeCodeAttributionSystemText(systemPrompt) {
 					continue
 				}
-				partJSON := []byte(`{}`)
-				if systemPrompt != "" {
-					partJSON, _ = ojson.SetBytes(partJSON, "text", systemPrompt)
-				}
-				systemParts = append(systemParts, partJSON)
+				partDoc := ojson.NewDoc([]byte(`{}`))
+				_ = partDoc.Set("text", systemPrompt)
+				systemParts = append(systemParts, partDoc.Bytes())
 			}
 		}
-	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		partJSON := []byte(`{"text":""}`)
-		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
-		systemParts = append(systemParts, partJSON)
+	} else if systemResult.Type == ojson.String {
+		if systemPrompt := systemResult.String(); systemPrompt != "" && !util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+			partDoc := ojson.NewDoc([]byte(`{"text":""}`))
+			_ = partDoc.Set("text", systemPrompt)
+			systemParts = append(systemParts, partDoc.Bytes())
+		}
 	}
 
 	// contents
@@ -423,7 +427,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Use GetThinkingText to handle wrapped thinking objects
 						thinkingText := thinking.GetThinkingText(contentResult)
 						signatureResult := contentResult.Get("signature")
-						signature := resolveThinkingSignature(modelName, thinkingText, signatureResult.String())
+						signature := resolveThinkingSignature(ctx, modelName, thinkingText, signatureResult.String())
 						if signature != "" && pendingDetachedSignature != "" {
 							if pendingDetachedSignature != signature {
 								appendDetachedCarrier(pendingDetachedSignature, false)
@@ -584,7 +588,8 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 
 						// Preserve every present input as valid JSON for the function call.
-						var argsRaw string
+						// Missing input represents a parameterless call.
+						argsRaw := `{}`
 						if argsResult.IsObject() {
 							argsRaw = argsResult.Raw
 						} else if argsResult.Exists() {
@@ -671,16 +676,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								imagePartItems := make([][]byte, 0, 2)
 								for _, fr := range frResults {
 									if fr.Get("type").String() == "image" && fr.Get("source.type").String() == "base64" {
-										inlineDataDoc := ojson.NewDoc([]byte(`{}`))
-										if mimeType := fr.Get("source.media_type").String(); mimeType != "" {
-											_ = inlineDataDoc.Set("mimeType", mimeType)
+										if imagePartJSON := claudeBase64InlineData(fr.Get("source")); imagePartJSON != nil {
+											imagePartItems = append(imagePartItems, imagePartJSON)
 										}
-										if data := fr.Get("source.data").String(); data != "" {
-											_ = inlineDataDoc.Set("data", data)
-										}
-
-										imagePartJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
-										imagePartItems = append(imagePartItems, imagePartJSON)
 										continue
 									}
 									if fr.Get("type").String() == "document" {
@@ -710,16 +708,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 							} else if functionResponseResult.IsObject() {
 								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
-									inlineDataDoc := ojson.NewDoc([]byte(`{}`))
-									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
-										_ = inlineDataDoc.Set("mimeType", mimeType)
+									if imagePartJSON := claudeBase64InlineData(functionResponseResult.Get("source")); imagePartJSON != nil {
+										_ = functionResponseDoc.SetRawBytes("parts", translatorcommon.JoinRawArray([][]byte{imagePartJSON}))
 									}
-									if data := functionResponseResult.Get("source.data").String(); data != "" {
-										_ = inlineDataDoc.Set("data", data)
-									}
-
-									imagePartJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
-									_ = functionResponseDoc.SetRawBytes("parts", translatorcommon.JoinRawArray([][]byte{imagePartJSON}))
 									_ = functionResponseDoc.Set(responsePath, "")
 								} else if functionResponseResult.Get("type").String() == "document" {
 									if docPartJSON := claudeBase64InlineData(functionResponseResult.Get("source")); docPartJSON != nil {
@@ -743,20 +734,10 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							partItems = append(partItems, partJSON)
 						}
 					} else if contentTypeResult.Type == ojson.String && contentTypeResult.String() == "image" {
-						sourceResult := contentResult.Get("source")
-						if sourceResult.Get("type").String() == "base64" {
-							inlineDataDoc := ojson.NewDoc([]byte(`{}`))
-							if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
-								_ = inlineDataDoc.Set("mimeType", mimeType)
-							}
-							if data := sourceResult.Get("data").String(); data != "" {
-								_ = inlineDataDoc.Set("data", data)
-							}
-
-							partJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
+						if partJSON := claudeBase64InlineData(contentResult.Get("source")); partJSON != nil {
 							partItems = append(partItems, partJSON)
 						} else if originalRole == "user" {
-							// A part that cannot be inlined (url or file source) is dropped; the turn is refused only if nothing else is left.
+							// A part that cannot be inlined (url, file, or incomplete base64 source) is dropped; the turn is refused only if nothing else is left.
 							drops.Drop("image")
 						}
 					} else if contentTypeResult.Type == ojson.String && (contentTypeResult.String() == "document" || contentTypeResult.String() == "container_upload") {
@@ -852,11 +833,11 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				}
 				contentItems = append(contentItems, clientContentJSON)
 			} else if contentsResult.Type == ojson.String {
-				partJSON := []byte(`{}`)
 				if prompt := contentsResult.String(); prompt != "" {
-					partJSON, _ = ojson.SetBytes(partJSON, "text", prompt)
+					partDoc := ojson.NewDoc([]byte(`{}`))
+					_ = partDoc.Set("text", prompt)
+					contentItems = append(contentItems, antigravityClaudeContent(role, [][]byte{partDoc.Bytes()}))
 				}
-				contentItems = append(contentItems, antigravityClaudeContent(role, [][]byte{partJSON}))
 			}
 		}
 	}
@@ -1006,8 +987,15 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if v := ojson.GetBytesNoCopy(rawJSON, "top_k"); v.Exists() && v.Type == ojson.Number {
 		_ = outDoc.Set("request.generationConfig.topK", v.Num)
 	}
-	if v := ojson.GetBytesNoCopy(rawJSON, "max_tokens"); v.Exists() && v.Type == ojson.Number {
-		_ = outDoc.Set("request.generationConfig.maxOutputTokens", v.Num)
+	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(ojson.GetBytesNoCopy(rawJSON, "max_tokens")); ok {
+		_ = outDoc.SetRaw("request.generationConfig.maxOutputTokens", rawMaxTokens)
+	}
+	if sequences := translatorcommon.ClaudeStopSequences(ojson.GetBytesNoCopy(rawJSON, "stop_sequences")); len(sequences) > 0 {
+		_ = outDoc.Set("request.generationConfig.stopSequences", sequences)
+	}
+	if schema, ok := translatorcommon.ClaudeOutputJSONSchema(ojson.GetBytesNoCopy(rawJSON, "output_config.format")); ok {
+		_ = outDoc.Set("request.generationConfig.responseMimeType", "application/json")
+		_ = outDoc.SetRaw("request.generationConfig.responseSchema", schema.Raw)
 	}
 
 	common.AttachDefaultSafetySettingsDoc(outDoc, "request.safetySettings")
@@ -1017,8 +1005,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	} else {
 		out = sigcompat.SanitizeGeminiSystemInstruction(out, "request.contents")
 	}
-
-	return out, drops.Err()
+	finalDoc := ojson.NewDoc(out)
+	antigravitygemini.NormalizeAntigravityRequestDoc(finalDoc)
+	return finalDoc.Bytes(), drops.Err()
 }
 
 // claudeBase64InlineData converts a Claude base64 source into an Antigravity
