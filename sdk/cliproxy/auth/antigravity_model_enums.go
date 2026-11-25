@@ -230,7 +230,7 @@ func SelectAntigravityModel(ctx context.Context, auth *Auth, upstreamModelID, le
 		}
 		selection.Enum = lookupEnum(upstreamModelID)
 		if groups := snapshot.Get("thinkingGroups"); level != "" && groups.IsObject() {
-			selection.selectThinkingVariant(level, AntigravityExcludedModels(auth, cfg), lookupEnum, func(group, level string) (int, bool) {
+			selection.selectThinkingVariant(level, AntigravityExcludedModels(auth, cfg), auth.Prefix, lookupEnum, func(group, level string) (int, bool) {
 				levels := groups.Get(ojson.Escape(group))
 				if !levels.IsObject() {
 					return -1, false
@@ -258,7 +258,7 @@ func SelectAntigravityModel(ctx context.Context, auth *Auth, upstreamModelID, le
 				}
 				selection.Enum = lookupEnum(upstreamModelID)
 				if level != "" && len(snapshot.ThinkingGroups) > 0 {
-					selection.selectThinkingVariant(level, AntigravityExcludedModels(auth, cfg), lookupEnum, func(group, level string) (int, bool) {
+					selection.selectThinkingVariant(level, AntigravityExcludedModels(auth, cfg), auth.Prefix, lookupEnum, func(group, level string) (int, bool) {
 						levels, isGroup := snapshot.ThinkingGroups[group]
 						if limit, listed := levels[level]; listed && limit >= 0 {
 							return limit, true
@@ -311,7 +311,7 @@ func SameAntigravityModelCatalogScope(before, after *Auth) bool {
 
 // lookupLimit returns -1 for a missing or malformed member and zero for a
 // declared member that cannot serve as a target.
-func (selection *AntigravityModelSelection) selectThinkingVariant(level string, excluded []string, lookupEnum func(string) string, lookupLimit func(group, level string) (int, bool)) {
+func (selection *AntigravityModelSelection) selectThinkingVariant(level string, excluded []string, authPrefix string, lookupEnum func(string) string, lookupLimit func(group, level string) (int, bool)) {
 	group := selection.ID
 	limit, isGroup := lookupLimit(group, level)
 	if !isGroup {
@@ -338,8 +338,15 @@ func (selection *AntigravityModelSelection) selectThinkingVariant(level string, 
 	}
 	target := group + "-" + level
 	normalized := strings.ToLower(strings.TrimSpace(target))
+	prefix := strings.ToLower(strings.Trim(strings.TrimSpace(authPrefix), "/"))
+	prefixed := ""
+	if prefix != "" {
+		prefixed = prefix + "/" + normalized
+	}
 	for _, pattern := range excluded {
-		if modelconfig.MatchExcludedModelPattern(strings.ToLower(strings.TrimSpace(pattern)), normalized) {
+		normalizedPattern := strings.ToLower(strings.TrimSpace(pattern))
+		if modelconfig.MatchExcludedModelPattern(normalizedPattern, normalized) ||
+			(prefixed != "" && modelconfig.MatchExcludedModelPattern(normalizedPattern, prefixed)) {
 			return
 		}
 	}

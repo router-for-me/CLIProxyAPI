@@ -66,3 +66,60 @@ func TestAntigravityModelEnumSnapshotMissingWithoutActiveKV(t *testing.T) {
 		}
 	})
 }
+
+func TestSelectAntigravityModelSkipsPrefixedExcludedThinkingVariant(t *testing.T) {
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatal(errShutdown)
+	}
+	t.Cleanup(func() {
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Error(errShutdown)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		id       string
+		prefix   string
+		excluded string
+		wantID   string
+		wantEnum string
+	}{
+		{name: "canonical exclusion", id: "select-canonical", prefix: "team", excluded: "gemini-review-low", wantID: "gemini-review-high", wantEnum: "HIGH_ENUM"},
+		{name: "prefixed exact exclusion", id: "select-prefixed", prefix: "team", excluded: "team/gemini-review-low", wantID: "gemini-review-high", wantEnum: "HIGH_ENUM"},
+		{name: "prefixed wildcard exclusion", id: "select-wildcard", prefix: "team", excluded: "team/gemini-review-*", wantID: "gemini-review-high", wantEnum: "HIGH_ENUM"},
+		{name: "different prefix remains allowed", id: "select-different-prefix", prefix: "team", excluded: "other/gemini-review-low", wantID: "gemini-review-low", wantEnum: "LOW_ENUM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &Auth{
+				ID:       tc.id,
+				Provider: "antigravity",
+				Prefix:   tc.prefix,
+				Status:   StatusActive,
+				Attributes: map[string]string{
+					"excluded_models": tc.excluded,
+				},
+			}
+			if !StoreAntigravityModelCatalog(t.Context(), auth,
+				map[string]string{
+					"gemini-review-high": "HIGH_ENUM",
+					"gemini-review-low":  "LOW_ENUM",
+				},
+				map[string]map[string]int{
+					"gemini-review": {
+						"high": 32768,
+						"low":  65536,
+					},
+				},
+				nil,
+			) {
+				t.Fatal("StoreAntigravityModelCatalog() = false")
+			}
+
+			got := SelectAntigravityModel(t.Context(), auth, "gemini-review-high", "low", nil)
+			if got.ID != tc.wantID || got.Enum != tc.wantEnum {
+				t.Fatalf("selected model = %q (%q), want %q (%q)", got.ID, got.Enum, tc.wantID, tc.wantEnum)
+			}
+		})
+	}
+}
