@@ -336,20 +336,20 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == ojson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
-				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+				if systemPrompt == "" || util.IsClaudeCodeAttributionSystemText(systemPrompt) {
 					continue
 				}
-				partJSON := []byte(`{}`)
-				if systemPrompt != "" {
-					partJSON, _ = ojson.SetBytes(partJSON, "text", systemPrompt)
-				}
-				systemParts = append(systemParts, partJSON)
+				partDoc := ojson.NewDoc([]byte(`{}`))
+				_ = partDoc.Set("text", systemPrompt)
+				systemParts = append(systemParts, partDoc.Bytes())
 			}
 		}
-	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		partJSON := []byte(`{"text":""}`)
-		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
-		systemParts = append(systemParts, partJSON)
+	} else if systemResult.Type == ojson.String {
+		if systemPrompt := systemResult.String(); systemPrompt != "" && !util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+			partDoc := ojson.NewDoc([]byte(`{"text":""}`))
+			_ = partDoc.Set("text", systemPrompt)
+			systemParts = append(systemParts, partDoc.Bytes())
+		}
 	}
 
 	// contents
@@ -676,16 +676,9 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 								imagePartItems := make([][]byte, 0, 2)
 								for _, fr := range frResults {
 									if fr.Get("type").String() == "image" && fr.Get("source.type").String() == "base64" {
-										inlineDataDoc := ojson.NewDoc([]byte(`{}`))
-										if mimeType := fr.Get("source.media_type").String(); mimeType != "" {
-											_ = inlineDataDoc.Set("mimeType", mimeType)
+										if imagePartJSON := claudeBase64InlineData(fr.Get("source")); imagePartJSON != nil {
+											imagePartItems = append(imagePartItems, imagePartJSON)
 										}
-										if data := fr.Get("source.data").String(); data != "" {
-											_ = inlineDataDoc.Set("data", data)
-										}
-
-										imagePartJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
-										imagePartItems = append(imagePartItems, imagePartJSON)
 										continue
 									}
 									if fr.Get("type").String() == "document" {
@@ -715,16 +708,9 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 
 							} else if functionResponseResult.IsObject() {
 								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
-									inlineDataDoc := ojson.NewDoc([]byte(`{}`))
-									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
-										_ = inlineDataDoc.Set("mimeType", mimeType)
+									if imagePartJSON := claudeBase64InlineData(functionResponseResult.Get("source")); imagePartJSON != nil {
+										_ = functionResponseDoc.SetRawBytes("parts", translatorcommon.JoinRawArray([][]byte{imagePartJSON}))
 									}
-									if data := functionResponseResult.Get("source.data").String(); data != "" {
-										_ = inlineDataDoc.Set("data", data)
-									}
-
-									imagePartJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
-									_ = functionResponseDoc.SetRawBytes("parts", translatorcommon.JoinRawArray([][]byte{imagePartJSON}))
 									_ = functionResponseDoc.Set(responsePath, "")
 								} else if functionResponseResult.Get("type").String() == "document" {
 									if docPartJSON := claudeBase64InlineData(functionResponseResult.Get("source")); docPartJSON != nil {
@@ -748,20 +734,10 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 							partItems = append(partItems, partJSON)
 						}
 					} else if contentTypeResult.Type == ojson.String && contentTypeResult.String() == "image" {
-						sourceResult := contentResult.Get("source")
-						if sourceResult.Get("type").String() == "base64" {
-							inlineDataDoc := ojson.NewDoc([]byte(`{}`))
-							if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
-								_ = inlineDataDoc.Set("mimeType", mimeType)
-							}
-							if data := sourceResult.Get("data").String(); data != "" {
-								_ = inlineDataDoc.Set("data", data)
-							}
-
-							partJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
+						if partJSON := claudeBase64InlineData(contentResult.Get("source")); partJSON != nil {
 							partItems = append(partItems, partJSON)
 						} else if originalRole == "user" {
-							// A part that cannot be inlined (url or file source) is dropped; the turn is refused only if nothing else is left.
+							// A part that cannot be inlined (url, file, or incomplete base64 source) is dropped; the turn is refused only if nothing else is left.
 							drops.Drop("image")
 						}
 					} else if contentTypeResult.Type == ojson.String && (contentTypeResult.String() == "document" || contentTypeResult.String() == "container_upload") {
@@ -857,11 +833,11 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 				}
 				contentItems = append(contentItems, clientContentJSON)
 			} else if contentsResult.Type == ojson.String {
-				partJSON := []byte(`{}`)
 				if prompt := contentsResult.String(); prompt != "" {
-					partJSON, _ = ojson.SetBytes(partJSON, "text", prompt)
+					partDoc := ojson.NewDoc([]byte(`{}`))
+					_ = partDoc.Set("text", prompt)
+					contentItems = append(contentItems, antigravityClaudeContent(role, [][]byte{partDoc.Bytes()}))
 				}
-				contentItems = append(contentItems, antigravityClaudeContent(role, [][]byte{partJSON}))
 			}
 		}
 	}

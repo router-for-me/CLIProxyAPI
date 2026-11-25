@@ -390,3 +390,88 @@ func TestConvertClaudeResponseToGeminiNonStream_SSEPreservesMessageStartUsageAnd
 		t.Errorf("cachedContentTokenCount = %d, want 6; output=%s", got, out)
 	}
 }
+
+func TestConvertClaudeResponseToGemini_StreamToolUseOmitsPrematureFinishReason(t *testing.T) {
+	t.Run("parallel tool calls emit finishReason only on message_delta", func(t *testing.T) {
+		ctx := context.Background()
+		var param any
+
+		events := []string{
+			`data: {"type":"message_start","message":{"id":"msg_parallel","model":"claude-sonnet-4-5"}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"a\"}"}}`,
+			`data: {"type":"content_block_stop","index":0}`,
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_2","name":"fetch"}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"id\":2}"}}`,
+			`data: {"type":"content_block_stop","index":1}`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":12,"output_tokens":34}}`,
+			`data: {"type":"message_stop"}`,
+		}
+
+		var chunks [][]byte
+		for _, event := range events {
+			chunks = append(chunks, ConvertClaudeResponseToGemini(ctx, "claude-sonnet-4-5", nil, nil, []byte(event), &param)...)
+		}
+
+		if len(chunks) != 3 {
+			t.Fatalf("expected 3 output chunks (2 tool calls + 1 message_delta), got %d", len(chunks))
+		}
+
+		for i, want := range []struct {
+			id   string
+			name string
+		}{
+			{id: "toolu_1", name: "lookup"},
+			{id: "toolu_2", name: "fetch"},
+		} {
+			if fr := ojson.GetBytesNoCopy(chunks[i], "candidates.0.finishReason"); fr.Exists() {
+				t.Errorf("chunk[%d] unexpectedly set finishReason=%q; chunk=%s", i, fr.String(), chunks[i])
+			}
+			if got := ojson.GetBytesNoCopy(chunks[i], "candidates.0.content.parts.0.functionCall.id").String(); got != want.id {
+				t.Errorf("chunk[%d] functionCall.id = %q, want %q", i, got, want.id)
+			}
+			if got := ojson.GetBytesNoCopy(chunks[i], "candidates.0.content.parts.0.functionCall.name").String(); got != want.name {
+				t.Errorf("chunk[%d] functionCall.name = %q, want %q", i, got, want.name)
+			}
+		}
+
+		if got := ojson.GetBytesNoCopy(chunks[2], "candidates.0.finishReason").String(); got != "STOP" {
+			t.Errorf("final chunk finishReason = %q, want STOP; chunk=%s", got, chunks[2])
+		}
+		if got := ojson.GetBytesNoCopy(chunks[2], "usageMetadata.promptTokenCount").Int(); got != 12 {
+			t.Errorf("final chunk promptTokenCount = %d, want 12; chunk=%s", got, chunks[2])
+		}
+		if got := ojson.GetBytesNoCopy(chunks[2], "usageMetadata.candidatesTokenCount").Int(); got != 34 {
+			t.Errorf("final chunk candidatesTokenCount = %d, want 34; chunk=%s", got, chunks[2])
+		}
+	})
+
+	t.Run("tool_use followed by max_tokens emits only MAX_TOKENS finishReason", func(t *testing.T) {
+		ctx := context.Background()
+		var param any
+
+		events := []string{
+			`data: {"type":"message_start","message":{"id":"msg_max","model":"claude-sonnet-4-5"}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"a\"}"}}`,
+			`data: {"type":"content_block_stop","index":0}`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"input_tokens":10,"output_tokens":50}}`,
+			`data: {"type":"message_stop"}`,
+		}
+
+		var chunks [][]byte
+		for _, event := range events {
+			chunks = append(chunks, ConvertClaudeResponseToGemini(ctx, "claude-sonnet-4-5", nil, nil, []byte(event), &param)...)
+		}
+
+		if len(chunks) != 2 {
+			t.Fatalf("expected 2 output chunks (1 tool call + 1 message_delta), got %d", len(chunks))
+		}
+		if fr := ojson.GetBytesNoCopy(chunks[0], "candidates.0.finishReason"); fr.Exists() {
+			t.Errorf("tool_use chunk unexpectedly set finishReason=%q; chunk=%s", fr.String(), chunks[0])
+		}
+		if got := ojson.GetBytesNoCopy(chunks[1], "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+			t.Errorf("final chunk finishReason = %q, want MAX_TOKENS; chunk=%s", got, chunks[1])
+		}
+	})
+}

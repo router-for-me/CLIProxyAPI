@@ -54,6 +54,14 @@ const ErrorCodeCredentialQuota = "credential_quota"
 
 const credentialQuotaErrorCode = ErrorCodeCredentialQuota
 
+// ErrorCodeHomeExecutorPluginUnavailable identifies a local Home executor selection failure.
+const ErrorCodeHomeExecutorPluginUnavailable = "home_executor_plugin_unavailable"
+
+func isHomeExecutorPluginUnavailableError(err error) bool {
+	authErr, ok := errors.AsType[*Error](err)
+	return ok && authErr != nil && authErr.Code == ErrorCodeHomeExecutorPluginUnavailable
+}
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

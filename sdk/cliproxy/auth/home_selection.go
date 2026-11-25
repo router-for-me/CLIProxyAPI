@@ -152,6 +152,7 @@ func (r *executionResources) Close() error {
 type HomeDispatchSelection struct {
 	Auth                       *Auth
 	Executor                   ProviderExecutor
+	ExecutorPlugin             string
 	Provider                   string
 	SelectionID                string
 	CanonicalSessionID         string
@@ -165,6 +166,7 @@ type HomeDispatchSelection struct {
 	lcpNodeKind                string
 	modelInfo                  *registry.ModelInfo
 	configurationUpdateSupport *bool
+	authExecutor               ProviderExecutor
 
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope

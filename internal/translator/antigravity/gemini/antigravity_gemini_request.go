@@ -132,6 +132,11 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							_ = ensureDeclDoc().SetRaw("parametersJsonSchema", normalizedParams)
 							declarationsChanged = true
 						}
+					} else if parametersJSONSchema := declaration.Get("parameters_json_schema"); parametersJSONSchema.Exists() {
+						if normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parametersJSONSchema.Raw); normalizedParams != parametersJSONSchema.Raw {
+							_ = ensureDeclDoc().SetRaw("parameters_json_schema", normalizedParams)
+							declarationsChanged = true
+						}
 					}
 					if declarationDoc != nil {
 						declarationItems = append(declarationItems, declarationDoc.Bytes())
@@ -204,8 +209,10 @@ func normalizeAntigravityPartsDocAt(doc *ojson.Doc, parts ojson.Result, partsPat
 		if antigravityMediaFieldNeedsNormalization(part, "file_data", "fileData") {
 			normalizeAntigravityMediaFieldDoc(doc, partPath, "file_data", "fileData")
 		}
-		if functionParts := part.Get("functionResponse.parts"); functionParts.IsArray() {
-			normalizeAntigravityPartsDocAt(doc, functionParts, partPath+".functionResponse.parts")
+		for _, field := range []string{"functionResponse", "function_response"} {
+			if functionParts := part.Get(field + ".parts"); functionParts.IsArray() {
+				normalizeAntigravityPartsDocAt(doc, functionParts, partPath+"."+field+".parts")
+			}
 		}
 	}
 }
@@ -572,7 +579,8 @@ func SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName string, doc
 			}
 
 			rawSignature, hasStringSignature := antigravityClaudeGeminiPartThoughtSignature(part)
-			hasSignatureKey := hasStringSignature || antigravityClaudeGeminiPartHasThoughtSignatureKey(part) || antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(partResult.Raw)
+			rawSigScan := scanAntigravityClaudeGeminiPartThoughtSignatureKeysInRaw(partResult.Raw)
+			hasSignatureKey := hasStringSignature || antigravityClaudeGeminiPartHasThoughtSignatureKey(part) || rawSigScan.hasAny()
 
 			if hasFunctionResponsePart(part) {
 				if hasSignatureKey {
@@ -617,15 +625,22 @@ func SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName string, doc
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_thinking_block", "empty_thinking_text", contentIndex, partIndex, rawSignature)
 					continue
 				}
-				if normalized != rawSignature {
+				canonicalVal, hasCanonicalString := stringAtPath(part, "thoughtSignature")
+				hadNonCanonical := rawSigScan.hasNonCanonical ||
+					rawSigScan.canonicalCount != 1 ||
+					!hasCanonicalString ||
+					canonicalVal != normalized
+				if normalized != rawSignature || hadNonCanonical {
 					changed = true
 					contentChanged = true
 					logAntigravityClaudeGeminiSignatureSanitize(modelName, "normalize_signature", "compatible_claude_signature", contentIndex, partIndex, rawSignature)
+					deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
+					part["thoughtSignature"] = normalized
+					partBytes, _ := json.Marshal(part)
+					rewrittenParts = append(rewrittenParts, partBytes)
+				} else {
+					rewrittenParts = append(rewrittenParts, []byte(partResult.Raw))
 				}
-				deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
-				part["thoughtSignature"] = normalized
-				partBytes, _ := json.Marshal(part)
-				rewrittenParts = append(rewrittenParts, partBytes)
 				continue
 			}
 
@@ -660,15 +675,68 @@ func SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName string, doc
 	return doc.SetRawBytes(contentsPath, translatorcommon.JoinRawArray(rewrittenContents)) == nil
 }
 
-func antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(raw string) bool {
+var antigravityClaudeGeminiThoughtSignaturePaths = [][]string{
+	{"thoughtSignature"},
+	{"thought_signature"},
+	{"functionCall", "thoughtSignature"},
+	{"functionCall", "thought_signature"},
+	{"function_call", "thoughtSignature"},
+	{"function_call", "thought_signature"},
+	{"functionResponse", "thoughtSignature"},
+	{"functionResponse", "thought_signature"},
+	{"function_response", "thoughtSignature"},
+	{"function_response", "thought_signature"},
+	{"extra_content", "google", "thought_signature"},
+}
+
+type antigravityClaudeGeminiRawSignatureScan struct {
+	canonicalCount  int
+	hasNonCanonical bool
+}
+
+func (s antigravityClaudeGeminiRawSignatureScan) hasAny() bool {
+	return s.canonicalCount > 0 || s.hasNonCanonical
+}
+
+type antigravityRawJSONFrame struct {
+	isObject  bool
+	expectKey bool
+	key       string
+}
+
+func matchAntigravityClaudeGeminiSignatureStack(stack []antigravityRawJSONFrame) (bool, bool) {
+	for _, frame := range stack {
+		if !frame.isObject {
+			return false, false
+		}
+	}
+	for pathIdx, path := range antigravityClaudeGeminiThoughtSignaturePaths {
+		if len(path) != len(stack) {
+			continue
+		}
+		matched := true
+		for i, key := range path {
+			if stack[i].key != key {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return pathIdx == 0, pathIdx > 0
+		}
+	}
+	return false, false
+}
+
+func scanAntigravityClaudeGeminiPartThoughtSignatureKeysInRaw(raw string) antigravityClaudeGeminiRawSignatureScan {
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.UseNumber()
-	var stack []bool
-	expectKey := false
+	var stack []antigravityRawJSONFrame
+	var scan antigravityClaudeGeminiRawSignatureScan
 
 	for {
-		t, err := dec.Token()
-		if err != nil {
+		t, errTok := dec.Token()
+		if errTok != nil {
 			break
 		}
 
@@ -676,60 +744,45 @@ func antigravityClaudeGeminiPartHasThoughtSignatureKeyInRaw(raw string) bool {
 		case json.Delim:
 			switch v {
 			case '{':
-				stack = append(stack, true)
-				expectKey = true
-			case '}':
-				if len(stack) > 0 {
-					stack = stack[:len(stack)-1]
-				}
-				if len(stack) > 0 && stack[len(stack)-1] {
-					expectKey = true
-				} else {
-					expectKey = false
-				}
+				stack = append(stack, antigravityRawJSONFrame{isObject: true, expectKey: true})
 			case '[':
-				stack = append(stack, false)
-				expectKey = false
-			case ']':
+				stack = append(stack, antigravityRawJSONFrame{isObject: false})
+			case '}', ']':
 				if len(stack) > 0 {
 					stack = stack[:len(stack)-1]
 				}
-				if len(stack) > 0 && stack[len(stack)-1] {
-					expectKey = true
-				} else {
-					expectKey = false
+				if len(stack) > 0 && stack[len(stack)-1].isObject {
+					stack[len(stack)-1].expectKey = true
+					stack[len(stack)-1].key = ""
 				}
 			}
 		case string:
-			if expectKey && len(stack) > 0 && stack[len(stack)-1] {
-				if v == "thoughtSignature" || v == "thought_signature" {
-					return true
-				}
-				expectKey = false
-			} else {
-				if len(stack) > 0 && stack[len(stack)-1] {
-					expectKey = true
+			if len(stack) > 0 && stack[len(stack)-1].isObject {
+				if stack[len(stack)-1].expectKey {
+					stack[len(stack)-1].key = v
+					stack[len(stack)-1].expectKey = false
+					if isCanonical, isNonCanonical := matchAntigravityClaudeGeminiSignatureStack(stack); isCanonical {
+						scan.canonicalCount++
+					} else if isNonCanonical {
+						scan.hasNonCanonical = true
+					}
+				} else {
+					stack[len(stack)-1].expectKey = true
+					stack[len(stack)-1].key = ""
 				}
 			}
 		default:
-			if len(stack) > 0 && stack[len(stack)-1] {
-				expectKey = true
+			if len(stack) > 0 && stack[len(stack)-1].isObject {
+				stack[len(stack)-1].expectKey = true
+				stack[len(stack)-1].key = ""
 			}
 		}
 	}
-	return false
+	return scan
 }
 
 func antigravityClaudeGeminiPartHasThoughtSignatureKey(part map[string]any) bool {
-	for _, path := range [][]string{
-		{"thoughtSignature"},
-		{"thought_signature"},
-		{"functionCall", "thoughtSignature"},
-		{"functionCall", "thought_signature"},
-		{"functionResponse", "thoughtSignature"},
-		{"functionResponse", "thought_signature"},
-		{"extra_content", "google", "thought_signature"},
-	} {
+	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		if hasKeyAtPath(part, path...) {
 			return true
 		}
@@ -753,15 +806,7 @@ func hasKeyAtPath(value map[string]any, path ...string) bool {
 }
 
 func antigravityClaudeGeminiPartThoughtSignature(part map[string]any) (string, bool) {
-	for _, path := range [][]string{
-		{"thoughtSignature"},
-		{"thought_signature"},
-		{"functionCall", "thoughtSignature"},
-		{"functionCall", "thought_signature"},
-		{"functionResponse", "thoughtSignature"},
-		{"functionResponse", "thought_signature"},
-		{"extra_content", "google", "thought_signature"},
-	} {
+	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		if value, ok := stringAtPath(part, path...); ok {
 			return value, true
 		}
@@ -770,15 +815,7 @@ func antigravityClaudeGeminiPartThoughtSignature(part map[string]any) (string, b
 }
 
 func deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part map[string]any) {
-	for _, path := range [][]string{
-		{"thoughtSignature"},
-		{"thought_signature"},
-		{"functionCall", "thoughtSignature"},
-		{"functionCall", "thought_signature"},
-		{"functionResponse", "thoughtSignature"},
-		{"functionResponse", "thought_signature"},
-		{"extra_content", "google", "thought_signature"},
-	} {
+	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		deleteAtPath(part, path...)
 	}
 }

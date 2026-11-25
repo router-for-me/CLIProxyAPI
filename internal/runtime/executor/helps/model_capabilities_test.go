@@ -501,3 +501,67 @@ func TestApplyRequestThinkingReconcilesClaudeOpenAICompatToolCallReasoning(t *te
 		})
 	}
 }
+
+func TestApplyRequestThinkingDoc_GeminiToCodexNullBudgetPreservesDefault_Issue8098(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID: "gpt-5.1-codex",
+		Thinking: &registry.ThinkingSupport{
+			ZeroAllowed: true,
+			Levels:      []string{"none", "low", "medium", "high"},
+		},
+	}
+
+	cases := []struct {
+		name       string
+		sourceBody string
+		translated string
+		wantEffort string
+	}{
+		{
+			name:       "camelCase null thinkingBudget keeps default medium",
+			sourceBody: `{"generationConfig":{"thinkingConfig":{"thinkingBudget":null}}}`,
+			translated: `{"model":"gpt-5.1-codex","reasoning":{"effort":"medium"},"input":[]}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "snake_case null thinking_budget keeps default medium",
+			sourceBody: `{"generation_config":{"thinking_config":{"thinking_budget":null}}}`,
+			translated: `{"model":"gpt-5.1-codex","reasoning":{"effort":"medium"},"input":[]}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "camelCase explicit zero thinkingBudget disables reasoning",
+			sourceBody: `{"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
+			translated: `{"model":"gpt-5.1-codex","reasoning":{"effort":"none"},"input":[]}`,
+			wantEffort: "none",
+		},
+		{
+			name:       "snake_case explicit zero thinking_budget disables reasoning",
+			sourceBody: `{"generation_config":{"thinking_config":{"thinking_budget":0}}}`,
+			translated: `{"model":"gpt-5.1-codex","reasoning":{"effort":"medium"},"input":[]}`,
+			wantEffort: "none",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.1-codex",
+				Payload: []byte(tc.sourceBody),
+				Metadata: map[string]any{
+					"cliproxy.resolved_api_key_model_info": modelInfo,
+				},
+			}
+			opts := cliproxyexecutor.Options{
+				OriginalRequest: []byte(tc.sourceBody),
+			}
+			doc := ojson.NewDocString(tc.translated)
+			if errDoc := helps.ApplyRequestThinkingDoc(doc, req, opts, "gemini", "codex", "codex"); errDoc != nil {
+				t.Fatalf("ApplyRequestThinkingDoc() error = %v", errDoc)
+			}
+			if got := doc.Get("reasoning.effort").String(); got != tc.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; out=%s", got, tc.wantEffort, doc.String())
+			}
+		})
+	}
+}
