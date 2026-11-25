@@ -251,12 +251,16 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		appendEvent("content_block_delta", string(data))
 	}
 	appendToolInputObject := func(partialJSON string) {
-		if partialJSON == "" {
+		trimmed := strings.TrimSpace(partialJSON)
+		if trimmed == "" {
 			return
 		}
-		if ojson.Parse(partialJSON).IsObject() {
-			objectBody := strings.TrimSuffix(strings.TrimPrefix(partialJSON, "{"), "}")
+		if ojson.Parse(trimmed).IsObject() {
+			objectBody := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "{"), "}"))
 			if objectBody == "" {
+				if !params.CurrentToolInputEmitted && !params.CurrentToolInputOpen {
+					params.CurrentToolPendingEmpty = true
+				}
 				return
 			}
 			if params.CurrentToolInputOpen {
@@ -551,16 +555,14 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 					cleanArgs := util.CleanClaudeToolArgumentsWithTranslated(fcArgsResult.Raw, fcName, originalRequestRawJSON, requestRawJSON)
 					if params.CurrentToolIsParameterless {
-						if params.CurrentToolInputEmitted {
-							cleanArgs = ""
-						} else {
+						if !params.CurrentToolInputEmitted {
+							emitToolInput("{}")
 							params.CurrentToolInputEmitted = true
+							params.CurrentToolPendingEmpty = false
 						}
 					} else if cleanArgs == "{}" {
 						params.CurrentToolPendingEmpty = true
-						cleanArgs = ""
-					}
-					if cleanArgs != "" {
+					} else if cleanArgs != "" {
 						appendToolInputObject(cleanArgs)
 					}
 				}

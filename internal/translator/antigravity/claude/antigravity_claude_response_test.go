@@ -2080,6 +2080,176 @@ func TestConvertAntigravityResponseToClaude_ImplicitOpenToolContinuationOrdering
 	}
 }
 
+func TestConvertAntigravityResponseToClaude_ParameterlessToolEmitsEmptyObjectDelta(t *testing.T) {
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+
+	testCases := []struct {
+		name        string
+		origRequest []byte
+		chunks      [][]byte
+	}{
+		{
+			name:        "closed_empty_schema_empty_args",
+			origRequest: []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}}]}`),
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+		},
+		{
+			name:        "closed_empty_schema_placeholder_and_continuation",
+			origRequest: []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}}]}`),
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"entering plan mode"}}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+		},
+		{
+			name:        "missing_schema_empty_args",
+			origRequest: []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"Ping"}]}`),
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"Ping","args":{}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			var streamBytes []byte
+			for _, chunk := range tc.chunks {
+				streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", tc.origRequest, translatedRequest, chunk, &param), nil)...)
+			}
+			streamText := string(streamBytes)
+
+			deltaCount := 0
+			var deltaPartial strings.Builder
+			for _, line := range strings.Split(streamText, "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(line, "data: ")
+				if ojson.Get(payload, "delta.type").String() == "input_json_delta" {
+					deltaCount++
+					deltaPartial.WriteString(ojson.Get(payload, "delta.partial_json").String())
+				}
+			}
+			if deltaCount != 1 || deltaPartial.String() != "{}" {
+				t.Fatalf("expected 1 input_json_delta with {}, got count=%d partial_json=%q (full output: %s)", deltaCount, deltaPartial.String(), streamText)
+			}
+		})
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_WhitespaceOnlyObjectArgs(t *testing.T) {
+	// Use an open dynamic schema (additionalProperties: true) so argument cleaning preserves
+	// raw whitespace-only empty objects like "{ }" and forwards them to appendToolInputObject.
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"search","input_schema":{"type":"object","additionalProperties":true}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+
+	testCases := []struct {
+		name   string
+		chunks [][]byte
+		check  func(t *testing.T, partial string, streamText string)
+	}{
+		{
+			name: "whitespace_empty_then_real_args",
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{ }}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"k":"v"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+			check: func(t *testing.T, partial string, streamText string) {
+				t.Helper()
+				if !ojson.Valid(partial) || ojson.Parse(partial).Get("k").String() != "v" {
+					t.Fatalf("expected valid JSON object with k=v, got %q (full output: %s)", partial, streamText)
+				}
+			},
+		},
+		{
+			name: "newline_empty_then_real_args",
+			chunks: [][]byte{
+				[]byte("{\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"search\",\"args\":{\n}}}]}}],\"modelVersion\":\"gemini-3.8-flash-high\",\"responseId\":\"resp-1\"}}"),
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"k":"v"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+			check: func(t *testing.T, partial string, streamText string) {
+				t.Helper()
+				if !ojson.Valid(partial) || ojson.Parse(partial).Get("k").String() != "v" {
+					t.Fatalf("expected valid JSON object with k=v, got %q (full output: %s)", partial, streamText)
+				}
+			},
+		},
+		{
+			name: "real_args_then_whitespace_empty",
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"k":"v"}}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{ }}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+			check: func(t *testing.T, partial string, streamText string) {
+				t.Helper()
+				if !ojson.Valid(partial) || ojson.Parse(partial).Get("k").String() != "v" {
+					t.Fatalf("expected valid JSON object with k=v, got %q (full output: %s)", partial, streamText)
+				}
+			},
+		},
+		{
+			name: "single_chunk_whitespace_empty_object",
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{ }}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+			check: func(t *testing.T, partial string, streamText string) {
+				t.Helper()
+				if partial != "{}" {
+					t.Fatalf("expected {}, got %q (full output: %s)", partial, streamText)
+				}
+			},
+		},
+		{
+			name: "whitespace_padded_objects_merged",
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{ "a": 1 }}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{ "b": 2 }}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+				[]byte("[DONE]"),
+			},
+			check: func(t *testing.T, partial string, streamText string) {
+				t.Helper()
+				parsed := ojson.Parse(partial)
+				if !ojson.Valid(partial) || !parsed.IsObject() || parsed.Get("a").Int() != 1 || parsed.Get("b").Int() != 2 {
+					t.Fatalf("expected valid merged JSON object {a:1, b:2}, got %q (full output: %s)", partial, streamText)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			var streamBytes []byte
+			for _, chunk := range tc.chunks {
+				streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, chunk, &param), nil)...)
+			}
+			streamText := string(streamBytes)
+
+			var deltaPartial strings.Builder
+			for _, line := range strings.Split(streamText, "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(line, "data: ")
+				if ojson.Get(payload, "delta.type").String() == "input_json_delta" {
+					deltaPartial.WriteString(ojson.Get(payload, "delta.partial_json").String())
+				}
+			}
+			tc.check(t, deltaPartial.String(), streamText)
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToClaudeNonStream_RefusalFinishReasons(t *testing.T) {
 	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
 	testCases := []struct {
