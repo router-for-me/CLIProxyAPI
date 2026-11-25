@@ -1911,6 +1911,136 @@ func TestConvertAntigravityResponseToClaude_SignedContinuationKeepsOpenToolBlock
 	}
 }
 
+func TestConvertAntigravityResponseToClaude_SignedToolContinuationTransitionEmitsDeferredSignature(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"read_file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"}}}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	continuationSignature := testGeminiEPrefixSignature(t)
+	carrierSignature := encodeGeminiClaudeCarrierSignature(continuationSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierFunction)
+
+	testCases := []struct {
+		name            string
+		followUpChunk   []byte
+		wantBlockType   string
+		wantDeltaType   string
+		wantDeltaField  string
+		wantDeltaValue  string
+		replayFollowUp  string
+		checkReplayPart func(t *testing.T, part ojson.Result)
+	}{
+		{
+			name:           "tool_use_to_thinking",
+			followUpChunk:  []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"follow-up reasoning","thought":true}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":16},"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+			wantBlockType:  "thinking",
+			wantDeltaType:  "thinking_delta",
+			wantDeltaField: "delta.thinking",
+			wantDeltaValue: "follow-up reasoning",
+			replayFollowUp: `{"type":"thinking","thinking":"follow-up reasoning"}`,
+			checkReplayPart: func(t *testing.T, part ojson.Result) {
+				t.Helper()
+				if !part.Get("thought").Bool() || part.Get("text").String() != "follow-up reasoning" || part.Get("thoughtSignature").String() != "" {
+					t.Fatalf("unexpected replayed thinking part: %s", part.Raw)
+				}
+			},
+		},
+		{
+			name:           "tool_use_to_text",
+			followUpChunk:  []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"follow-up answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14},"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`),
+			wantBlockType:  "text",
+			wantDeltaType:  "text_delta",
+			wantDeltaField: "delta.text",
+			wantDeltaValue: "follow-up answer",
+			replayFollowUp: `{"type":"text","text":"follow-up answer"}`,
+			checkReplayPart: func(t *testing.T, part ojson.Result) {
+				t.Helper()
+				if part.Get("thought").Bool() || part.Get("text").String() != "follow-up answer" || part.Get("thoughtSignature").String() != "" {
+					t.Fatalf("unexpected replayed text part: %s", part.Raw)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			firstChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.go"}}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+			continuationChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"line":1}},"thoughtSignature":"` + continuationSignature + `"}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+
+			var param any
+			streamBytes := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, firstChunk, &param), nil)
+			streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, continuationChunk, &param), nil)...)
+			streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, tc.followUpChunk, &param), nil)...)
+			streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, []byte("[DONE]"), &param), nil)...)
+			streamText := string(streamBytes)
+
+			var toolInput strings.Builder
+			var followUpContent strings.Builder
+			var carrierSig string
+			blockTypes := map[int64]string{}
+			stoppedIndices := map[int64]bool{}
+			for _, line := range strings.Split(streamText, "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(line, "data: ")
+				eventType := ojson.Get(payload, "type").String()
+				index := ojson.Get(payload, "index").Int()
+				switch eventType {
+				case "content_block_start":
+					blockTypes[index] = ojson.Get(payload, "content_block.type").String()
+				case "content_block_stop":
+					stoppedIndices[index] = true
+				case "content_block_delta":
+					deltaType := ojson.Get(payload, "delta.type").String()
+					if deltaType == "input_json_delta" && index == 0 {
+						toolInput.WriteString(ojson.Get(payload, "delta.partial_json").String())
+					}
+					if deltaType == "signature_delta" && index == 1 {
+						carrierSig = ojson.Get(payload, "delta.signature").String()
+					}
+					if deltaType == tc.wantDeltaType && index == 2 {
+						followUpContent.WriteString(ojson.Get(payload, tc.wantDeltaField).String())
+					}
+				}
+			}
+
+			if blockTypes[0] != "tool_use" || !stoppedIndices[0] {
+				t.Fatalf("expected stopped tool_use block at index 0, got type=%q stopped=%v (stream: %s)", blockTypes[0], stoppedIndices[0], streamText)
+			}
+			parsedInput := ojson.Parse(toolInput.String())
+			if !parsedInput.IsObject() || parsedInput.Get("path").String() != "a.go" || parsedInput.Get("line").Int() != 1 {
+				t.Fatalf("expected merged tool input, got %q (stream: %s)", toolInput.String(), streamText)
+			}
+			if blockTypes[1] != "thinking" || !stoppedIndices[1] || carrierSig != carrierSignature {
+				t.Fatalf("expected deferred tool signature carrier at index 1 (type=%q stopped=%v sig=%q want=%q) (stream: %s)", blockTypes[1], stoppedIndices[1], carrierSig, carrierSignature, streamText)
+			}
+			if blockTypes[2] != tc.wantBlockType || !stoppedIndices[2] || followUpContent.String() != tc.wantDeltaValue {
+				t.Fatalf("expected %s block at index 2 with %q, got type=%q stopped=%v content=%q (stream: %s)", tc.wantBlockType, tc.wantDeltaValue, blockTypes[2], stoppedIndices[2], followUpContent.String(), streamText)
+			}
+
+			roundTripRequest := []byte(`{"model":"gemini-3.8-flash-high","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"read-file-1","name":"read_file","input":{"path":"a.go","line":1}},{"type":"thinking","thinking":"","signature":"` + carrierSignature + `"},` + tc.replayFollowUp + `]}]}`)
+			roundTrip, errConvert := ConvertClaudeRequestToAntigravity("gemini-3.8-flash-high", roundTripRequest, false)
+			if errConvert != nil {
+				t.Fatalf("round-trip conversion failed: %v", errConvert)
+			}
+			parts := ojson.GetBytesNoCopy(roundTrip, "request.contents.0.parts").Array()
+			if len(parts) != 2 {
+				t.Fatalf("expected 2 replayed parts, got %d: %s", len(parts), roundTrip)
+			}
+			var toolPart, followUpPart ojson.Result
+			for _, part := range parts {
+				if part.Get("functionCall").Exists() {
+					toolPart = part
+				} else {
+					followUpPart = part
+				}
+			}
+			if toolPart.Get("functionCall.name").String() != "read_file" || toolPart.Get("thoughtSignature").String() != continuationSignature {
+				t.Fatalf("continuation signature did not remain attached to read_file: %s", roundTrip)
+			}
+			tc.checkReplayPart(t, followUpPart)
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToClaude_ImplicitOpenToolContinuationOrdering(t *testing.T) {
 	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]}`)
 	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)

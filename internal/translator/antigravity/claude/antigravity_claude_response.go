@@ -423,9 +423,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 							params.HasContent = true
 						} else {
 							if params.ResponseType != 0 {
-								flushPendingToolInput()
-								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
-								params.ResponseIndex++
+								closeCurrentBlock()
 							}
 							appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex))
 							params.CurrentThinkingSigned = false
@@ -451,9 +449,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						params.HasContent = true
 					} else if partText != "" {
 						if params.ResponseType != 0 {
-							flushPendingToolInput()
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
-							params.ResponseIndex++
+							closeCurrentBlock()
 						}
 						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex))
 						data, _ := ojson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partText)
