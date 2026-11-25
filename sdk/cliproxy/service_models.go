@@ -297,24 +297,14 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return published
 				}
 			}
-			matchesCompat := func(compat *config.OpenAICompatibility) bool {
-				if compat == nil {
-					return false
-				}
-				if compatName != "" && !strings.EqualFold(strings.TrimSpace(compat.Name), compatName) {
-					return false
-				}
-				if a.Attributes != nil {
-					attrBase := strings.TrimSpace(a.Attributes["base_url"])
-					cfgBase := strings.TrimSpace(compat.BaseURL)
-					if attrBase != "" && cfgBase != "" && !strings.EqualFold(cfgBase, attrBase) {
-						return false
-					}
-				}
-				return compatName != "" || (a.Attributes != nil && strings.TrimSpace(a.Attributes["base_url"]) != "")
-			}
-			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && matchesCompat(indexed) && registerCompat(indexed) {
+			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && matchesOpenAICompatibility(a, compatName, indexed) && registerCompat(indexed) {
 				return published
+			}
+			for i := range cfg.OpenAICompatibility {
+				compat := &cfg.OpenAICompatibility[i]
+				if matchesOpenAICompatibility(a, compatName, compat) && registerCompat(compat) {
+					return published
+				}
 			}
 			for i := range cfg.OpenAICompatibility {
 				compat := &cfg.OpenAICompatibility[i]
@@ -456,6 +446,43 @@ func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
 	return &entries[index]
 }
 
+func matchesAuthEntryDiscriminators(auth *coreauth.Auth, prefix, proxyURL string) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.TrimSpace(auth.Prefix) != strings.TrimSpace(prefix) {
+		return false
+	}
+	if strings.TrimSpace(auth.ProxyURL) != strings.TrimSpace(proxyURL) {
+		return false
+	}
+	return true
+}
+
+func matchesOpenAICompatibility(auth *coreauth.Auth, compatName string, compat *config.OpenAICompatibility) bool {
+	if compat == nil || compat.Disabled {
+		return false
+	}
+	compatName = strings.TrimSpace(compatName)
+	if compatName != "" && !strings.EqualFold(strings.TrimSpace(compat.Name), compatName) {
+		return false
+	}
+	var attrBase string
+	if auth != nil {
+		if strings.TrimSpace(auth.Prefix) != strings.TrimSpace(compat.Prefix) {
+			return false
+		}
+		if auth.Attributes != nil {
+			attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+			cfgBase := strings.TrimSpace(compat.BaseURL)
+			if attrBase != "" && cfgBase != "" && !strings.EqualFold(cfgBase, attrBase) {
+				return false
+			}
+		}
+	}
+	return compatName != "" || attrBase != ""
+}
+
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
 	return resolveConfigClaudeKeyForConfig(s.currentConfig(), auth)
 }
@@ -483,8 +510,13 @@ func resolveConfigClaudeKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *c
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil && matchesCredentials(entry) {
+	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil && matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
 		return entry
+	}
+	for i := range cfg.ClaudeKey {
+		if entry := &cfg.ClaudeKey[i]; matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
+			return entry
+		}
 	}
 	for i := range cfg.ClaudeKey {
 		if entry := &cfg.ClaudeKey[i]; matchesCredentials(entry) {
@@ -548,8 +580,13 @@ func resolveConfigGeminiKeyEntryForConfig(cfg *config.Config, auth *coreauth.Aut
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) {
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
 		return entry
+	}
+	for i := range entries {
+		if entry := &entries[i]; matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
+			return entry
+		}
 	}
 	for i := range entries {
 		if entry := &entries[i]; matchesCredentials(entry) {
@@ -583,8 +620,13 @@ func resolveConfigVertexCompatKeyForConfig(cfg *config.Config, auth *coreauth.Au
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil && matchesCredentials(entry) {
+	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil && matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
 		return entry
+	}
+	for i := range cfg.VertexCompatAPIKey {
+		if entry := &cfg.VertexCompatAPIKey[i]; matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
+			return entry
+		}
 	}
 	for i := range cfg.VertexCompatAPIKey {
 		if entry := &cfg.VertexCompatAPIKey[i]; matchesCredentials(entry) {
@@ -655,8 +697,13 @@ func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) 
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) {
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
 		return entry
+	}
+	for i := range entries {
+		if entry := &entries[i]; matchesCredentials(entry) && matchesAuthEntryDiscriminators(auth, entry.Prefix, entry.ProxyURL) {
+			return entry
+		}
 	}
 	for i := range entries {
 		if entry := &entries[i]; matchesCredentials(entry) {

@@ -84,8 +84,18 @@ func (c *openAICompatibilityRegistrationCache) lookup(auth *coreauth.Auth, compa
 	}
 	if auth != nil && auth.AuthSourceKind() == coreauth.AuthSourceConfig && auth.Attributes != nil {
 		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex])); errIndex == nil {
-			entry, ok := c.byIndex[index]
-			return entry, ok
+			if c.cfg != nil && index >= 0 && index < len(c.cfg.OpenAICompatibility) {
+				if entry, ok := c.byIndex[index]; ok && matchesOpenAICompatibility(auth, compatName, &c.cfg.OpenAICompatibility[index]) {
+					return entry, true
+				}
+			}
+		}
+	}
+	if c.cfg != nil && auth != nil {
+		for i := range c.cfg.OpenAICompatibility {
+			if entry, ok := c.byIndex[i]; ok && matchesOpenAICompatibility(auth, compatName, &c.cfg.OpenAICompatibility[i]) {
+				return entry, true
+			}
 		}
 	}
 	entry, ok := c.byName[strings.ToLower(strings.TrimSpace(compatName))]
