@@ -274,3 +274,19 @@ func GeminiInteractionsSSEDone(frame []byte) bool {
 	}
 	return sawDoneEvent
 }
+
+// ScanInteractionsSSELines is a bufio.SplitFunc that retains a trailing '\n'
+// on newline-terminated lines so callers can distinguish complete blank-line
+// frame delimiters from unterminated trailing whitespace returned on EOF/error.
+func ScanInteractionsSSELines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return i + 1, data[:i+1], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}

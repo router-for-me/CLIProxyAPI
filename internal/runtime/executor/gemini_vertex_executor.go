@@ -2338,6 +2338,7 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, helps.StreamScannerBuffer)
+		scanner.Split(helps.ScanInteractionsSSELines)
 		originalRequest := opts.OriginalRequest
 		if len(originalRequest) == 0 {
 			originalRequest = req.Payload
@@ -2393,11 +2394,19 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 			return true
 		}
 		for scanner.Scan() {
-			line := scanner.Bytes()
+			rawLine := scanner.Bytes()
+			hasNewline := len(rawLine) > 0 && rawLine[len(rawLine)-1] == '\n'
+			line := rawLine
+			if hasNewline {
+				line = line[:len(line)-1]
+			}
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			trimmed := bytes.TrimSpace(line)
 			if len(trimmed) == 0 {
-				if !emitFrame() {
+				if hasNewline && !emitFrame() {
 					return
 				}
 				continue
@@ -2407,14 +2416,19 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 			}
 			frame = append(frame, line...)
 		}
-		if !emitFrame() {
-			return
+		errScan := scanner.Err()
+		if errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		}
+		if errScan == nil && ctx.Err() == nil {
+			if !emitFrame() {
+				return
+			}
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		if errScan != nil {
 			reporter.PublishFailure(ctx, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
