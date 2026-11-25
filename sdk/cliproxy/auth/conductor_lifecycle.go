@@ -900,6 +900,12 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
 			delete(m.homeRuntimeAuths, sessionID)
 		}
 	}
+	for sessionID, owners := range m.homeRuntimeAuthOwners {
+		delete(owners, id)
+		if len(owners) == 0 {
+			delete(m.homeRuntimeAuthOwners, sessionID)
+		}
+	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
 	}
