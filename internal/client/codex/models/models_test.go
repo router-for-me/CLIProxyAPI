@@ -2054,3 +2054,78 @@ func TestCodexClientModelsResponse_FallbackFiltersAudioFromDefaultTemplate(t *te
 		t.Fatalf("fallback minimal_client_version = %q must remain compatible with older client 0.153.4", models[0]["minimal_client_version"])
 	}
 }
+
+func TestCodexClientModelsResponse_FallbackSetsSupportedInAPIAndVisibility(t *testing.T) {
+	_, revision := registry.GetCodexClientModelsSnapshot()
+	codexClientModelTemplatesMu.Lock()
+	previousLoaded := codexClientModelTemplatesLoaded
+	previousRevision := codexClientModelTemplatesRevision
+	previousTemplates := codexClientModelTemplates
+	previousDefault := codexClientDefaultTemplate
+	previousErr := codexClientModelTemplatesErr
+	codexClientModelTemplatesLoaded = false
+	codexClientModelTemplatesMu.Unlock()
+	t.Cleanup(func() {
+		codexClientModelTemplatesMu.Lock()
+		codexClientModelTemplatesLoaded = previousLoaded
+		codexClientModelTemplatesRevision = previousRevision
+		codexClientModelTemplates = previousTemplates
+		codexClientDefaultTemplate = previousDefault
+		codexClientModelTemplatesErr = previousErr
+		codexClientModelTemplatesMu.Unlock()
+	})
+
+	snapshot := []byte(`{"models":[{
+		"slug":"gpt-5.5",
+		"display_name":"GPT-6 Chat Thinking",
+		"description":"Hidden non-API template.",
+		"base_instructions":"Full instructions",
+		"minimal_client_version":"0.144.0",
+		"visibility":"hide",
+		"supported_in_api":false,
+		"context_window":272000,
+		"max_context_window":272000,
+		"priority":1,
+		"default_reasoning_level":"medium",
+		"supported_reasoning_levels":[{"effort":"medium","description":"Medium"}],
+		"input_modalities":["text","image"],
+		"supports_image_detail_original":true,
+		"service_tiers":[]
+	}]}`)
+	if _, _, errLoad := loadCodexClientModelTemplatesSnapshot(snapshot, revision); errLoad != nil {
+		t.Fatalf("loadCodexClientModelTemplatesSnapshot: %v", errLoad)
+	}
+
+	resp := BuildResponseForClient([]map[string]any{
+		{"id": "deepseek-v4.1-flash"},
+		{"id": "gpt-image-2"},
+	}, nil, false, "0.171.0")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 2 {
+		t.Fatalf("models = %#v, want 2 entries", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, entry := range models {
+		bySlug[stringModelValue(entry, "slug")] = entry
+	}
+
+	thirdParty, okThirdParty := bySlug["deepseek-v4.1-flash"]
+	if !okThirdParty {
+		t.Fatalf("missing deepseek-v4.1-flash entry: %#v", bySlug)
+	}
+	if supported, okSupported := thirdParty["supported_in_api"].(bool); !okSupported || !supported {
+		t.Errorf("deepseek-v4.1-flash supported_in_api = %#v, want true", thirdParty["supported_in_api"])
+	}
+	if vis := stringModelValue(thirdParty, "visibility"); vis != "list" {
+		t.Errorf("deepseek-v4.1-flash visibility = %q, want list", vis)
+	}
+
+	imageModel, okImage := bySlug["gpt-image-2"]
+	if !okImage {
+		t.Fatalf("missing gpt-image-2 entry: %#v", bySlug)
+	}
+	if vis := stringModelValue(imageModel, "visibility"); vis != "hide" {
+		t.Errorf("gpt-image-2 visibility = %q, want hide", vis)
+	}
+}
