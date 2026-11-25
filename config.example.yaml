@@ -1120,6 +1120,9 @@ oauth:
   #     - name: "gemini-2.5-pro"
   #       alias: "g2.5p"
   #   antigravity:
+  #     # Antigravity Gemini models are published by base name automatically, e.g. "gemini-4-neon" for the
+  #     # catalog ID "gemini-4-neon-xhigh". The level-suffixed IDs published before this stay available.
+  #     # An explicit entry for the same model replaces the automatic one.
   #     - name: "gemini-pro-agent"                   # upstream Antigravity model id
   #       alias: "gemini-3.1-pro-preview"            # client-visible id (Gemini 3.1 Pro Preview)
   #       display-name: "Antigravity Gemini 3.1 Pro" # optional catalog display name
