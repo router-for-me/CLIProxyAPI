@@ -21,6 +21,7 @@ type claudeToInteractionsStreamState struct {
 	StatusUpdated      bool
 	Completed          bool
 	Done               bool
+	StopReason         string
 	UsageRaw           []byte
 	StepIndex          int
 	ActiveStepIndex    int
@@ -64,6 +65,7 @@ func convertClaudeMessageToInteractions(modelName string, root ojson.Result) []b
 	outDoc := ojson.NewDoc([]byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`))
 	_ = outDoc.Set("id", firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())))
 	_ = outDoc.Set("model", firstNonEmptyString(root.Get("model").String(), modelName))
+	_ = outDoc.Set("status", claudeInteractionsStatus(root.Get("stop_reason").String()))
 	steps := make([][]byte, 0, 4)
 	root.Get("content").ForEach(func(_, part ojson.Result) bool {
 		if step := claudeContentBlockToInteractionsStep(part); len(step) > 0 {
@@ -125,8 +127,10 @@ func convertClaudeSSEToInteractionsNonStream(modelName string, rawJSON []byte) [
 			}
 		case "message_delta":
 			mergeClaudeUsage(st, root.Get("usage"))
+			st.StopReason = strings.Clone(firstNonEmptyString(root.Get("delta.stop_reason").String(), st.StopReason))
 		}
 	}
+	_ = outDoc.Set("status", claudeInteractionsStatus(st.StopReason))
 	if len(steps) > 0 {
 		_ = outDoc.SetRawBytes("steps", translatorcommon.JoinRawArray(steps))
 	}
@@ -158,6 +162,9 @@ func convertClaudeEventToInteractions(modelName string, rawJSON []byte, st *clau
 		return claudeContentBlockStopToInteractions(root, st)
 	case "message_delta":
 		mergeClaudeUsage(st, root.Get("usage"))
+		if root.Get("delta.stop_reason").String() == "" {
+			return nil
+		}
 		out := appendClaudeInteractionsStepStop(nil, st)
 		out = appendClaudeInteractionsCompleted(out, st, modelName, root)
 		return out
@@ -519,6 +526,8 @@ func appendClaudeInteractionsCompleted(out [][]byte, st *claudeToInteractionsStr
 	_ = completedDoc.Set("interaction.created", now)
 	_ = completedDoc.Set("interaction.updated", now)
 	_ = completedDoc.Set("interaction.model", firstNonEmptyString(st.Model, modelName))
+	st.StopReason = strings.Clone(firstNonEmptyString(root.Get("delta.stop_reason").String(), root.Get("stop_reason").String(), st.StopReason))
+	_ = completedDoc.Set("interaction.status", claudeInteractionsStatus(st.StopReason))
 	usage := claudeMergedUsage(st)
 	if !usage.Exists() {
 		usage = root.Get("usage")
@@ -557,6 +566,17 @@ func claudeBlockInteractionsStepType(blockType string) string {
 		return "function_call"
 	default:
 		return "model_output"
+	}
+}
+
+func claudeInteractionsStatus(stopReason string) string {
+	switch stopReason {
+	case "tool_use":
+		return "requires_action"
+	case "max_tokens", "model_context_window_exceeded":
+		return "incomplete"
+	default:
+		return "completed"
 	}
 }
 

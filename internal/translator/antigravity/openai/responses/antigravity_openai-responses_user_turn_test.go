@@ -125,9 +125,14 @@ func TestOpenAIResponsesToAntigravityRemoteFileUsesCanonicalFileData(t *testing.
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToAntigravity_ExportedWrapperKeepsAJSONBody(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToAntigravity_ExportedWrapperCarriesTheRefusal(t *testing.T) {
 	input := antigravityTurnPayload("", antigravityUserTurn(antigravityTurnFileID))
-	if body, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false); !ojson.ValidBytes(body) {
+	body, err := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false)
+	var unsupported *translatorcommon.UnsupportedPartError
+	if !errors.As(err, &unsupported) || unsupported.Type != "input_file" || unsupported.StatusCode() != 400 {
+		t.Fatalf("err = %v, want unsupported content part: input_file with status 400", err)
+	}
+	if !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

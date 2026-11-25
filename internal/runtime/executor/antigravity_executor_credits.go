@@ -466,7 +466,7 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 
 func newAntigravityStatusErrWithHeaders(statusCode int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
-	if statusCode == http.StatusTooManyRequests {
+	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
 		if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, body, time.Now()); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
@@ -566,7 +566,7 @@ func antigravityInBandErrorStatusCode(errorResult ojson.Result) int {
 func (e *AntigravityExecutor) applyAntigravityUpstreamError(
 	ctx context.Context,
 	auth *cliproxyauth.Auth,
-	baseModel string,
+	upstreamModel string,
 	useCredits bool,
 	replayScope antigravityReasoningReplayScope,
 	statusCode int,
@@ -574,7 +574,7 @@ func (e *AntigravityExecutor) applyAntigravityUpstreamError(
 	body []byte,
 ) error {
 	if statusCode == http.StatusTooManyRequests {
-		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, headers, body); err429 != nil {
+		if err429 := e.applyAntigravity429State(ctx, auth, upstreamModel, useCredits, headers, body); err429 != nil {
 			return err429
 		}
 	}

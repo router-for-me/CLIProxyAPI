@@ -195,7 +195,7 @@ func TestAntigravityStreamDoesNotEmitClaudeMessageStopOnReadError(t *testing.T) 
 	}
 }
 
-func TestAntigravityStreamDoesNotFinalizeEmptyUpstreamStream(t *testing.T) {
+func TestAntigravityStreamRejectsEmptyUpstreamStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -239,16 +239,18 @@ func TestAntigravityStreamDoesNotFinalizeEmptyUpstreamStream(t *testing.T) {
 			if errExecute != nil {
 				t.Fatalf("ExecuteStream() error = %v", errExecute)
 			}
+			var streamErr error
 			for chunk := range result.Chunks {
 				if chunk.Err != nil {
-					t.Fatalf("unexpected stream error: %v", chunk.Err)
+					streamErr = chunk.Err
 				}
-				if finish := ojson.GetBytes(chunk.Payload, "candidates.0.finishReason").String(); finish != "" {
-					t.Fatalf("empty upstream stream must not synthesize a terminal chunk: %s", chunk.Payload)
+				if len(chunk.Payload) != 0 {
+					t.Fatalf("empty upstream stream emitted payload: %s", chunk.Payload)
 				}
-				if finish := ojson.GetBytes(chunk.Payload, "choices.0.finish_reason").String(); finish != "" {
-					t.Fatalf("empty upstream stream must not synthesize a terminal chunk: %s", chunk.Payload)
-				}
+			}
+			statusError, ok := streamErr.(interface{ StatusCode() int })
+			if !ok || statusError.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("empty upstream stream error = %v, want 502", streamErr)
 			}
 		})
 	}
@@ -344,6 +346,30 @@ func TestAntigravityAssemblyReplacesOnlyContentParts(t *testing.T) {
 				t.Fatalf("assembly changed unrelated metadata: %s", out)
 			}
 		})
+	}
+}
+
+func TestAntigravityAssemblyPreservesGroundingMetadataFromEarlierChunk(t *testing.T) {
+	exec := &AntigravityExecutor{}
+	chunks := [][]byte{
+		[]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Search result answer."}]},"groundingMetadata":{"webSearchQueries":["example query"],"groundingChunks":[{"web":{"uri":"https://example.com","title":"Example"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":6},"groundingChunkIndices":[0]}]}}],"modelVersion":"gemini-3-pro","responseId":"resp-ground-1"}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5,"totalTokenCount":17}}}`),
+	}
+
+	out := exec.convertStreamChunksToNonStream(chunks)
+	grounding := ojson.GetBytes(out, "response.candidates.0.groundingMetadata")
+	if !grounding.Exists() {
+		t.Fatalf("assembled response dropped groundingMetadata from earlier chunk: %s", out)
+	}
+	if got := grounding.Get("webSearchQueries.0").String(); got != "example query" {
+		t.Fatalf("grounding web search query = %q, want %q; out=%s", got, "example query", out)
+	}
+	if got := grounding.Get("groundingChunks.0.web.uri").String(); got != "https://example.com" {
+		t.Fatalf("grounding chunk URI = %q, want %q; out=%s", got, "https://example.com", out)
+	}
+	groundingIndex := grounding.Get("groundingSupports.0.groundingChunkIndices.0")
+	if !groundingIndex.Exists() || groundingIndex.Raw != "0" {
+		t.Fatalf("grounding support index = %q, want 0; out=%s", groundingIndex.Raw, out)
 	}
 }
 
