@@ -58,6 +58,11 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		return marshalRPCError("unknown_method", "unknown method "+method), nil
 	case pluginabi.MethodPluginReconfigure:
 		return l.callLifecycle(request, true)
+	case pluginabi.MethodExecutorIdentifier:
+		if l.active.Capabilities.Executor == nil {
+			return nil, fmt.Errorf("missing executor")
+		}
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.Executor.Identifier()})
 	case pluginabi.MethodThinkingIdentifier:
 		if l.active.Capabilities.ThinkingApplier == nil {
 			return nil, fmt.Errorf("missing thinking applier")

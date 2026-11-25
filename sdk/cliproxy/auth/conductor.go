@@ -45,6 +45,13 @@ type RequestAuthPreparer interface {
 	PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error)
 }
 
+// HomePluginRequestAuthPreparer lets a credential provider also prepare auth
+// that a Home-selected plugin will consume without running the provider executor.
+type HomePluginRequestAuthPreparer interface {
+	RequestAuthPreparer
+	ShouldPrepareHomePluginRequestAuth(auth *Auth) bool
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -218,7 +225,8 @@ type Manager struct {
 	authChangeWatchers map[string]map[chan struct{}]struct{}
 	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
-	pluginScheduler PluginScheduler
+	pluginScheduler     PluginScheduler
+	homePluginExecutors HomePluginExecutorResolver
 	// continuityClock overrides time.Now and timer waiting in unit tests.
 	continuityClock continuityClock
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
