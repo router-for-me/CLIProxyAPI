@@ -170,6 +170,13 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		h.handleStreamGenerateContent(c, action[0], rawJSON)
 	case "countTokens":
 		h.handleCountTokens(c, action[0], rawJSON)
+	default:
+		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Unsupported method: %s", method),
+				Type:    "invalid_request_error",
+			},
+		})
 	}
 }
 
