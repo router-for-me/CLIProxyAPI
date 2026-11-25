@@ -142,8 +142,18 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	}
 
 	if len(r.pendingBuf) > 0 {
-		combined := make([]byte, 0, len(r.pendingBuf)+len(chunk))
+		needNewline := r.pendingBuf[len(r.pendingBuf)-1] != '\n' &&
+			bytes.HasPrefix(bytes.TrimSpace(r.pendingBuf), []byte("event:")) &&
+			(bytes.HasPrefix(bytes.TrimSpace(chunk), []byte("data:")) || bytes.HasPrefix(bytes.TrimSpace(chunk), []byte("event:")))
+		extra := 0
+		if needNewline {
+			extra = 1
+		}
+		combined := make([]byte, 0, len(r.pendingBuf)+extra+len(chunk))
 		combined = append(combined, r.pendingBuf...)
+		if needNewline {
+			combined = append(combined, '\n')
+		}
 		combined = append(combined, chunk...)
 		chunk = combined
 		r.pendingBuf = nil
