@@ -423,6 +423,75 @@ func TestCopilotCLIGeminiEfforts(t *testing.T) {
 	}
 }
 
+func TestCopilotChatClampsThinkingBudget(t *testing.T) {
+	const id = "gemini-4-argon"
+	auth := copilotTestAuth(t, "account", id, copilot.Chat)
+	model := copilot.Model{ID: id, Endpoints: []string{copilot.Chat}}
+	model.Capabilities.Supports.MinBudget = 128
+	model.Capabilities.Supports.MaxBudget = 128000
+	model.Capabilities.Supports.Reasoning = json.RawMessage(`["low","high","xhigh"]`)
+	auth.CopilotCatalog = copilot.NewCatalog([]copilot.Model{model}, time.Now())
+	exec := NewCopilotExecutor(&config.Config{})
+
+	for _, tc := range []struct {
+		name, model, body string
+		format            tr.Format
+	}{
+		{"Gemini body", id, `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`, tr.FormatGemini},
+		{"Claude body", id, `{"messages":[{"role":"user","content":"hi"}],"max_tokens":65536,"thinking":{"type":"enabled","budget_tokens":64000}}`, tr.FormatClaude},
+		{"numeric suffix", id + "(64000)", `{"messages":[{"role":"user","content":"hi"}]}`, tr.FormatOpenAI},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{Model: copilot.ModelPrefix + tc.model, Payload: []byte(tc.body)}
+			prepared, err := exec.prepare(t.Context(), auth, req, cliproxyexecutor.Options{SourceFormat: tc.format}, false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ojson.GetBytesNoCopy(prepared.body, "reasoning_effort").String(); got != "xhigh" {
+				t.Errorf("reasoning_effort = %q, want xhigh", got)
+			}
+			if support := prepared.route.Info.Thinking; support == nil || support.Min != 128 || support.Max != 128000 {
+				t.Errorf("route thinking capabilities changed: %+v", support)
+			}
+		})
+	}
+}
+
+func TestCopilotResponsesClampsThinkingBudget(t *testing.T) {
+	const id = "gemini-4-argon"
+	auth := copilotTestAuth(t, "account", id, copilot.Responses)
+	model := copilot.Model{ID: id, Endpoints: []string{copilot.Responses}}
+	model.Capabilities.Supports.MinBudget = 128
+	model.Capabilities.Supports.MaxBudget = 128000
+	model.Capabilities.Supports.Reasoning = json.RawMessage(`["low","high","xhigh"]`)
+	auth.CopilotCatalog = copilot.NewCatalog([]copilot.Model{model}, time.Now())
+	exec := NewCopilotExecutor(&config.Config{})
+
+	for _, tc := range []struct {
+		name, model, body, want string
+		format                  tr.Format
+	}{
+		{"Claude body", id, `{"messages":[{"role":"user","content":"hi"}],"max_tokens":65536,"thinking":{"type":"enabled","budget_tokens":64000}}`, "xhigh", tr.FormatClaude},
+		{"Chat numeric suffix", id + "(64000)", `{"messages":[{"role":"user","content":"hi"}]}`, "xhigh", tr.FormatOpenAI},
+		{"numeric suffix", id + "(64000)", `{"input":"hi"}`, "xhigh", tr.FormatOpenAIResponse},
+		{"auto suffix", id + "(auto)", `{"input":"hi"}`, "low", tr.FormatOpenAIResponse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{Model: copilot.ModelPrefix + tc.model, Payload: []byte(tc.body)}
+			prepared, err := exec.prepare(t.Context(), auth, req, cliproxyexecutor.Options{SourceFormat: tc.format}, false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ojson.GetBytesNoCopy(prepared.body, "reasoning.effort").String(); got != tc.want {
+				t.Errorf("reasoning.effort = %q, want %q", got, tc.want)
+			}
+			if support := prepared.route.Info.Thinking; support == nil || support.Min != 128 || support.Max != 128000 {
+				t.Errorf("route thinking capabilities changed: %+v", support)
+			}
+		})
+	}
+}
+
 func TestCopilotCLIWireOptions(t *testing.T) {
 	const fn = `[{"type":"function","name":"lookup","parameters":{"type":"object"}}]`
 	for _, tc := range []struct {

@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -114,6 +115,36 @@ func TestManagementV8IndependentContract(t *testing.T) {
 			t.Fatalf("%s %s: status=%d body=%s", method, url, response.Code, response.Body.String())
 		}
 		return strings.TrimSpace(response.Body.String())
+	}
+	for _, tc := range []struct {
+		query, channel string
+	}{
+		{"Copilot", "copilot"},
+		{"Devin", "devin"},
+	} {
+		prefix := tc.channel + "/"
+		v8Models := ojson.Get(request(http.MethodGet, "/v8/management/routing/model-definitions/"+tc.query, "", http.StatusOK), "models").Array()
+		v0Models := ojson.Get(request(http.MethodGet, "/v0/management/model-definitions/"+tc.channel, "", http.StatusOK), "models").Array()
+		if len(v8Models) == 0 || len(v8Models) != len(v0Models) {
+			t.Fatalf("%s catalog lengths: v8=%d v0=%d", tc.channel, len(v8Models), len(v0Models))
+		}
+		patterns := []string{"*/gpt-*", "*/claude-*", "*/gemini-*"}
+		matched := make(map[string]bool, len(patterns))
+		for i, entry := range v8Models {
+			nativeID := v0Models[i].Get("id").String()
+			id := entry.Get("id").String()
+			if nativeID == "" || strings.HasPrefix(nativeID, prefix) || id != prefix+nativeID {
+				t.Fatalf("%s catalog IDs: v8=%q v0=%q", tc.channel, id, nativeID)
+			}
+			for _, pattern := range patterns {
+				matched[pattern] = matched[pattern] || modelconfig.MatchExcludedModelPattern(pattern, id)
+			}
+		}
+		for _, pattern := range patterns {
+			if !matched[pattern] {
+				t.Errorf("%s catalog: no model matches %q", tc.channel, pattern)
+			}
+		}
 	}
 	for _, legacy := range []string{"debug", "request-retry", "api-keys", "codex-api-key", "auth-files", "codex-auth-url", "oauth/providers/codex/auth-url", "plugins/test-plugin/config"} {
 		request(http.MethodGet, "/v8/management/"+legacy, "", http.StatusNotFound)

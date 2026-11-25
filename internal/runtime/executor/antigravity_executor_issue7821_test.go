@@ -581,7 +581,7 @@ func TestAntigravityIssue7821_RetryAfterThresholdsPrecedenceAndBoundaries(t *tes
 		}
 	})
 
-	t.Run("non-429 HTTP 503 ignores Retry-After header", func(t *testing.T) {
+	t.Run("HTTP 503 honors Retry-After header", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Retry-After", "45")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -592,9 +592,18 @@ func TestAntigravityIssue7821_RetryAfterThresholdsPrecedenceAndBoundaries(t *tes
 		cfg := &config.Config{}
 		exec := NewAntigravityExecutor(cfg)
 		auth := newIssue7821TestAuth("issue7821-503", server.URL)
+		auth.Status = cliproxyauth.StatusActive
 		t.Cleanup(func() { closeAntigravityAuthIdleTransports(auth) })
 
-		_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		ctx := context.Background()
+		mgr := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: "gemini-3-flash"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+		if _, errReg := mgr.Register(cliproxyauth.WithSkipPersist(ctx), auth); errReg != nil {
+			t.Fatalf("Register() error = %v", errReg)
+		}
+
+		_, errExec := exec.Execute(ctx, auth, cliproxyexecutor.Request{
 			Model:   "gemini-3-flash",
 			Payload: reqPayload,
 		}, cliproxyexecutor.Options{
@@ -605,8 +614,33 @@ func TestAntigravityIssue7821_RetryAfterThresholdsPrecedenceAndBoundaries(t *tes
 		if !errors.As(errExec, &sErr) || sErr.StatusCode() != http.StatusServiceUnavailable {
 			t.Fatalf("Execute(503) err = %#v, want 503 statusErr", errExec)
 		}
-		if sErr.RetryAfter() != nil {
-			t.Fatalf("Execute(503) RetryAfter() = %v, want nil", sErr.RetryAfter())
+		if sErr.RetryAfter() == nil || *sErr.RetryAfter() != 45*time.Second {
+			t.Fatalf("Execute(503) RetryAfter() = %v, want 45s", sErr.RetryAfter())
+		}
+
+		beforeMark := time.Now()
+		mgr.MarkResult(ctx, cliproxyauth.Result{
+			AuthID:     auth.ID,
+			Provider:   "antigravity",
+			Model:      "gemini-3-flash",
+			Success:    false,
+			RetryAfter: sErr.RetryAfter(),
+			Error: &cliproxyauth.Error{
+				HTTPStatus: sErr.StatusCode(),
+				Message:    sErr.Error(),
+			},
+		})
+		got, ok := mgr.GetByID(auth.ID)
+		if !ok || got == nil {
+			t.Fatal("GetByID() missing credential")
+		}
+		state := got.ModelStates["gemini-3-flash"]
+		if state == nil {
+			t.Fatal("expected model state for gemini-3-flash")
+		}
+		remaining := state.NextRetryAfter.Sub(beforeMark)
+		if remaining < 40*time.Second || remaining > 50*time.Second {
+			t.Fatalf("MarkResult cooldown remaining = %v, want ~45s", remaining)
 		}
 	})
 }
@@ -761,14 +795,28 @@ func TestAntigravityIssue7821_DecideAndStatusErrWithHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("newAntigravityStatusErrWithHeaders honors lowercase Retry-After on 429 only", func(t *testing.T) {
+	t.Run("newAntigravityStatusErrWithHeaders honors retry hints on 429 and 503", func(t *testing.T) {
 		err429 := newAntigravityStatusErrWithHeaders(http.StatusTooManyRequests, http.Header{"retry-after": []string{"45"}}, rateLimitBody)
 		if err429.RetryAfter() == nil || *err429.RetryAfter() != 45*time.Second {
 			t.Fatalf("newAntigravityStatusErrWithHeaders(429).RetryAfter() = %v, want 45s", err429.RetryAfter())
 		}
-		err503 := newAntigravityStatusErrWithHeaders(http.StatusServiceUnavailable, http.Header{"Retry-After": []string{"45"}}, rateLimitBody)
-		if err503.RetryAfter() != nil {
-			t.Fatalf("newAntigravityStatusErrWithHeaders(503).RetryAfter() = %v, want nil", err503.RetryAfter())
+
+		capacityBody := []byte(`{"error":{"code":503,"status":"UNAVAILABLE","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"17s"}]}}`)
+		for _, tc := range []struct {
+			name    string
+			headers http.Header
+			body    []byte
+			want    time.Duration
+		}{
+			{name: "Retry-After header", headers: http.Header{"Retry-After": []string{"45"}}, body: rateLimitBody, want: 45 * time.Second},
+			{name: "RetryInfo body", body: capacityBody, want: 17 * time.Second},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				err503 := newAntigravityStatusErrWithHeaders(http.StatusServiceUnavailable, tc.headers, tc.body)
+				if err503.RetryAfter() == nil || *err503.RetryAfter() != tc.want {
+					t.Fatalf("newAntigravityStatusErrWithHeaders(503).RetryAfter() = %v, want %v", err503.RetryAfter(), tc.want)
+				}
+			})
 		}
 	})
 }

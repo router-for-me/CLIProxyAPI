@@ -735,3 +735,46 @@ func TestConvertGeminiRequestToClaude_PreservesPropertyNamedTypeAndSchemaValues(
 		})
 	}
 }
+
+func TestConvertGeminiRequestToClaude_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search",
+				"parameters": {
+					"type": 6,
+					"properties": {
+						"query": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}},
+						"limit": {"type": 3},
+						"verbose": {"type": 4}
+					}
+				}
+			}]
+		}]
+	}`)
+
+	out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToClaude returned error: %v", err)
+	}
+
+	schema := ojson.GetBytesNoCopy(out, "tools.0.input_schema")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.query.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+		{"properties.limit.type", "integer"},
+		{"properties.verbose.type", "boolean"},
+	} {
+		got := schema.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("tools.0.input_schema.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+}
