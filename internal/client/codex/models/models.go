@@ -126,6 +126,13 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
+			if inherited := stringSliceValue(entry["input_modalities"]); len(inherited) > 0 {
+				filtered := filterCodexInputModalities(inherited)
+				entry["input_modalities"] = filtered
+				if !hasImageModality(filtered) {
+					delete(entry, "supports_image_detail_original")
+				}
+			}
 			info := registry.LookupModelInfo(id)
 			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
 			applyCodexClientDisplayName(entry, model)

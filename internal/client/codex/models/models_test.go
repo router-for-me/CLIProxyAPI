@@ -2129,3 +2129,146 @@ func TestCodexClientModelsResponse_FallbackSetsSupportedInAPIAndVisibility(t *te
 		t.Errorf("gpt-image-2 visibility = %q, want hide", vis)
 	}
 }
+
+func TestCodexClientModelsResponse_NamedTemplateFiltersUnsupportedModalities(t *testing.T) {
+	_, revision := registry.GetCodexClientModelsSnapshot()
+	codexClientModelTemplatesMu.Lock()
+	previousLoaded := codexClientModelTemplatesLoaded
+	previousRevision := codexClientModelTemplatesRevision
+	previousTemplates := codexClientModelTemplates
+	previousDefault := codexClientDefaultTemplate
+	previousErr := codexClientModelTemplatesErr
+	codexClientModelTemplatesLoaded = false
+	codexClientModelTemplatesMu.Unlock()
+	t.Cleanup(func() {
+		codexClientModelTemplatesMu.Lock()
+		codexClientModelTemplatesLoaded = previousLoaded
+		codexClientModelTemplatesRevision = previousRevision
+		codexClientModelTemplates = previousTemplates
+		codexClientDefaultTemplate = previousDefault
+		codexClientModelTemplatesErr = previousErr
+		codexClientModelTemplatesMu.Unlock()
+	})
+
+	snapshot := []byte(`{"models":[{
+		"slug":"gpt-5.5",
+		"display_name":"GPT-5.5",
+		"description":"Default template.",
+		"minimal_client_version":"0.124.0",
+		"visibility":"list",
+		"context_window":272000,
+		"priority":1,
+		"default_reasoning_level":"low",
+		"supported_reasoning_levels":[{"effort":"low","description":"Fast"}],
+		"input_modalities":["text","image"],
+		"supports_image_detail_original":true
+	},{
+		"slug":"audio-vision-model",
+		"display_name":"Audio Vision",
+		"description":"Named template that lists audio.",
+		"minimal_client_version":"0.124.0",
+		"visibility":"list",
+		"context_window":272000,
+		"priority":2,
+		"default_reasoning_level":"low",
+		"supported_reasoning_levels":[{"effort":"low","description":"Fast"}],
+		"input_modalities":["text","image","audio"],
+		"supports_image_detail_original":true
+	},{
+		"slug":"audio-text-model",
+		"display_name":"Audio Text",
+		"description":"Named template that lists audio without image.",
+		"minimal_client_version":"0.124.0",
+		"visibility":"list",
+		"context_window":272000,
+		"priority":3,
+		"default_reasoning_level":"low",
+		"supported_reasoning_levels":[{"effort":"low","description":"Fast"}],
+		"input_modalities":["text","audio"],
+		"supports_image_detail_original":true
+	},{
+		"slug":"audio-only-model",
+		"display_name":"Audio Only",
+		"description":"Named template that lists only unsupported modalities.",
+		"minimal_client_version":"0.124.0",
+		"visibility":"list",
+		"context_window":272000,
+		"priority":4,
+		"default_reasoning_level":"low",
+		"supported_reasoning_levels":[{"effort":"low","description":"Fast"}],
+		"input_modalities":["audio"],
+		"supports_image_detail_original":true
+	}]}`)
+	if _, _, errLoad := loadCodexClientModelTemplatesSnapshot(snapshot, revision); errLoad != nil {
+		t.Fatalf("loadCodexClientModelTemplatesSnapshot: %v", errLoad)
+	}
+
+	resp := BuildResponseForClient([]map[string]any{
+		{"id": "audio-vision-model"},
+		{"id": "audio-text-model"},
+		{"id": "audio-only-model"},
+	}, func(string) []string { return []string{"codex"} }, false, "0.167.1")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 3 {
+		t.Fatalf("models = %#v, want 3 entries", resp["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, entry := range models {
+		bySlug[stringModelValue(entry, "slug")] = entry
+	}
+
+	vision := bySlug["audio-vision-model"]
+	mods, okMods := vision["input_modalities"].([]any)
+	if !okMods || len(mods) != 2 || mods[0] != "text" || mods[1] != "image" {
+		t.Fatalf("audio-vision-model input_modalities = %#v, want [text image]", vision["input_modalities"])
+	}
+	if vision["supports_image_detail_original"] != true {
+		t.Fatalf("audio-vision-model supports_image_detail_original = %#v, want true", vision["supports_image_detail_original"])
+	}
+
+	textOnly := bySlug["audio-text-model"]
+	mods, okMods = textOnly["input_modalities"].([]any)
+	if !okMods || len(mods) != 1 || mods[0] != "text" {
+		t.Fatalf("audio-text-model input_modalities = %#v, want [text]", textOnly["input_modalities"])
+	}
+	if _, present := textOnly["supports_image_detail_original"]; present {
+		t.Fatalf("audio-text-model supports_image_detail_original = %#v, want absent", textOnly["supports_image_detail_original"])
+	}
+
+	audioOnly := bySlug["audio-only-model"]
+	mods, okMods = audioOnly["input_modalities"].([]any)
+	if !okMods || len(mods) != 0 {
+		t.Fatalf("audio-only-model input_modalities = %#v, want []", audioOnly["input_modalities"])
+	}
+	if _, present := audioOnly["supports_image_detail_original"]; present {
+		t.Fatalf("audio-only-model supports_image_detail_original = %#v, want absent", audioOnly["supports_image_detail_original"])
+	}
+}
+
+func TestCodexClientModelsResponse_EmbeddedGPT62SolAndGPT55OmitAudio(t *testing.T) {
+	resp := BuildResponseForClient([]map[string]any{
+		{"id": "gpt-6.2-sol"},
+		{"id": "gpt-5.5"},
+	}, func(string) []string { return []string{"codex"} }, false, "0.167.1")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 2 {
+		t.Fatalf("models = %#v, want 2 entries", resp["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, entry := range models {
+		bySlug[stringModelValue(entry, "slug")] = entry
+	}
+	for _, slug := range []string{"gpt-6.2-sol", "gpt-5.5"} {
+		entry, exists := bySlug[slug]
+		if !exists {
+			t.Fatalf("missing %s entry", slug)
+		}
+		mods, okMods := entry["input_modalities"].([]any)
+		if !okMods || len(mods) != 2 || mods[0] != "text" || mods[1] != "image" {
+			t.Fatalf("%s input_modalities = %#v, want [text image]", slug, entry["input_modalities"])
+		}
+		if entry["supports_image_detail_original"] != true {
+			t.Fatalf("%s supports_image_detail_original = %#v, want true", slug, entry["supports_image_detail_original"])
+		}
+	}
+}
