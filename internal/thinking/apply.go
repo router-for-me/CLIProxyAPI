@@ -885,7 +885,7 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 	case ModeAuto:
 		return string(LevelAuto)
 	case ModeLevel:
-		return strings.ToLower(strings.TrimSpace(string(config.Level)))
+		return strings.Clone(strings.ToLower(strings.TrimSpace(string(config.Level))))
 	case ModeBudget:
 		level, ok := ConvertBudgetToLevel(config.Budget)
 		if !ok {
