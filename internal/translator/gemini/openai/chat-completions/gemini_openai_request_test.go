@@ -1550,3 +1550,69 @@ func TestConvertOpenAIRequestToGemini_ValidatesToolCallArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToGeminiMapsStopSequences(t *testing.T) {
+	tests := []struct {
+		name      string
+		stopJSON  string
+		wantStops []string
+	}{
+		{
+			name:      "single string",
+			stopJSON:  `"END"`,
+			wantStops: []string{"END"},
+		},
+		{
+			name:      "single newline string preserved",
+			stopJSON:  `"\n"`,
+			wantStops: []string{"\n"},
+		},
+		{
+			name:      "array preserves whitespace and filters invalid entries",
+			stopJSON:  `["STOP","\n\n"," ","",123,null]`,
+			wantStops: []string{"STOP", "\n\n", " "},
+		},
+		{
+			name:     "null omitted",
+			stopJSON: `null`,
+		},
+		{
+			name:     "empty string omitted",
+			stopJSON: `""`,
+		},
+		{
+			name:     "empty array omitted",
+			stopJSON: `[]`,
+		},
+		{
+			name:     "only invalid entries omitted",
+			stopJSON: `["",123,null]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"}],"stop":` + tt.stopJSON + `}`)
+			out, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", inputJSON, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+			}
+			got := ojson.GetBytesNoCopy(out, "generationConfig.stopSequences")
+			if len(tt.wantStops) == 0 {
+				if got.Exists() {
+					t.Fatalf("expected stopSequences to be omitted, got %s", got.Raw)
+				}
+				return
+			}
+			arr := got.Array()
+			if len(arr) != len(tt.wantStops) {
+				t.Fatalf("stopSequences = %s, want %v. Output: %s", got.Raw, tt.wantStops, out)
+			}
+			for i, want := range tt.wantStops {
+				if arr[i].String() != want {
+					t.Fatalf("stopSequences[%d] = %q, want %q", i, arr[i].String(), want)
+				}
+			}
+		})
+	}
+}

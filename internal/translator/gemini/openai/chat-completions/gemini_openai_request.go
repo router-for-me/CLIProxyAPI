@@ -82,6 +82,9 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	} else if mct := ojson.GetBytesNoCopy(rawJSON, "max_completion_tokens"); mct.Exists() && mct.Type == ojson.Number {
 		_ = outDoc.Set("generationConfig.maxOutputTokens", mct.Num)
 	}
+	if stopSequences := translatorcommon.OpenAIStopSequences(ojson.GetBytesNoCopy(rawJSON, "stop")); len(stopSequences) > 0 {
+		_ = outDoc.Set("generationConfig.stopSequences", stopSequences)
+	}
 
 	// Candidate count (OpenAI 'n' parameter)
 	if n := ojson.GetBytesNoCopy(rawJSON, "n"); n.Exists() && n.Type == ojson.Number {
