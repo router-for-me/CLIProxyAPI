@@ -116,6 +116,9 @@ type Capabilities struct {
 	// When AuthProvider/AuthProviders is declared, only ExecutorModelScopeStatic registers an
 	// unauthenticated static model client in ModelRegistry.
 	ExecutorModelScope ExecutorModelScope
+	// ExecutorAuthProviders lists credential providers whose Home-selected auth can
+	// be passed to Executor. An empty list leaves this capability disabled.
+	ExecutorAuthProviders []string
 	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
 	ExecutorInputFormats []string
 	// ExecutorOutputFormats lists response protocols emitted directly by Executor. Executors must declare at least one.

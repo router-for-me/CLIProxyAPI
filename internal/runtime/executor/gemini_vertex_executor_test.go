@@ -394,6 +394,55 @@ func TestVertexAPIKeyModelsURL(t *testing.T) {
 			action:  "generateContent",
 			want:    "https://zenmux.ai/v1/publishers/google/models/gemini-2.5-flash:generateContent",
 		},
+		{
+			name:    "bare host named like a version gets /v1 appended",
+			baseURL: "http://vertex1",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://vertex1/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:    "bare host with trailing slash named like a version gets /v1 appended",
+			baseURL: "http://vertex1/",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://vertex1/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:    "bare host with hyphen and digit gets /v1 appended",
+			baseURL: "http://v1-gateway",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://v1-gateway/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:    "bare host with port gets /v1 appended",
+			baseURL: "http://v1-gateway:8080",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://v1-gateway:8080/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:    "host with port and explicit /v1 path keeps single /v1",
+			baseURL: "http://vertex1:8080/v1",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://vertex1:8080/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:    "bare version-like host with explicit /v1beta1 path keeps /v1beta1",
+			baseURL: "http://vertex1/v1beta1",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://vertex1/v1beta1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:    "host with path prefix ending in /v1 keeps /v1",
+			baseURL: "http://vertex1/proxy/v1",
+			model:   "gemini-2.5-pro",
+			action:  "generateContent",
+			want:    "http://vertex1/proxy/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+		},
 	}
 
 	for _, tc := range tests {

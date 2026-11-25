@@ -12,6 +12,22 @@ import (
 
 const homeResultExecutorType = "home-result"
 
+type homeAuthPreparationModelKey struct{}
+
+// ReportHomeAuthPreparationFailure publishes an upstream 401 or 429 using the
+// credential snapshot used for that call. Report from the preparer, not from each
+// request waiting on a shared preparation.
+func ReportHomeAuthPreparationFailure(ctx context.Context, auth *Auth, status int, body []byte) {
+	if ctx == nil || (status != http.StatusUnauthorized && status != http.StatusTooManyRequests) {
+		return
+	}
+	model, _ := ctx.Value(homeAuthPreparationModelKey{}).(string)
+	if model == "" || auth == nil {
+		return
+	}
+	publishHomeCredentialFailure(ctx, auth, auth.Provider, model, AccessTokenSHA256(auth), status, string(body))
+}
+
 // ReportHomeUnauthorized publishes a result-only zero-token usage record for an
 // upstream 401 attempt that did not pass through an executor UsageReporter.
 func (m *Manager) ReportHomeUnauthorized(ctx context.Context, auth *Auth, provider, model string, upstreamBody ...[]byte) {
@@ -23,7 +39,17 @@ func (m *Manager) ReportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 }
 
 func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provider, model, accessTokenSHA256, failureBody string) {
-	if m == nil || auth == nil {
+	if m == nil {
+		return
+	}
+	if failureBody == "" {
+		failureBody = "upstream unauthorized"
+	}
+	publishHomeCredentialFailure(ctx, auth, provider, model, accessTokenSHA256, http.StatusUnauthorized, failureBody)
+}
+
+func publishHomeCredentialFailure(ctx context.Context, auth *Auth, provider, model, accessTokenSHA256 string, status int, failureBody string) {
+	if auth == nil {
 		return
 	}
 	authIndex := strings.TrimSpace(auth.Index)
@@ -33,9 +59,6 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 	accessTokenSHA256 = strings.TrimSpace(accessTokenSHA256)
 	if authIndex == "" || accessTokenSHA256 == "" {
 		return
-	}
-	if failureBody == "" {
-		failureBody = "upstream unauthorized"
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -75,7 +98,7 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 		RequestedAt:       time.Now(),
 		Failed:            true,
 		Fail: coreusage.Failure{
-			StatusCode: http.StatusUnauthorized,
+			StatusCode: status,
 			Body:       failureBody,
 		},
 	})

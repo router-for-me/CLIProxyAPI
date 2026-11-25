@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 )
 
@@ -2012,5 +2013,926 @@ func TestConvertGeminiRequestToInteractions_NormalizesNumericProtoSchemaTypes_Is
 	}
 	if got := respSchema.Get("properties.answer.type"); got.Type != ojson.String || got.String() != "string" {
 		t.Errorf("response_format.schema.properties.answer.type = %s (type %v), want string", got.Raw, got.Type)
+	}
+}
+
+func TestConvertInteractionsRequestToGeminiGenerationConfigPreservesArraysEmptyContainersAndEscapedKeys(t *testing.T) {
+	input := []byte(`{
+		"model": "gemini-3.5-flash",
+		"input": "hi",
+		"generation_config": {
+			"response_schema": {
+				"type": "object",
+				"properties": {},
+				"required": [],
+				"any_of": [
+					{"type": "string", "min_length": 1},
+					{"type": "integer", "minimum": 0}
+				]
+			},
+			"speech_config": {
+				"multi_speaker_voice_config": {
+					"speaker_voice_configs": [
+						{
+							"speaker": "Alice",
+							"voice_config": {"prebuilt_voice_config": {"voice_name": "Kore"}}
+						}
+					]
+				}
+			},
+			"nested_matrix": [[1, 2], [3, 4]],
+			"special_keys": {
+				"user.name": "a",
+				"wild*card": "b",
+				":leading": "c",
+				"": "d",
+				"0": "e"
+			}
+		}
+	}`)
+
+	out, errConvert := ConvertInteractionsRequestToGemini("gemini-3.5-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+	}
+
+	genCfg := ojson.GetBytesNoCopy(out, "generationConfig")
+
+	anyOf := genCfg.Get("responseSchema.anyOf").Array()
+	if len(anyOf) != 2 {
+		t.Fatalf("responseSchema.anyOf len = %d, want 2. Output: %s", len(anyOf), genCfg.Raw)
+	}
+	if anyOf[0].Get("type").String() != "string" || anyOf[0].Get("minLength").Int() != 1 {
+		t.Fatalf("responseSchema.anyOf[0] = %s, want both type and minLength", anyOf[0].Raw)
+	}
+	if minField := anyOf[1].Get("minimum"); anyOf[1].Get("type").String() != "integer" || !minField.Exists() || minField.Raw != "0" {
+		t.Fatalf("responseSchema.anyOf[1] = %s, want both type and minimum", anyOf[1].Raw)
+	}
+
+	speakers := genCfg.Get("speechConfig.multiSpeakerVoiceConfig.speakerVoiceConfigs").Array()
+	if len(speakers) != 1 {
+		t.Fatalf("speakerVoiceConfigs len = %d, want 1. Output: %s", len(speakers), genCfg.Raw)
+	}
+	if speakers[0].Get("speaker").String() != "Alice" || speakers[0].Get("voiceConfig.prebuiltVoiceConfig.voiceName").String() != "Kore" {
+		t.Fatalf("speakerVoiceConfigs[0] = %s, want both speaker and voiceConfig", speakers[0].Raw)
+	}
+
+	props := genCfg.Get("responseSchema.properties")
+	if !props.Exists() || !props.IsObject() || len(props.Map()) != 0 {
+		t.Fatalf("responseSchema.properties = %q (exists=%v), want empty object {}", props.Raw, props.Exists())
+	}
+	req := genCfg.Get("responseSchema.required")
+	if !req.Exists() || !req.IsArray() || len(req.Array()) != 0 {
+		t.Fatalf("responseSchema.required = %q (exists=%v), want empty array []", req.Raw, req.Exists())
+	}
+
+	matrix := genCfg.Get("nestedMatrix").Array()
+	if len(matrix) != 2 || len(matrix[0].Array()) != 2 || len(matrix[1].Array()) != 2 {
+		t.Fatalf("nestedMatrix = %s, want [[1,2],[3,4]]", genCfg.Get("nestedMatrix").Raw)
+	}
+
+	special := genCfg.Get("specialKeys").Map()
+	for k, want := range map[string]string{
+		"user.name": "a",
+		"wild*card": "b",
+		":leading":  "c",
+		"":          "d",
+		"0":         "e",
+	} {
+		if got, ok := special[k]; !ok || got.String() != want {
+			t.Fatalf("specialKeys[%q] = %q (ok=%v), want %q. Raw: %s", k, got.String(), ok, want, genCfg.Get("specialKeys").Raw)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToInteractionsPreservesArraysEmptyContainersAndRootArrays(t *testing.T) {
+	input := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+		"generationConfig": {
+			"speechConfig": {
+				"multiSpeakerVoiceConfig": {
+					"speakerVoiceConfigs": [
+						{
+							"speaker": "Alice",
+							"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}
+						}
+					]
+				}
+			},
+			"emptyMap": {},
+			"emptyList": [],
+			"nestedMatrix": [[1, 2], [3, 4]],
+			"specialKeys": {
+				"user.name": "a",
+				"wild*card": "b",
+				":leading": "c",
+				"": "d",
+				"0": "e"
+			}
+		},
+		"tools": [
+			{
+				"googleSearch": {
+					"excludeDomains": ["example.com", "test.org"],
+					"customRules": [
+						{"matchPattern": "*.pdf", "maxDepth": 2},
+						{"matchPattern": "*.txt", "maxDepth": 1}
+					],
+					"emptyRules": []
+				}
+			}
+		]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToInteractions("gemini-3.5-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToInteractions error: %v", errConvert)
+	}
+
+	genCfg := ojson.GetBytesNoCopy(out, "generation_config")
+	speakers := genCfg.Get("speech_config.multi_speaker_voice_config.speaker_voice_configs").Array()
+	if len(speakers) != 1 {
+		t.Fatalf("speaker_voice_configs len = %d, want 1. Output: %s", len(speakers), genCfg.Raw)
+	}
+	if speakers[0].Get("speaker").String() != "Alice" || speakers[0].Get("voice_config.prebuilt_voice_config.voice_name").String() != "Kore" {
+		t.Fatalf("speaker_voice_configs[0] = %s, want both speaker and voice_config", speakers[0].Raw)
+	}
+
+	emptyMap := genCfg.Get("empty_map")
+	if !emptyMap.Exists() || !emptyMap.IsObject() || len(emptyMap.Map()) != 0 {
+		t.Fatalf("empty_map = %q (exists=%v), want empty object {}", emptyMap.Raw, emptyMap.Exists())
+	}
+	emptyList := genCfg.Get("empty_list")
+	if !emptyList.Exists() || !emptyList.IsArray() || len(emptyList.Array()) != 0 {
+		t.Fatalf("empty_list = %q (exists=%v), want empty array []", emptyList.Raw, emptyList.Exists())
+	}
+
+	matrix := genCfg.Get("nested_matrix").Array()
+	if len(matrix) != 2 || len(matrix[0].Array()) != 2 || len(matrix[1].Array()) != 2 {
+		t.Fatalf("nested_matrix = %s, want [[1,2],[3,4]]", genCfg.Get("nested_matrix").Raw)
+	}
+
+	special := genCfg.Get("special_keys").Map()
+	for k, want := range map[string]string{
+		"user.name": "a",
+		"wild*card": "b",
+		":leading":  "c",
+		"":          "d",
+		"0":         "e",
+	} {
+		if got, ok := special[k]; !ok || got.String() != want {
+			t.Fatalf("special_keys[%q] = %q (ok=%v), want %q. Raw: %s", k, got.String(), ok, want, genCfg.Get("special_keys").Raw)
+		}
+	}
+
+	gs := ojson.GetBytesNoCopy(out, "tools.0")
+	exclude := gs.Get("exclude_domains")
+	if !exclude.IsArray() || len(exclude.Array()) != 2 || exclude.Array()[0].String() != "example.com" || exclude.Array()[1].String() != "test.org" {
+		t.Fatalf("tools.0.exclude_domains = %s, want [\"example.com\",\"test.org\"]", exclude.Raw)
+	}
+	rules := gs.Get("custom_rules")
+	if !rules.IsArray() || len(rules.Array()) != 2 {
+		t.Fatalf("tools.0.custom_rules = %s, want 2-element array", rules.Raw)
+	}
+	if rules.Array()[0].Get("match_pattern").String() != "*.pdf" || rules.Array()[0].Get("max_depth").Int() != 2 {
+		t.Fatalf("tools.0.custom_rules[0] = %s, want both match_pattern and max_depth", rules.Array()[0].Raw)
+	}
+	emptyRules := gs.Get("empty_rules")
+	if !emptyRules.Exists() || !emptyRules.IsArray() || len(emptyRules.Array()) != 0 {
+		t.Fatalf("tools.0.empty_rules = %q (exists=%v), want empty array []", emptyRules.Raw, emptyRules.Exists())
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiNonStream_ThoughtSummaryAndSignature(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		wantParts []struct {
+			text    string
+			thought bool
+			sig     string
+		}
+	}{
+		{
+			name: "thought summary with signature",
+			raw:  `{"id":"int_1","model":"gemini-3-pro","steps":[{"type":"thought","summary":[{"type":"text","text":"reasoning step"}],"signature":"sig_summary"},{"type":"model_output","content":[{"type":"text","text":"final answer"}]}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "reasoning step", thought: true, sig: "sig_summary"},
+				{text: "final answer", thought: false, sig: ""},
+			},
+		},
+		{
+			name: "thought text with snake_case thought_signature",
+			raw:  `{"id":"int_2","model":"gemini-3-pro","steps":[{"type":"thought","text":"plain thought","thought_signature":"sig_text"}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "plain thought", thought: true, sig: "sig_text"},
+			},
+		},
+		{
+			name: "thought content array attaches thoughtSignature to last part",
+			raw:  `{"id":"int_3","model":"gemini-3-pro","steps":[{"type":"thought","content":[{"type":"text","text":"part 1"},{"type":"text","text":"part 2"}],"thoughtSignature":"sig_multi"}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "part 1", thought: true, sig: ""},
+				{text: "part 2", thought: true, sig: "sig_multi"},
+			},
+		},
+		{
+			name: "signature-only thought step preserved",
+			raw:  `{"id":"int_4","model":"gemini-3-pro","steps":[{"type":"thought","signature":"sig_only"},{"type":"model_output","content":[{"type":"text","text":"done"}]}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "", thought: true, sig: "sig_only"},
+				{text: "done", thought: false, sig: ""},
+			},
+		},
+		{
+			name: "empty content array falls back to summary and preserves signature",
+			raw:  `{"id":"int_5","model":"gemini-3-pro","steps":[{"type":"thought","content":[],"summary":[{"type":"text","text":"fallback summary"}],"signature":"sig_fallback"}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "fallback summary", thought: true, sig: "sig_fallback"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3-pro", nil, nil, []byte(tc.raw), nil)
+			parts := ojson.GetBytesNoCopy(out, "candidates.0.content.parts").Array()
+			if len(parts) != len(tc.wantParts) {
+				t.Fatalf("parts count = %d, want %d. Output: %s", len(parts), len(tc.wantParts), string(out))
+			}
+			for i, want := range tc.wantParts {
+				if got := parts[i].Get("text").String(); got != want.text {
+					t.Errorf("parts[%d].text = %q, want %q. Part: %s", i, got, want.text, parts[i].Raw)
+				}
+				if got := parts[i].Get("thought").Bool(); got != want.thought {
+					t.Errorf("parts[%d].thought = %v, want %v. Part: %s", i, got, want.thought, parts[i].Raw)
+				}
+				if got := parts[i].Get("thoughtSignature").String(); got != want.sig {
+					t.Errorf("parts[%d].thoughtSignature = %q, want %q. Part: %s", i, got, want.sig, parts[i].Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToInteractions_ModelHistoryThoughtSignature(t *testing.T) {
+	const validGeminiThoughtSig = "ErUDCrIDCAISrQMBEU0yD9ECvDhSY1DQJNUGafArdfd2mDfO8VQq7XjLx/91zESuo0QPSdkRFWkLeVIocSQmQULonYMOJcs6XDLV2LTRC9myb3MCCP9CUoWbEeqhAvXKTScyS3nwBDDVJYuDDbY3YvR4V86T/DnU3qufpaVZ3wQOiJVyBVZ515dYTN+XGq7SuUc3RpfAqVU06jgxaCM0WKV4Df5mGMJWb25e/aFG2Jc7upSqpf3n6aElj+4c/eWr4GdKd0TUIElXBZ0HEN/vNcWzD3F0S4MeVbk1LDakL6HG6oyaSS2gocxYNYxqm9mdMHaXYa4mIYqWqmqBEnbgcHp8H4fgqBxc3Cx8C3otV8IarO5OALaVDA3NaXB1zjLet1587kEpkCNr9OvrYOES2nCl/i4EgbPK01nlXo+Wwm5jsZU5nEG4/Z0bErzqC5TKwOsqpJ7afL2sPWI0IGrXhXL+QCumWCS5iUtwybSkL7CYSk9GC+iY+ev6FAmC4V5JEc4OaWOc9+m/29LniN/iPTSxtUQSZT94pUa3/irIIdH7ReAS3cpeM6OTvumR1PwNxXx3XM1mEGc="
+
+	t.Run("non-empty thought part writes summary and survives sanitization", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"text":"deep thought","thought":true,"thoughtSignature":"` + validGeminiThoughtSig + `"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		sanitized := helps.SanitizeGeminiInteractionsUnsupportedInputIDs(out, false)
+		steps := ojson.GetBytesNoCopy(sanitized, "input").Array()
+		if len(steps) != 1 {
+			t.Fatalf("input len = %d, want 1. Output: %s", len(steps), string(sanitized))
+		}
+		if got := steps[0].Get("type").String(); got != "thought" {
+			t.Fatalf("steps[0].type = %q, want thought", got)
+		}
+		if got := steps[0].Get("signature").String(); got != validGeminiThoughtSig {
+			t.Fatalf("steps[0].signature = %q, want %q. Output: %s", got, validGeminiThoughtSig, string(sanitized))
+		}
+		if steps[0].Get("content").Exists() {
+			t.Fatalf("thought step should use summary rather than content: %s", steps[0].Raw)
+		}
+		if got := steps[0].Get("summary.0.text").String(); got != "deep thought" {
+			t.Fatalf("steps[0].summary.0.text = %q, want deep thought. Step: %s", got, steps[0].Raw)
+		}
+	})
+
+	t.Run("non-empty model text preserves signature as thought step", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"text":"answer","thoughtSignature":"sig_answer"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "model_output" || steps[0].Get("content.0.text").String() != "answer" {
+			t.Fatalf("steps[0] = %s, want model_output answer", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_answer" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_answer", steps[1].Raw)
+		}
+	})
+
+	t.Run("model inlineData preserves signature as thought step", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="},"thoughtSignature":"sig_img"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "model_output" || steps[0].Get("content.0.type").String() != "image" {
+			t.Fatalf("steps[0] = %s, want model_output image", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_img" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_img", steps[1].Raw)
+		}
+	})
+
+	t.Run("model fileData preserves signature as thought step", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"fileData":{"mimeType":"image/png","fileUri":"gs://bucket/img.png"},"thoughtSignature":"sig_file"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "model_output" || steps[0].Get("content.0.uri").String() != "gs://bucket/img.png" {
+			t.Fatalf("steps[0] = %s, want model_output file uri", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_file" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_file", steps[1].Raw)
+		}
+	})
+
+	t.Run("standalone signature-only parts without text key preserved", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"thoughtSignature":"sig_bare"},{"thought":true,"thought_signature":"sig_thought_bare"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "thought" || steps[0].Get("signature").String() != "sig_bare" {
+			t.Fatalf("steps[0] = %s, want thought with signature sig_bare", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_thought_bare" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_thought_bare", steps[1].Raw)
+		}
+	})
+
+	t.Run("non-stream response to follow-up request round-trips multi-part text summary and signature through sanitization", func(t *testing.T) {
+		upstream := []byte(`{"id":"int_rt","model":"gemini-3-pro","steps":[{"type":"thought","summary":[{"type":"text","text":"step one"},{"type":"text","text":"step two"}],"signature":"` + validGeminiThoughtSig + `"},{"type":"model_output","content":[{"type":"text","text":"hello"}]},{"type":"thought","signature":"` + validGeminiThoughtSig + `"}]}`)
+		geminiResp := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3-pro", nil, nil, upstream, nil)
+		modelContent := ojson.GetBytesNoCopy(geminiResp, "candidates.0.content").Raw
+
+		followUp := `{"model":"gemini-3-pro","contents":[{"role":"user","parts":[{"text":"hi"}]},` + modelContent + `,{"role":"user","parts":[{"text":"continue"}]}]}`
+		interactionsReq, err := ConvertGeminiRequestToInteractions("gemini-3-pro", []byte(followUp), false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		sanitized := helps.SanitizeGeminiInteractionsUnsupportedInputIDs(interactionsReq, false)
+		steps := ojson.GetBytesNoCopy(sanitized, "input").Array()
+		if len(steps) != 5 {
+			t.Fatalf("input len = %d, want 5. Output: %s", len(steps), string(sanitized))
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != validGeminiThoughtSig {
+			t.Fatalf("steps[1] = %s, want thought with valid signature", steps[1].Raw)
+		}
+		if steps[1].Get("summary.#").Int() != 2 || steps[1].Get("summary.0.text").String() != "step one" || steps[1].Get("summary.1.text").String() != "step two" {
+			t.Fatalf("steps[1].summary = %s, want [step one, step two]", steps[1].Raw)
+		}
+		if steps[2].Get("type").String() != "model_output" || steps[2].Get("content.0.text").String() != "hello" {
+			t.Fatalf("steps[2] = %s, want model_output hello", steps[2].Raw)
+		}
+		if steps[3].Get("type").String() != "thought" || steps[3].Get("signature").String() != validGeminiThoughtSig {
+			t.Fatalf("steps[3] = %s, want thought with valid signature", steps[3].Raw)
+		}
+	})
+
+	t.Run("non-stream response to follow-up request round-trips mixed text and image thought summary", func(t *testing.T) {
+		upstream := []byte(`{"id":"int_rt_img","model":"gemini-3-pro","steps":[{"type":"thought","summary":[{"type":"text","text":"sketch diagram"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}],"signature":"` + validGeminiThoughtSig + `"},{"type":"model_output","content":[{"type":"text","text":"final answer"}]}]}`)
+		geminiResp := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3-pro", nil, nil, upstream, nil)
+		respParts := ojson.GetBytesNoCopy(geminiResp, "candidates.0.content.parts").Array()
+		if len(respParts) != 3 {
+			t.Fatalf("response parts count = %d, want 3. Output: %s", len(respParts), string(geminiResp))
+		}
+		if !respParts[0].Get("thought").Bool() || respParts[0].Get("text").String() != "sketch diagram" {
+			t.Fatalf("respParts[0] = %s, want thought text part", respParts[0].Raw)
+		}
+		if !respParts[1].Get("thought").Bool() || respParts[1].Get("inlineData.mimeType").String() != "image/png" || respParts[1].Get("thoughtSignature").String() != validGeminiThoughtSig {
+			t.Fatalf("respParts[1] = %s, want thought inlineData image part with thoughtSignature", respParts[1].Raw)
+		}
+		if respParts[2].Get("thought").Bool() || respParts[2].Get("text").String() != "final answer" {
+			t.Fatalf("respParts[2] = %s, want non-thought model text part", respParts[2].Raw)
+		}
+
+		modelContent := ojson.GetBytesNoCopy(geminiResp, "candidates.0.content").Raw
+		followUp := `{"model":"gemini-3-pro","contents":[{"role":"user","parts":[{"text":"hi"}]},` + modelContent + `,{"role":"user","parts":[{"text":"next"}]}]}`
+		interactionsReq, err := ConvertGeminiRequestToInteractions("gemini-3-pro", []byte(followUp), false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		sanitized := helps.SanitizeGeminiInteractionsUnsupportedInputIDs(interactionsReq, false)
+		steps := ojson.GetBytesNoCopy(sanitized, "input").Array()
+		if len(steps) != 4 {
+			t.Fatalf("input len = %d, want 4. Output: %s", len(steps), string(sanitized))
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != validGeminiThoughtSig {
+			t.Fatalf("steps[1] = %s, want thought step with valid signature", steps[1].Raw)
+		}
+		if steps[1].Get("summary.#").Int() != 2 || steps[1].Get("summary.0.text").String() != "sketch diagram" || steps[1].Get("summary.1.type").String() != "image" || steps[1].Get("summary.1.data").String() != "iVBORw0KGgo=" {
+			t.Fatalf("steps[1].summary = %s, want mixed text and image summary", steps[1].Raw)
+		}
+		if steps[2].Get("type").String() != "model_output" || steps[2].Get("content.0.text").String() != "final answer" {
+			t.Fatalf("steps[2] = %s, want model_output final answer", steps[2].Raw)
+		}
+	})
+}
+
+func TestConvertInteractionsResponseToGemini_FunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid JSON object preserved",
+			argsField: `,"arguments":{"city":"Tokyo","unit":"c"}`,
+			wantRaw:   `{"city":"Tokyo","unit":"c"}`,
+		},
+		{
+			name:      "args alias with JSON-encoded object string unwrapped",
+			argsField: `,"args":" {\"city\":\"Tokyo\"} "`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"arguments":"{\"city\":\"Tokyo\"}"`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded array string falls back to empty object",
+			argsField: `,"arguments":"[1,2,3]"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded scalar string falls back to empty object",
+			argsField: `,"arguments":"123"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded null string falls back to empty object",
+			argsField: `,"arguments":"null"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded string literal falls back to empty object",
+			argsField: `,"arguments":"\"hello\""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "empty string falls back to empty object",
+			argsField: `,"arguments":""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"arguments":"{broken"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null value falls back to empty object",
+			argsField: `,"arguments":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "array value falls back to empty object",
+			argsField: `,"arguments":[1,2]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "number scalar falls back to empty object",
+			argsField: `,"arguments":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "boolean scalar falls back to empty object",
+			argsField: `,"arguments":true`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing arguments defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"id": "i1",
+				"model": "gemini-3.1-flash-lite",
+				"steps": [
+					{"type": "function_call", "call_id": "call_1", "name": "get_weather"` + tt.argsField + `}
+				]
+			}`)
+			out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+			args := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToGemini_FunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid JSON object preserved",
+			argsField: `,"arguments":{"city":"Tokyo","unit":"c"}`,
+			wantRaw:   `{"city":"Tokyo","unit":"c"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"arguments":" {\"city\":\"Tokyo\"} "`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded array string falls back to empty object",
+			argsField: `,"arguments":"[1,2,3]"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded scalar string falls back to empty object",
+			argsField: `,"arguments":"123"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "empty string falls back to empty object",
+			argsField: `,"arguments":""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"arguments":"{broken"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null value falls back to empty object",
+			argsField: `,"arguments":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "array value falls back to empty object",
+			argsField: `,"arguments":[1,2]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "number scalar falls back to empty object",
+			argsField: `,"arguments":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "boolean scalar falls back to empty object",
+			argsField: `,"arguments":true`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing arguments defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gemini-3.1-flash-lite",
+				"input": [
+					{"type": "user_input", "content": [{"type": "text", "text": "check weather"}]},
+					{"type": "function_call", "call_id": "call_1", "name": "get_weather"` + tt.argsField + `},
+					{"type": "function_result", "call_id": "call_1", "name": "get_weather", "result": {"temp": 22}}
+				]
+			}`)
+			out, errConvert := ConvertInteractionsRequestToGemini("gemini-3.1-flash-lite", input, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+			}
+			args := ojson.GetBytesNoCopy(out, "contents.1.parts.0.functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToGemini_NativeFunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid object preserved",
+			argsField: `,"args":{"q":"go"}`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"args":"{\"q\":\"go\"}"`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "array falls back to empty object",
+			argsField: `,"args":[]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null falls back to empty object",
+			argsField: `,"args":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "scalar falls back to empty object",
+			argsField: `,"args":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"args":"{bad"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing args defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gemini-3.1-flash-lite",
+				"input": [
+					{"role": "user", "parts": [{"text": "lookup"}]},
+					{"role": "model", "parts": [{"functionCall": {"name": "lookup", "id": "call_1"` + tt.argsField + `}, "thoughtSignature": "sig_keep"}]},
+					{"role": "user", "parts": [{"functionResponse": {"name": "lookup", "id": "call_1", "response": {"ok": true}}}]}
+				]
+			}`)
+			out, errConvert := ConvertInteractionsRequestToGemini("gemini-3.1-flash-lite", input, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+			}
+			part := ojson.GetBytesNoCopy(out, "contents.1.parts.0")
+			args := part.Get("functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+			if got := part.Get("functionCall.name").String(); got != "lookup" {
+				t.Fatalf("functionCall.name = %q, want lookup", got)
+			}
+			if got := part.Get("thoughtSignature").String(); got != "sig_keep" {
+				t.Fatalf("thoughtSignature = %q, want sig_keep", got)
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_StreamCompleteStringArgumentsEmittedOnStop(t *testing.T) {
+	t.Run("complete JSON object string in step.start emitted once on step.stop", func(t *testing.T) {
+		var param any
+		ctx := context.Background()
+		startEvent := []byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":" {\"q\":1} ","signature":"sig_1"}}`)
+		stopEvent := []byte(`data: {"event_type":"step.stop","index":0}`)
+
+		if chunks := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, startEvent, &param); len(chunks) != 0 {
+			t.Fatalf("step.start emitted %d chunks, want 0", len(chunks))
+		}
+		chunks := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, stopEvent, &param)
+		if len(chunks) != 1 {
+			t.Fatalf("step.stop emitted %d chunks, want 1", len(chunks))
+		}
+		part := ojson.GetBytesNoCopy(chunks[0], "candidates.0.content.parts.0")
+		if got := part.Get("functionCall.name").String(); got != "lookup" {
+			t.Fatalf("functionCall.name = %q, want lookup", got)
+		}
+		if got := part.Get("functionCall.id").String(); got != "call_1" {
+			t.Fatalf("functionCall.id = %q, want call_1", got)
+		}
+		if got := part.Get("thoughtSignature").String(); got != "sig_1" {
+			t.Fatalf("thoughtSignature = %q, want sig_1", got)
+		}
+		args := part.Get("functionCall.args")
+		if !args.Exists() || !args.IsObject() || args.Raw != `{"q":1}` {
+			t.Fatalf("functionCall.args = %s (type=%s), want %s", args.Raw, args.Type, `{"q":1}`)
+		}
+		if dup := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, stopEvent, &param); len(dup) != 0 {
+			t.Fatalf("duplicate step.stop emitted %d chunks, want 0", len(dup))
+		}
+	})
+
+	t.Run("incomplete or non-object string in step.start does not emit on step.stop", func(t *testing.T) {
+		for _, argsRaw := range []string{`""`, `"{broken"`, `"[1,2]"`} {
+			var param any
+			ctx := context.Background()
+			startEvent := []byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":` + argsRaw + `}}`)
+			stopEvent := []byte(`data: {"event_type":"step.stop","index":0}`)
+
+			_ = ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, startEvent, &param)
+			if chunks := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, stopEvent, &param); len(chunks) != 0 {
+				t.Fatalf("args=%s: step.stop emitted %d chunks, want 0; payload=%s", argsRaw, len(chunks), string(chunks[0]))
+			}
+		}
+	})
+}
+
+func TestConvertInteractionsResponseToGemini_FinishReasonMapping(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       string
+		finishReason string
+		want         string
+	}{
+		{name: "max_tokens", status: "completed", finishReason: "max_tokens", want: "MAX_TOKENS"},
+		{name: "length", status: "completed", finishReason: "length", want: "MAX_TOKENS"},
+		{name: "max_output_tokens", status: "incomplete", finishReason: "max_output_tokens", want: "MAX_TOKENS"},
+		{name: "incomplete_status_only", status: "incomplete", finishReason: "", want: "MAX_TOKENS"},
+		{name: "safety", status: "completed", finishReason: "safety", want: "SAFETY"},
+		{name: "content_filter", status: "completed", finishReason: "content_filter", want: "SAFETY"},
+		{name: "incomplete_with_content_filter", status: "incomplete", finishReason: "content_filter", want: "SAFETY"},
+		{name: "recitation", status: "completed", finishReason: "recitation", want: "RECITATION"},
+		{name: "uppercase_trimmed", status: "completed", finishReason: " MAX_TOKENS ", want: "MAX_TOKENS"},
+		{name: "completed_default", status: "completed", finishReason: "", want: "STOP"},
+		{name: "requires_action_default", status: "requires_action", finishReason: "", want: "STOP"},
+	}
+
+	buildFields := func(status, finishReason string) string {
+		var b strings.Builder
+		if status != "" {
+			b.WriteString(`,"status":"`)
+			b.WriteString(status)
+			b.WriteString(`"`)
+		}
+		if finishReason != "" {
+			b.WriteString(`,"finish_reason":"`)
+			b.WriteString(finishReason)
+			b.WriteString(`"`)
+		}
+		return b.String()
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fields := buildFields(tc.status, tc.finishReason)
+
+			// Non-stream flat payload
+			flatRaw := []byte(`{"id":"i1","model":"gemini-3.5-flash"` + fields + `,"steps":[{"type":"model_output","content":[{"text":"partial"}]}]}`)
+			flatOut := ConvertInteractionsResponseToGeminiNonStream(ctx, "gemini-3.5-flash", nil, nil, flatRaw, nil)
+			if got := ojson.GetBytesNoCopy(flatOut, "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("non-stream flat finishReason = %q, want %q; payload=%s", got, tc.want, string(flatOut))
+			}
+
+			// Non-stream nested interaction payload
+			nestedRaw := []byte(`{"interaction":{"id":"i1","model":"gemini-3.5-flash"` + fields + `,"steps":[{"type":"model_output","content":[{"text":"partial"}]}]}}`)
+			nestedOut := ConvertInteractionsResponseToGeminiNonStream(ctx, "gemini-3.5-flash", nil, nil, nestedRaw, nil)
+			if got := ojson.GetBytesNoCopy(nestedOut, "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("non-stream nested finishReason = %q, want %q; payload=%s", got, tc.want, string(nestedOut))
+			}
+
+			// Stream interaction.completed event
+			var streamParam any
+			streamEvent := []byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","model":"gemini-3.5-flash"` + fields + `}}`)
+			streamOut := ConvertInteractionsResponseToGemini(ctx, "gemini-3.5-flash", nil, nil, streamEvent, &streamParam)
+			if len(streamOut) != 1 {
+				t.Fatalf("stream interaction.completed chunk count = %d, want 1", len(streamOut))
+			}
+			if got := ojson.GetBytesNoCopy(streamOut[0], "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("stream interaction.completed finishReason = %q, want %q; payload=%s", got, tc.want, string(streamOut[0]))
+			}
+
+			// Stream finish event with top-level status/finish_reason
+			var finishParam any
+			finishEvent := []byte(`data: {"event_type":"finish"` + fields + `}`)
+			finishOut := ConvertInteractionsResponseToGemini(ctx, "gemini-3.5-flash", nil, nil, finishEvent, &finishParam)
+			if len(finishOut) != 1 {
+				t.Fatalf("stream finish chunk count = %d, want 1", len(finishOut))
+			}
+			if got := ojson.GetBytesNoCopy(finishOut[0], "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("stream finish finishReason = %q, want %q; payload=%s", got, tc.want, string(finishOut[0]))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_SynthesizedTotalTokenCountIncludesThoughtTokens(t *testing.T) {
+	cases := []struct {
+		name         string
+		usageJSON    string
+		wantPrompt   int64
+		wantCand     int64
+		wantThoughts int64
+		wantTotal    int64
+	}{
+		{
+			name:         "total_thought_tokens_included_when_total_tokens_absent",
+			usageJSON:    `{"total_input_tokens":10,"total_output_tokens":20,"total_thought_tokens":30}`,
+			wantPrompt:   10,
+			wantCand:     20,
+			wantThoughts: 30,
+			wantTotal:    60,
+		},
+		{
+			name:         "reasoning_tokens_included_when_total_tokens_absent",
+			usageJSON:    `{"input_tokens":5,"output_tokens":7,"reasoning_tokens":13}`,
+			wantPrompt:   5,
+			wantCand:     7,
+			wantThoughts: 13,
+			wantTotal:    25,
+		},
+		{
+			name:         "thought_tokens_only_synthesizes_total",
+			usageJSON:    `{"total_thought_tokens":15}`,
+			wantPrompt:   0,
+			wantCand:     0,
+			wantThoughts: 15,
+			wantTotal:    15,
+		},
+		{
+			name:         "explicit_total_tokens_preserved",
+			usageJSON:    `{"total_input_tokens":10,"total_output_tokens":20,"total_thought_tokens":30,"total_tokens":99}`,
+			wantPrompt:   10,
+			wantCand:     20,
+			wantThoughts: 30,
+			wantTotal:    99,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			// Non-stream
+			nonStreamRaw := []byte(`{"id":"i1","model":"gemini-3.5-flash","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":` + tc.usageJSON + `}`)
+			nonStreamOut := ConvertInteractionsResponseToGeminiNonStream(ctx, "gemini-3.5-flash", nil, nil, nonStreamRaw, nil)
+			if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.thoughtsTokenCount").Int(); got != tc.wantThoughts {
+				t.Fatalf("non-stream thoughtsTokenCount = %d, want %d; payload=%s", got, tc.wantThoughts, string(nonStreamOut))
+			}
+			if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.totalTokenCount").Int(); got != tc.wantTotal {
+				t.Fatalf("non-stream totalTokenCount = %d, want %d; payload=%s", got, tc.wantTotal, string(nonStreamOut))
+			}
+			if tc.wantPrompt > 0 {
+				if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.promptTokenCount").Int(); got != tc.wantPrompt {
+					t.Fatalf("non-stream promptTokenCount = %d, want %d; payload=%s", got, tc.wantPrompt, string(nonStreamOut))
+				}
+			}
+			if tc.wantCand > 0 {
+				if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.candidatesTokenCount").Int(); got != tc.wantCand {
+					t.Fatalf("non-stream candidatesTokenCount = %d, want %d; payload=%s", got, tc.wantCand, string(nonStreamOut))
+				}
+			}
+
+			// Stream interaction.completed
+			var param any
+			streamEvent := []byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","model":"gemini-3.5-flash","status":"completed","usage":` + tc.usageJSON + `}}`)
+			streamOut := ConvertInteractionsResponseToGemini(ctx, "gemini-3.5-flash", nil, nil, streamEvent, &param)
+			if len(streamOut) != 1 {
+				t.Fatalf("stream chunk count = %d, want 1", len(streamOut))
+			}
+			if got := ojson.GetBytesNoCopy(streamOut[0], "usageMetadata.thoughtsTokenCount").Int(); got != tc.wantThoughts {
+				t.Fatalf("stream thoughtsTokenCount = %d, want %d; payload=%s", got, tc.wantThoughts, string(streamOut[0]))
+			}
+			if got := ojson.GetBytesNoCopy(streamOut[0], "usageMetadata.totalTokenCount").Int(); got != tc.wantTotal {
+				t.Fatalf("stream totalTokenCount = %d, want %d; payload=%s", got, tc.wantTotal, string(streamOut[0]))
+			}
+		})
 	}
 }

@@ -3691,3 +3691,201 @@ func TestCollectOpenAIResponsesFunctionCallOutputs_DoesNotMoveOrphansAcrossNotic
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_ValidatesFunctionCallArguments(t *testing.T) {
+	tests := []struct {
+		name            string
+		arguments       string
+		wantRawArgs     string
+		wantWrappedArgs string
+		expectWrapped   bool
+	}{
+		{
+			name:        "valid json object",
+			arguments:   `{"command":"ls"}`,
+			wantRawArgs: `{"command":"ls"}`,
+		},
+		{
+			name:        "valid json object with whitespace",
+			arguments:   `  {"command":"ls"}  `,
+			wantRawArgs: `{"command":"ls"}`,
+		},
+		{
+			name:        "empty string defaults to empty object",
+			arguments:   "",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "whitespace defaults to empty object",
+			arguments:   "   ",
+			wantRawArgs: "{}",
+		},
+		{
+			name:            "truncated object wrapped under arguments",
+			arguments:       `{"command":"ls"`,
+			wantWrappedArgs: `{"command":"ls"`,
+			expectWrapped:   true,
+		},
+		{
+			name:            "truncated array wrapped under arguments",
+			arguments:       `[1, 2`,
+			wantWrappedArgs: `[1, 2`,
+			expectWrapped:   true,
+		},
+		{
+			name:            "valid json array wrapped under arguments",
+			arguments:       `[1,2]`,
+			wantWrappedArgs: `[1,2]`,
+			expectWrapped:   true,
+		},
+		{
+			name:            "valid json scalar wrapped under arguments",
+			arguments:       "123",
+			wantWrappedArgs: "123",
+			expectWrapped:   true,
+		},
+		{
+			name:            "plain non-json text wrapped under arguments",
+			arguments:       "not json",
+			wantWrappedArgs: "not json",
+			expectWrapped:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqDoc := ojson.NewDocString(`{"model":"gemini-3.6-flash","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"run_command","arguments":""},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
+			if errSet := reqDoc.Set("input.1.arguments", tt.arguments); errSet != nil {
+				t.Fatalf("set arguments error: %v", errSet)
+			}
+
+			result, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", reqDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+			}
+			if !ojson.ValidBytes(result) {
+				t.Fatalf("translated request is not valid JSON: %s", result)
+			}
+			args := ojson.GetBytesNoCopy(result, "contents.1.parts.0.functionCall.args")
+			if !args.IsObject() {
+				t.Fatalf("functionCall.args = %s, want JSON object. Output: %s", args.Raw, result)
+			}
+			if tt.expectWrapped {
+				if got := args.Get("arguments").String(); got != tt.wantWrappedArgs {
+					t.Fatalf("functionCall.args.arguments = %q, want %q. Output: %s", got, tt.wantWrappedArgs, result)
+				}
+				return
+			}
+			if args.Raw != tt.wantRawArgs {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRawArgs, result)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_GuardsOptionalFields(t *testing.T) {
+	t.Run("null optional fields and empty stop_sequences are omitted", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-3.6-flash",
+			"instructions": null,
+			"max_output_tokens": null,
+			"temperature": null,
+			"top_p": null,
+			"stop_sequences": [],
+			"input": "hello"
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if root.Get("systemInstruction").Exists() {
+			t.Fatalf("expected systemInstruction omitted for null instructions, got %s", root.Get("systemInstruction").Raw)
+		}
+		for _, path := range []string{
+			"generationConfig.maxOutputTokens",
+			"generationConfig.temperature",
+			"generationConfig.topP",
+			"generationConfig.stopSequences",
+		} {
+			if v := root.Get(path); v.Exists() {
+				t.Fatalf("expected %s omitted, got %s. Output: %s", path, v.Raw, out)
+			}
+		}
+	})
+
+	t.Run("empty instructions non-positive max_output_tokens and non-typed fields are omitted", func(t *testing.T) {
+		cases := []struct {
+			name string
+			req  string
+		}{
+			{
+				name: "empty instructions and zero max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","instructions":"","max_output_tokens":0,"temperature":"0.5","top_p":true,"stop_sequences":[null,123,""],"input":"hello"}`,
+			},
+			{
+				name: "non-string instructions and negative max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","instructions":123,"max_output_tokens":-10,"input":"hello"}`,
+			},
+			{
+				name: "string max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","max_output_tokens":"256","input":"hello"}`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", []byte(tc.req), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+				}
+				root := util.ParseGJSONBytesNoCopy(out)
+				if root.Get("systemInstruction").Exists() {
+					t.Fatalf("expected systemInstruction omitted, got %s", root.Get("systemInstruction").Raw)
+				}
+				for _, path := range []string{
+					"generationConfig.maxOutputTokens",
+					"generationConfig.temperature",
+					"generationConfig.topP",
+					"generationConfig.stopSequences",
+				} {
+					if v := root.Get(path); v.Exists() {
+						t.Fatalf("expected %s omitted, got %s. Output: %s", path, v.Raw, out)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("explicit valid values including zero temperature and top_p are preserved", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-3.6-flash",
+			"instructions": "Be concise.",
+			"max_output_tokens": 256,
+			"temperature": 0,
+			"top_p": 0,
+			"stop_sequences": ["END", null, "\n"],
+			"input": "hello"
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if got := root.Get("systemInstruction.parts.0.text").String(); got != "Be concise." {
+			t.Fatalf("systemInstruction.parts.0.text = %q, want %q", got, "Be concise.")
+		}
+		if got := root.Get("generationConfig.maxOutputTokens"); !got.Exists() || got.Type != ojson.Number || got.Int() != 256 {
+			t.Fatalf("maxOutputTokens = %s, want 256", got.Raw)
+		}
+		if got := root.Get("generationConfig.temperature"); !got.Exists() || got.Type != ojson.Number || got.Float() != 0 {
+			t.Fatalf("temperature = %s, want 0", got.Raw)
+		}
+		if got := root.Get("generationConfig.topP"); !got.Exists() || got.Type != ojson.Number || got.Float() != 0 {
+			t.Fatalf("topP = %s, want 0", got.Raw)
+		}
+		stops := root.Get("generationConfig.stopSequences")
+		if !stops.IsArray() || len(stops.Array()) != 2 || stops.Get("0").String() != "END" || stops.Get("1").String() != "\n" {
+			t.Fatalf("stopSequences = %s, want [\"END\",\"\\n\"]", stops.Raw)
+		}
+	})
+}
