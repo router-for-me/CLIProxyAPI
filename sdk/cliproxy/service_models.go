@@ -297,7 +297,23 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return published
 				}
 			}
-			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(indexed) {
+			matchesCompat := func(compat *config.OpenAICompatibility) bool {
+				if compat == nil {
+					return false
+				}
+				if compatName != "" && !strings.EqualFold(strings.TrimSpace(compat.Name), compatName) {
+					return false
+				}
+				if a.Attributes != nil {
+					attrBase := strings.TrimSpace(a.Attributes["base_url"])
+					cfgBase := strings.TrimSpace(compat.BaseURL)
+					if attrBase != "" && cfgBase != "" && !strings.EqualFold(cfgBase, attrBase) {
+						return false
+					}
+				}
+				return compatName != "" || (a.Attributes != nil && strings.TrimSpace(a.Attributes["base_url"]) != "")
+			}
+			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && matchesCompat(indexed) && registerCompat(indexed) {
 				return published
 			}
 			for i := range cfg.OpenAICompatibility {
@@ -448,30 +464,30 @@ func resolveConfigClaudeKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *c
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
-		return entry
-	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
+	matchesCredentials := func(entry *config.ClaudeKey) bool {
+		if entry == nil {
+			return false
+		}
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
+			return strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase)
 		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
+		if attrKey != "" {
+			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
 		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+	}
+	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil && matchesCredentials(entry) {
+		return entry
+	}
+	for i := range cfg.ClaudeKey {
+		if entry := &cfg.ClaudeKey[i]; matchesCredentials(entry) {
 			return entry
 		}
 	}
@@ -516,25 +532,27 @@ func resolveConfigGeminiKeyEntryForConfig(cfg *config.Config, auth *coreauth.Aut
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
-		return entry
-	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range entries {
-		entry := &entries[i]
+	matchesCredentials := func(entry *config.GeminiKey) bool {
+		if entry == nil {
+			return false
+		}
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
+		if attrKey != "" {
+			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
 		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+	}
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) {
+		return entry
+	}
+	for i := range entries {
+		if entry := &entries[i]; matchesCredentials(entry) {
 			return entry
 		}
 	}
@@ -549,25 +567,27 @@ func resolveConfigVertexCompatKeyForConfig(cfg *config.Config, auth *coreauth.Au
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
-		return entry
-	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range cfg.VertexCompatAPIKey {
-		entry := &cfg.VertexCompatAPIKey[i]
+	matchesCredentials := func(entry *config.VertexCompatKey) bool {
+		if entry == nil {
+			return false
+		}
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
+		if attrKey != "" {
+			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
 		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+	}
+	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil && matchesCredentials(entry) {
+		return entry
+	}
+	for i := range cfg.VertexCompatAPIKey {
+		if entry := &cfg.VertexCompatAPIKey[i]; matchesCredentials(entry) {
 			return entry
 		}
 	}
@@ -590,7 +610,7 @@ func resolveConfigCodexKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *co
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.CodexKey, true)
+	return resolveConfigCodexStyleKey(auth, cfg.CodexKey)
 }
 
 func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
@@ -601,7 +621,7 @@ func resolveConfigXAIKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *conf
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.XAIKey, false)
+	return resolveConfigCodexStyleKey(auth, cfg.XAIKey)
 }
 
 func (s *Service) resolveConfigMetaKey(auth *coreauth.Auth) *config.MetaKey {
@@ -612,10 +632,10 @@ func resolveConfigMetaKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *con
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.MetaKey, false)
+	return resolveConfigCodexStyleKey(auth, cfg.MetaKey)
 }
 
-func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
+func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
 	if auth == nil {
 		return nil
 	}
@@ -635,7 +655,7 @@ func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, 
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) {
 		return entry
 	}
 	for i := range entries {
