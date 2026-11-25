@@ -34,7 +34,7 @@ func TestTheResetReportSaysWhatAClaimDoes(t *testing.T) {
 	done := formatResetReport(clawmaster.ClaudeResetReport{Kind: "fable", Before: before, Grant: grant, Claimed: true,
 		Claim: clawmaster.ClaudeResetClaim{Result: "reset", Cleared: []string{"seven_day_overage_included"}, ResetsLeft: &left},
 		After: &clawmaster.ClaudeResetUsage{Week: &after, Fable: new(float64), WeekResetsAt: now.Add(100 * time.Hour)}}, true, now)
-	if !strings.Contains(done, "Claimed: reset; cleared Fable; 0 left.\nAfter: week 55% used, Fable 0% used, the week resets in 100h\n") {
+	if !strings.Contains(done, "Anthropic answered: reset; cleared Fable; 0 left.\nAfter: week 55% used, Fable 0% used, the week resets in 100h\n") {
 		t.Fatalf("claimed %q", done)
 	}
 	if out := formatResetReport(clawmaster.ClaudeResetReport{Kind: "fable", Before: clawmaster.ClaudeResetUsage{IneligibleReason: "surface"}}, false, now); !strings.Contains(out, "cannot claim limit resets (Anthropic says: surface)") {
@@ -45,7 +45,49 @@ func TestTheResetReportSaysWhatAClaimDoes(t *testing.T) {
 	}
 }
 
+func TestTheResetReportPrintsOnlyPlainWordsFromAnthropic(t *testing.T) {
+	now := time.Date(2026, 11, 25, 6, 0, 0, 0, time.UTC)
+	grant := &clawmaster.ClaudeResetGrant{Clears: []string{"seven_day_overage_included", "someone@example.com"}, ResetsLeft: 1, UsableNow: true}
+	before := clawmaster.ClaudeResetUsage{Eligible: true, FableResets: 1, WeekResetsAt: now.Add(-time.Hour)}
+	out := formatResetReport(clawmaster.ClaudeResetReport{Kind: "fable", Before: before, Grant: grant, Claimed: true,
+		Claim: clawmaster.ClaudeResetClaim{Result: "already_used", Reason: "\x1b[2Jaccount of someone"}}, true, now)
+	if strings.Contains(out, "example.com") || strings.Contains(out, "\x1b") || strings.Contains(out, "resets in") {
+		t.Fatalf("report %q", out)
+	}
+	if !strings.Contains(out, "clears Fable and unrecognised") || !strings.Contains(out, "Anthropic answered: already_used (unrecognised).") {
+		t.Fatalf("report %q", out)
+	}
+	unknown := formatResetReport(clawmaster.ClaudeResetReport{Kind: "fable", Before: before, Grant: grant, ClaimUnknown: true}, true, now)
+	if !strings.Contains(unknown, "The claim was sent, but its answer could not be read: the reset may be spent.") {
+		t.Fatalf("unknown %q", unknown)
+	}
+}
+
+// With --claim the command succeeds only when Anthropic answered that it reset.
+func TestAResetClaimSucceedsOnlyOnAReset(t *testing.T) {
+	for _, tc := range []struct {
+		report clawmaster.ClaudeResetReport
+		claim  bool
+		ok     bool
+	}{
+		{clawmaster.ClaudeResetReport{}, false, true},
+		{clawmaster.ClaudeResetReport{Claimed: true, Claim: clawmaster.ClaudeResetClaim{Result: "reset"}}, true, true},
+		{clawmaster.ClaudeResetReport{Claimed: true, Claim: clawmaster.ClaudeResetClaim{Result: "already_used"}}, true, false},
+		{clawmaster.ClaudeResetReport{Claimed: true, Claim: clawmaster.ClaudeResetClaim{Result: "rate_limited"}}, true, false},
+		{clawmaster.ClaudeResetReport{}, true, false},
+	} {
+		if err := resetOutcome(tc.report, tc.claim); (err == nil) != tc.ok {
+			t.Fatalf("%+v claim %v: %v", tc.report, tc.claim, err)
+		}
+	}
+}
+
 func TestResetTakesOnlyItsFlags(t *testing.T) {
+	for _, kind := range []string{"monthly", ""} {
+		if code, err := run([]string{"reset", "a", "--kind", kind}); code != 2 || err == nil {
+			t.Fatalf("--kind %q: code %d err %v", kind, code, err)
+		}
+	}
 	if code, err := run([]string{"reset", "a", "--", "extra"}); code != 2 || err == nil {
 		t.Fatalf("code %d err %v", code, err)
 	}

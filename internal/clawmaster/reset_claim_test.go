@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -258,8 +259,8 @@ func TestAClaimReportsAnthropicsAnswer(t *testing.T) {
 		t.Fatalf("report %+v err %v", report.Claim, err)
 	}
 	f = &fakeAnthropic{usage: usageWithGrants(fableGrant, ""), claimStatus: http.StatusForbidden, claim: `{"error":"someone@example.com"}`}
-	if _, err := runReset(t, f, testOrg, ResetKindFable, true); err == nil || strings.Contains(err.Error(), "example.com") {
-		t.Fatalf("err %v", err)
+	if report, err := runReset(t, f, testOrg, ResetKindFable, true); err == nil || strings.Contains(err.Error(), "example.com") || !report.ClaimUnknown || report.Claimed {
+		t.Fatalf("report %+v err %v", report, err)
 	}
 	f = &fakeAnthropic{usage: usageWithGrants(fableGrant, ""), claimStatus: http.StatusTooManyRequests}
 	if report, err := runReset(t, f, testOrg, ResetKindFable, true); err != nil || report.Claim.Result != "rate_limited" {
@@ -292,5 +293,50 @@ func TestAResetLoadsTheProfilesLogin(t *testing.T) {
 	}
 	if _, err := resetClaudeLimit(t.Context(), Profile{Provider: "codex"}, ResetKindFable, true, do); err == nil {
 		t.Fatal("a Codex profile was reset")
+	}
+}
+
+// A claim that left but whose answer is lost (a dropped connection, an error status, an unreadable body) is
+// reported as one that may have spent the reset, with the usage read again; a transport error does not
+// carry the claim's URL, which names the organization.
+func TestAClaimWithALostAnswerSaysTheResetMayBeSpent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(f *fakeAnthropic) ClaudeQuotaRequestFunc
+	}{
+		{"dropped", func(f *fakeAnthropic) ClaudeQuotaRequestFunc {
+			return func(ctx context.Context, a *coreauth.Auth, r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPost {
+					_, _ = f.do(ctx, a, r)
+					return nil, &url.Error{Op: "Post", URL: r.URL.String(), Err: io.ErrUnexpectedEOF}
+				}
+				return f.do(ctx, a, r)
+			}
+		}},
+		{"unreadable", func(f *fakeAnthropic) ClaudeQuotaRequestFunc { f.claim = `{"result":`; return f.do }},
+		{"error status", func(f *fakeAnthropic) ClaudeQuotaRequestFunc { f.claimStatus = http.StatusBadGateway; return f.do }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeAnthropic{usage: usageWithGrants(fableGrant, ""), after: `{"seven_day":{"utilization":55,"resets_at":"2026-11-29T10:00:00Z"},"cedar_ember":{"eligible":true,"grants":[]}}`}
+			report, err := claudeResetFlow(t.Context(), resetAuth(testOrg), tc.fail(f), ResetKindFable, true, func() time.Time { return resetNow })
+			if err == nil || strings.Contains(err.Error(), testOrg) || !strings.Contains(err.Error(), "may be spent") {
+				t.Fatalf("err %v", err)
+			}
+			if !report.ClaimUnknown || report.Claimed || report.After == nil || report.After.Week == nil || *report.After.Week != 0.55 || len(f.posts()) != 1 {
+				t.Fatalf("report %+v posts %d", report, len(f.posts()))
+			}
+		})
+	}
+	// A failure before the claim leaves (reading the organization) is a plain error: nothing was sent.
+	f := &fakeAnthropic{usage: usageWithGrants(fableGrant, "")}
+	do := func(ctx context.Context, a *coreauth.Auth, r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/oauth/profile" {
+			return nil, &url.Error{Op: "Get", URL: r.URL.String(), Err: io.ErrUnexpectedEOF}
+		}
+		return f.do(ctx, a, r)
+	}
+	report, err := claudeResetFlow(t.Context(), resetAuth(""), do, ResetKindFable, true, func() time.Time { return resetNow })
+	if err == nil || report.ClaimUnknown || len(f.posts()) != 0 {
+		t.Fatalf("report %+v err %v", report, err)
 	}
 }

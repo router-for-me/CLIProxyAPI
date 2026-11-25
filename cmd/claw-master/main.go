@@ -241,6 +241,9 @@ func run(args []string) (int, error) {
 	if command == "reset" && len(flags.Args()) != 0 {
 		return 2, errors.New("reset takes only --kind and --claim")
 	}
+	if _, ok := clawmaster.ClaudeResetKind(resetKind); command == "reset" && !ok {
+		return 2, errors.New("--kind must be fable or weekly")
+	}
 	if command == "probe" && len(flags.Args()) != 0 {
 		return 2, errors.New("probe does not accept Claude arguments or proxy diagnostics")
 	}
@@ -377,12 +380,15 @@ func run(args []string) (int, error) {
 	}
 	if command == "reset" {
 		report, err := clawmaster.ResetClaudeLimit(ctx, profile, resetKind, claimReset)
-		if err != nil {
+		if err != nil && !report.ClaimUnknown {
 			return 1, err
 		}
 		fmt.Fprint(os.Stdout, formatResetReport(report, claimReset, time.Now()))
-		if claimReset && (!report.Claimed || report.Claim.Result != "reset") {
-			return 1, errors.New("no reset was claimed")
+		if err != nil {
+			return 1, err
+		}
+		if err := resetOutcome(report, claimReset); err != nil {
+			return 1, err
 		}
 		return 0, nil
 	}

@@ -385,7 +385,7 @@ server, as the user that runs `serve` (it holds the profile shared, like `serve`
   "Weekly reset": the week, Fable with it. Neither moves the week's reset time. A claim cannot be undone.
 
 The endpoint is not documented by Anthropic; Claude Code 2.1.331 is where its shape was read. The
-running pool sees a claim at its next usage poll (about a minute).
+running pool sees a claim at its next usage poll (within a few minutes: the poll can answer from its cache).
 
 ## Payload-based continuation affinity
 
