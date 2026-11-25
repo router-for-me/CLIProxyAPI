@@ -1493,6 +1493,37 @@ func TestAntigravityBuildRequest_CapsThinkingBudgetWithMaxOutputTokens(t *testin
 	}
 }
 
+func TestAntigravityBuildRequest_SnakeCaseMaxOutputTokensAboveCatalogLimit(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"max_output_tokens": 70000,
+				"thinkingConfig": {"thinkingBudget": 64000}
+			}
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	doc := ojson.NewDoc(payload)
+	_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "claude-sonnet-4-6", doc, false, "", "https://example.com")
+	if errBuild != nil {
+		t.Fatalf("buildRequestDoc() error: %v", errBuild)
+	}
+	if got := ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens"); got.Exists() {
+		t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+	}
+	if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("maxOutputTokens = %d, want 64000; body=%s", got, finalPayload)
+	}
+	if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+		t.Fatalf("thinkingBudget = %d, want 63999; body=%s", got, finalPayload)
+	}
+}
+
 func TestAntigravityBuildRequest_CaseInsensitiveGeminiProAndImageModels(t *testing.T) {
 	t.Parallel()
 

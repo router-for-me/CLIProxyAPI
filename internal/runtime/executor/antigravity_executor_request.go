@@ -181,15 +181,13 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	// A matched variant limits output using the same catalog as its ID and enum.
 	if selection.MaxOutputTokens > 0 {
 		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
-	} else if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
+	} else if maxOut, ok := antigravityRequestedMaxOutputTokensDoc(doc); ok {
 		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
 		if modelInfo == nil && lowerModel != modelName {
 			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
 		}
-		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
-			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				helps.CapAntigravityMaxOutputTokensDoc(doc, modelInfo.MaxCompletionTokens, isClaudeModel)
-			}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 && maxOut > modelInfo.MaxCompletionTokens {
+			helps.CapAntigravityMaxOutputTokensDoc(doc, modelInfo.MaxCompletionTokens, isClaudeModel)
 		}
 	}
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
@@ -1104,4 +1102,26 @@ func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID st
 		return stableID
 	}
 	return generateSessionID()
+}
+
+func antigravityRequestedMaxOutputTokensDoc(doc *ojson.Doc) (int, bool) {
+	if doc == nil {
+		return 0, false
+	}
+	maxOut := 0
+	found := false
+	for _, path := range []string{
+		"request.generationConfig.maxOutputTokens",
+		"request.generationConfig.max_output_tokens",
+	} {
+		val := doc.Get(path)
+		if val.Exists() && val.Type == ojson.Number {
+			n := int(val.Int())
+			if !found || n > maxOut {
+				maxOut = n
+				found = true
+			}
+		}
+	}
+	return maxOut, found
 }

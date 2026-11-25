@@ -47,6 +47,8 @@ func (model AntigravityRequestModel) TranslationModelInfo(req cliproxyexecutor.R
 	return &registry.ModelInfo{ID: model.ID, NativeCapabilities: &registry.NativeCapabilities{WebSearch: &model.WebSearch}}
 }
 
+const minClaudeThinkingBudget int64 = 1024
+
 // CapAntigravityMaxOutputTokensDoc preserves a smaller caller limit and keeps
 // Claude thinking budgets below the effective output limit.
 func CapAntigravityMaxOutputTokensDoc(doc *ojson.Doc, limit int, isClaudeModel bool) {
@@ -71,10 +73,27 @@ func CapAntigravityMaxOutputTokensDoc(doc *ojson.Doc, limit int, isClaudeModel b
 	for _, budgetPath := range []string{
 		"request.generationConfig.thinkingConfig.thinkingBudget",
 		"request.generationConfig.thinkingConfig.thinking_budget",
+		"request.generationConfig.thinking_config.thinkingBudget",
+		"request.generationConfig.thinking_config.thinking_budget",
 	} {
 		budget := doc.Get(budgetPath)
-		if budget.Exists() && budget.Int() >= effectiveMaxOutputTokens {
-			_ = doc.Set(budgetPath, effectiveMaxOutputTokens-1)
+		if !budget.Exists() || budget.Type != ojson.Number {
+			continue
+		}
+		budgetVal := budget.Int()
+		if budgetVal < 0 {
+			continue
+		}
+		if budgetVal >= effectiveMaxOutputTokens {
+			budgetVal = effectiveMaxOutputTokens - 1
+		}
+		if budgetVal < minClaudeThinkingBudget {
+			_ = doc.Delete("request.generationConfig.thinkingConfig")
+			_ = doc.Delete("request.generationConfig.thinking_config")
+			return
+		}
+		if budgetVal != budget.Int() {
+			_ = doc.Set(budgetPath, budgetVal)
 		}
 	}
 }
