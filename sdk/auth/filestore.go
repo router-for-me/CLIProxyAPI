@@ -223,14 +223,29 @@ func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
-	if strings.ContainsRune(id, os.PathSeparator) || filepath.IsAbs(id) {
-		return id, nil
-	}
 	dir := s.baseDirSnapshot()
 	if dir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	return filepath.Join(dir, id), nil
+	absBase, errAbsBase := filepath.Abs(dir)
+	if errAbsBase != nil {
+		return "", fmt.Errorf("auth filestore: resolve base dir: %w", errAbsBase)
+	}
+
+	candidate := id
+	if !filepath.IsAbs(id) {
+		candidate = filepath.Join(absBase, id)
+	}
+	absTarget, errAbsTarget := filepath.Abs(candidate)
+	if errAbsTarget != nil {
+		return "", fmt.Errorf("auth filestore: resolve delete path: %w", errAbsTarget)
+	}
+
+	rel, errRel := filepath.Rel(absBase, absTarget)
+	if errRel != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth filestore: id %q escapes base directory", id)
+	}
+	return absTarget, nil
 }
 
 func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Auth, error) {
