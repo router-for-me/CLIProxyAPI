@@ -1044,6 +1044,12 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinking_config.thinkingLevel",
 		"generation_config.thinkingConfig.thinking_level",
 		"generation_config.thinkingConfig.thinkingLevel",
+		"generationConfig.thinking_level",
+		"generationConfig.thinkingLevel",
+		"generationConfig.thinking_config.thinking_level",
+		"generationConfig.thinking_config.thinkingLevel",
+		"generationConfig.thinkingConfig.thinking_level",
+		"generationConfig.thinkingConfig.thinkingLevel",
 	} {
 		level := get(path)
 		if !level.Exists() {
@@ -1067,6 +1073,12 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinking_config.thinkingBudget",
 		"generation_config.thinkingConfig.thinking_budget",
 		"generation_config.thinkingConfig.thinkingBudget",
+		"generationConfig.thinking_budget",
+		"generationConfig.thinkingBudget",
+		"generationConfig.thinking_config.thinking_budget",
+		"generationConfig.thinking_config.thinkingBudget",
+		"generationConfig.thinkingConfig.thinking_budget",
+		"generationConfig.thinkingConfig.thinkingBudget",
 	} {
 		budget := get(path)
 		if !budget.Exists() {

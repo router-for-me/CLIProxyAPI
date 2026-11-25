@@ -7,6 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/gemini"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/interactions"
 )
 
 func TestGeminiApplyDoc_SnakeCaseContainersAndIncludeThoughts(t *testing.T) {
@@ -242,6 +243,70 @@ func TestApplyThinking_ExtractGeminiSnakeCaseConfig(t *testing.T) {
 		}
 		if got := doc.Get("generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
 			t.Fatalf("expected thinkingLevel=high, got %q (%s)", got, doc.String())
+		}
+	})
+}
+
+func TestApplyThinking_InteractionsCamelCaseGenerationConfig(t *testing.T) {
+	noThinkingModel := &registry.ModelInfo{
+		ID:       "gemini-2.0-flash",
+		Thinking: nil,
+	}
+	thinkingModel := &registry.ModelInfo{
+		ID: "gemini-3-pro-preview",
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "medium", "high"},
+		},
+	}
+
+	t.Run("strips generationConfig.thinkingLevel when model does not support thinking", func(t *testing.T) {
+		body := []byte(`{"generationConfig":{"temperature":0.5,"thinkingLevel":"high"}}`)
+		out, err := thinking.ApplyThinkingWithModelInfo(body, body, noThinkingModel.ID, "interactions", "interactions", "interactions", noThinkingModel)
+		if err != nil {
+			t.Fatalf("ApplyThinkingWithModelInfo failed: %v", err)
+		}
+		doc := ojson.NewDoc(out)
+		if doc.Get("generationConfig.thinkingLevel").Exists() {
+			t.Fatalf("expected generationConfig.thinkingLevel to be stripped, got: %s", doc.String())
+		}
+		if !doc.Get("generationConfig.temperature").Exists() {
+			t.Fatalf("expected generationConfig.temperature to be preserved, got: %s", doc.String())
+		}
+	})
+
+	t.Run("strips generationConfig.thinkingSummaries when model does not support thinking", func(t *testing.T) {
+		body := []byte(`{"generationConfig":{"temperature":0.5,"thinkingSummaries":"auto"}}`)
+		out, err := thinking.ApplyThinkingWithModelInfo(body, body, noThinkingModel.ID, "interactions", "interactions", "interactions", noThinkingModel)
+		if err != nil {
+			t.Fatalf("ApplyThinkingWithModelInfo failed: %v", err)
+		}
+		doc := ojson.NewDoc(out)
+		if doc.Get("generationConfig.thinkingSummaries").Exists() {
+			t.Fatalf("expected generationConfig.thinkingSummaries to be stripped, got: %s", doc.String())
+		}
+		if !doc.Get("generationConfig.temperature").Exists() {
+			t.Fatalf("expected generationConfig.temperature to be preserved, got: %s", doc.String())
+		}
+	})
+
+	t.Run("normalizes generationConfig camelCase thinking fields when model supports thinking", func(t *testing.T) {
+		body := []byte(`{"generationConfig":{"thinkingLevel":"high","thinkingSummaries":"auto"}}`)
+		out, err := thinking.ApplyThinkingWithModelInfo(body, body, thinkingModel.ID, "interactions", "interactions", "interactions", thinkingModel)
+		if err != nil {
+			t.Fatalf("ApplyThinkingWithModelInfo failed: %v", err)
+		}
+		doc := ojson.NewDoc(out)
+		if doc.Get("generationConfig.thinkingLevel").Exists() {
+			t.Fatalf("expected generationConfig.thinkingLevel to be removed, got: %s", doc.String())
+		}
+		if doc.Get("generationConfig.thinkingSummaries").Exists() {
+			t.Fatalf("expected generationConfig.thinkingSummaries to be removed, got: %s", doc.String())
+		}
+		if got := doc.Get("generation_config.thinking_level").String(); got != "high" {
+			t.Fatalf("expected generation_config.thinking_level=high, got %q (%s)", got, doc.String())
+		}
+		if got := doc.Get("generation_config.thinking_summaries").String(); got != "auto" {
+			t.Fatalf("expected generation_config.thinking_summaries=auto, got %q (%s)", got, doc.String())
 		}
 	})
 }

@@ -115,6 +115,7 @@ func stripInteractionsThinkingFieldsDoc(doc *ojson.Doc) {
 		"generationConfig.thinkingSummaries",
 		"generationConfig.thinking_summaries",
 		"generationConfig.thinkingConfig",
+		"generationConfig.thinking_config",
 	} {
 		_ = util.DeleteJSONDocIfExists(doc, path)
 	}
@@ -138,6 +139,8 @@ func originalInteractionsThinkingSummariesDoc(doc *ojson.Doc) (string, bool) {
 	for _, path := range []string{
 		"generation_config.thinking_summaries",
 		"generation_config.thinkingSummaries",
+		"generationConfig.thinking_summaries",
+		"generationConfig.thinkingSummaries",
 	} {
 		value := doc.Get(path)
 		if value.Type != ojson.String {
@@ -157,6 +160,10 @@ func originalInteractionsIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 		"generation_config.thinking_config.includeThoughts",
 		"generation_config.thinkingConfig.include_thoughts",
 		"generation_config.thinkingConfig.includeThoughts",
+		"generationConfig.thinking_config.include_thoughts",
+		"generationConfig.thinking_config.includeThoughts",
+		"generationConfig.thinkingConfig.include_thoughts",
+		"generationConfig.thinkingConfig.includeThoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:

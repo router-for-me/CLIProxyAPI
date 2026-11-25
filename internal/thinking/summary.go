@@ -108,6 +108,8 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 		for _, path := range []string{
 			"generation_config.thinking_summaries",
 			"generation_config.thinkingSummaries",
+			"generationConfig.thinking_summaries",
+			"generationConfig.thinkingSummaries",
 		} {
 			if config, ok := interactionsSummaryConfigFromGetter(get, path); ok {
 				return config
@@ -124,6 +126,10 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 			"generation_config.thinking_config.includeThoughts",
 			"generation_config.thinkingConfig.include_thoughts",
 			"generation_config.thinkingConfig.includeThoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
+			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinkingConfig.includeThoughts",
 		}); ok {
 			return config
 		}
@@ -367,8 +373,14 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 		if doc.Set("generation_config.thinking_summaries", value) == nil {
 			modified = true
 		}
-		if doc.Get("generation_config.thinkingSummaries").Exists() && doc.Delete("generation_config.thinkingSummaries") == nil {
-			modified = true
+		for _, alias := range []string{
+			"generation_config.thinkingSummaries",
+			"generationConfig.thinking_summaries",
+			"generationConfig.thinkingSummaries",
+		} {
+			if doc.Get(alias).Exists() && doc.Delete(alias) == nil {
+				modified = true
+			}
 		}
 	case "openai-response", "codex":
 		if enabled {
