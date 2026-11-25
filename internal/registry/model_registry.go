@@ -2201,43 +2201,35 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
-
-	// Get all available models for this handler type
-	models := r.GetAvailableModels(handlerType)
+	// Inspect registered ModelInfo entries directly so handler-specific map
+	// formatting (e.g. Gemini omitting id/created or Claude formatting created_at)
+	// does not lose the registered model ID or creation timestamp.
+	models := r.GetAvailableModelInfos()
 	if len(models) == 0 {
 		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
-	}
-
-	extractModelID := func(model map[string]any) string {
-		if modelID, ok := model["id"].(string); ok && modelID != "" {
-			return modelID
-		}
-		if name, ok := model["name"].(string); ok && name != "" {
-			return strings.TrimPrefix(name, "models/")
-		}
-		return ""
 	}
 
 	// Sort models by creation timestamp (newest first), with strict weak ordering
 	// when created timestamps are absent or equal.
 	sort.Slice(models, func(i, j int) bool {
-		createdI, okI := models[i]["created"].(int64)
-		createdJ, okJ := models[j]["created"].(int64)
-		if okI != okJ {
-			return okI
+		hasI := models[i].Created > 0
+		hasJ := models[j].Created > 0
+		if hasI != hasJ {
+			return hasI
 		}
-		if okI && createdI != createdJ {
-			return createdI > createdJ
+		if hasI && models[i].Created != models[j].Created {
+			return models[i].Created > models[j].Created
 		}
-		return extractModelID(models[i]) < extractModelID(models[j])
+		return models[i].ID < models[j].ID
 	})
 
 	// Find the first model with available clients
 	for _, model := range models {
-		if modelID := extractModelID(model); modelID != "" {
-			if count := r.GetModelCount(modelID); count > 0 {
-				return modelID, nil
-			}
+		if model == nil || model.ID == "" {
+			continue
+		}
+		if count := r.GetModelCount(model.ID); count > 0 {
+			return model.ID, nil
 		}
 	}
 

@@ -44,6 +44,58 @@ func TestGetFirstAvailableModel_GeminiHandler(t *testing.T) {
 			t.Fatalf("GetFirstAvailableModel(gemini) = %q, want %q", got, "gemini-2.5-flash")
 		}
 	})
+
+	t.Run("uses registered ID when gemini Name differs from ID", func(t *testing.T) {
+		r := newTestModelRegistry()
+		r.RegisterClient("gemini-client-3", "gemini", []*ModelInfo{
+			{
+				ID:          "custom-gemini",
+				Name:        "models/gemini-2.5-pro",
+				DisplayName: "Custom Gemini",
+				Type:        "gemini",
+			},
+		})
+
+		got, err := r.GetFirstAvailableModel("gemini")
+		if err != nil {
+			t.Fatalf("GetFirstAvailableModel(gemini) returned error: %v", err)
+		}
+		if got != "custom-gemini" {
+			t.Fatalf("GetFirstAvailableModel(gemini) = %q, want %q", got, "custom-gemini")
+		}
+	})
+
+	t.Run("preserves creation-time ordering for gemini models", func(t *testing.T) {
+		r := newTestModelRegistry()
+		r.RegisterClient("gemini-client-4", "gemini", []*ModelInfo{
+			{
+				ID:      "alpha-gemini-old",
+				Name:    "models/gemini-2.0-flash",
+				Created: 1000,
+				Type:    "gemini",
+			},
+			{
+				ID:      "zeta-gemini-newest",
+				Name:    "models/gemini-2.5-pro",
+				Created: 3000,
+				Type:    "gemini",
+			},
+			{
+				ID:      "mid-gemini-no-created",
+				Name:    "models/gemini-2.0-pro",
+				Created: 0,
+				Type:    "gemini",
+			},
+		})
+
+		got, err := r.GetFirstAvailableModel("gemini")
+		if err != nil {
+			t.Fatalf("GetFirstAvailableModel(gemini) returned error: %v", err)
+		}
+		if got != "zeta-gemini-newest" {
+			t.Fatalf("GetFirstAvailableModel(gemini) = %q, want %q", got, "zeta-gemini-newest")
+		}
+	})
 }
 
 func TestGetFirstAvailableModel_MixedCreatedStrictWeakOrdering(t *testing.T) {
