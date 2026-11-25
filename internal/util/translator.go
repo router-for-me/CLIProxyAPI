@@ -1713,11 +1713,11 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 				// Mirror the executor's cleanNestedSchema wrapping: the schema is nested
 				// under a wrapper key before cleaning, so its top-level object counts as
 				// nested and can receive the "_" placeholder.
-				wrapped, errWrap := ojson.SetRaw("{}", "schema", translated.Raw)
-				if errWrap != nil {
+				wrappedDoc := ojson.NewDocString("{}")
+				if errWrap := wrappedDoc.SetRaw("schema", NormalizeJSONSchemaNumericConstraints(translated.Raw)); errWrap != nil {
 					continue
 				}
-				recleaned := ojson.Get(CleanJSONSchemaForAntigravity(wrapped), "schema")
+				recleaned := ojson.Get(CleanJSONSchemaForAntigravity(wrappedDoc.String()), "schema")
 				if !recleaned.Exists() {
 					continue
 				}

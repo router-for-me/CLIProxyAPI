@@ -269,7 +269,7 @@ func normalizeGeminiResponseFormatForInteractionsDoc(outDoc *ojson.Doc, genCfg o
 				_ = entryDoc.Set("mime_type", mimeType)
 			}
 			if schema.Exists() {
-				_ = entryDoc.SetRaw("schema", schema.Raw)
+				_ = entryDoc.SetRaw("schema", util.NormalizeJSONSchemaNumericConstraints(schema.Raw))
 			}
 			return entryDoc.Bytes()
 		}

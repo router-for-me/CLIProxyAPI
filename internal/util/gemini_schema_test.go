@@ -5168,3 +5168,196 @@ func TestIssue7917_AntigravityCleanersStripUnsupportedSchemaKeywords(t *testing.
 		}
 	})
 }
+
+func TestIssue8032_NormalizeJSONSchemaNumericProtoTypes(t *testing.T) {
+	t.Run("normalizes protobuf Schema.Type enums 1..7 and preserves literals and invalid values", func(t *testing.T) {
+		input := `{
+			"type": 6,
+			"properties": {
+				"strField": {"type": 1, "default": {"type": 1}, "example": {"type": 2}, "examples": [{"type": 3}], "const": {"type": 4}, "enum": [{"type": 5}]},
+				"numField": {"type": 2},
+				"intField": {"type": 3},
+				"boolField": {"type": 4},
+				"arrField": {"type": 5, "items": {"type": 1}},
+				"objField": {"type": 6, "additionalProperties": {"type": 2}},
+				"nullField": {"type": 7},
+				"type": {"type": 1},
+				"unionField": {"anyOf": [{"type": 1}, {"type": 7}]},
+				"unspecifiedType": {"type": 0},
+				"outOfRangeType": {"type": 8},
+				"negativeType": {"type": -1},
+				"floatType": {"type": 1.5},
+				"stringDigitType": {"type": "1"}
+			},
+			"$defs": {
+				"Tag": {"type": 1}
+			},
+			"x-metadata": {"type": 6}
+		}`
+
+		got := NormalizeJSONSchemaNumericConstraints(input)
+		parsed := ojson.Parse(got)
+
+		for _, tc := range []struct {
+			path string
+			want string
+		}{
+			{"type", "object"},
+			{"properties.strField.type", "string"},
+			{"properties.numField.type", "number"},
+			{"properties.intField.type", "integer"},
+			{"properties.boolField.type", "boolean"},
+			{"properties.arrField.type", "array"},
+			{"properties.arrField.items.type", "string"},
+			{"properties.objField.type", "object"},
+			{"properties.objField.additionalProperties.type", "number"},
+			{"properties.nullField.type", "null"},
+			{"properties.type.type", "string"},
+			{"properties.unionField.anyOf.0.type", "string"},
+			{"properties.unionField.anyOf.1.type", "null"},
+			{"$defs.Tag.type", "string"},
+			{"properties.stringDigitType.type", "1"},
+		} {
+			val := parsed.Get(tc.path)
+			if val.Type != ojson.String || val.String() != tc.want {
+				t.Errorf("%s = %s (type %v), want string %q; output=%s", tc.path, val.Raw, val.Type, tc.want, got)
+			}
+		}
+
+		for _, tc := range []struct {
+			path string
+			want string
+		}{
+			{"properties.strField.default.type", "1"},
+			{"properties.strField.example.type", "2"},
+			{"properties.strField.examples.0.type", "3"},
+			{"properties.strField.const.type", "4"},
+			{"properties.strField.enum.0.type", "5"},
+			{"properties.unspecifiedType.type", "0"},
+			{"properties.outOfRangeType.type", "8"},
+			{"properties.negativeType.type", "-1"},
+			{"properties.floatType.type", "1.5"},
+			{"x-metadata.type", "6"},
+		} {
+			val := parsed.Get(tc.path)
+			if val.Type != ojson.Number || val.Raw != tc.want {
+				t.Errorf("%s = %s (type %v), want preserved number %s; output=%s", tc.path, val.Raw, val.Type, tc.want, got)
+			}
+		}
+	})
+
+	t.Run("normalizes unicode-escaped type keyword", func(t *testing.T) {
+		input := `{"\u0074ype":6,"\u0070roperties":{"q":{"\u0074ype":1}}}`
+		got := NormalizeJSONSchemaNumericConstraints(input)
+		parsed := ojson.Parse(got)
+		if val := parsed.Get("type"); val.Type != ojson.String || val.String() != "object" {
+			t.Fatalf("type = %s (type %v), want string \"object\"; output=%s", val.Raw, val.Type, got)
+		}
+		if val := parsed.Get("properties.q.type"); val.Type != ojson.String || val.String() != "string" {
+			t.Fatalf("properties.q.type = %s (type %v), want string \"string\"; output=%s", val.Raw, val.Type, got)
+		}
+	})
+
+	t.Run("CleanJSONSchemaForAntigravity preserves array items and adds empty object placeholder", func(t *testing.T) {
+		input := `{
+			"type": 6,
+			"properties": {
+				"query": {"type": 1},
+				"tags": {"type": 5, "items": {"type": 1}},
+				"emptyObj": {"type": 6}
+			},
+			"required": ["query"]
+		}`
+		got := CleanJSONSchemaForAntigravity(input)
+		parsed := ojson.Parse(got)
+		if val := parsed.Get("type"); val.Type != ojson.String || val.String() != "object" {
+			t.Fatalf("type = %s, want string object; output=%s", val.Raw, got)
+		}
+		if val := parsed.Get("properties.query.type"); val.Type != ojson.String || val.String() != "string" {
+			t.Fatalf("properties.query.type = %s, want string; output=%s", val.Raw, got)
+		}
+		if val := parsed.Get("properties.tags.type"); val.Type != ojson.String || val.String() != "array" {
+			t.Fatalf("properties.tags.type = %s, want array; output=%s", val.Raw, got)
+		}
+		if val := parsed.Get("properties.tags.items.type"); val.Type != ojson.String || val.String() != "string" {
+			t.Fatalf("properties.tags.items.type = %s, want string (items must not be deleted); output=%s", val.Raw, got)
+		}
+		if val := parsed.Get("properties.emptyObj.type"); val.Type != ojson.String || val.String() != "object" {
+			t.Fatalf("properties.emptyObj.type = %s, want object; output=%s", val.Raw, got)
+		}
+		if val := parsed.Get("properties.emptyObj.properties.reason.type"); val.Type != ojson.String || val.String() != "string" {
+			t.Fatalf("properties.emptyObj.properties.reason.type = %s, want placeholder string; output=%s", val.Raw, got)
+		}
+		if req := parsed.Get("properties.emptyObj.required.0").String(); req != "reason" {
+			t.Fatalf("properties.emptyObj.required.0 = %q, want reason; output=%s", req, got)
+		}
+	})
+
+	t.Run("CleanJSONSchemaForAntigravityResponse normalizes numeric types without tool placeholders", func(t *testing.T) {
+		input := `{
+			"type": 6,
+			"properties": {
+				"tags": {"type": 5, "items": {"type": 1}},
+				"emptyObj": {"type": 6}
+			}
+		}`
+		got := CleanJSONSchemaForAntigravityResponse(input)
+		parsed := ojson.Parse(got)
+		if val := parsed.Get("properties.tags.items.type"); val.Type != ojson.String || val.String() != "string" {
+			t.Fatalf("properties.tags.items.type = %s, want string; output=%s", val.Raw, got)
+		}
+		if val := parsed.Get("properties.emptyObj.type"); val.Type != ojson.String || val.String() != "object" {
+			t.Fatalf("properties.emptyObj.type = %s, want object; output=%s", val.Raw, got)
+		}
+		if parsed.Get("properties.emptyObj.properties.reason").Exists() {
+			t.Fatalf("response schema must not gain tool placeholder: %s", got)
+		}
+	})
+
+	t.Run("normalizes numeric proto types under special property keys via ojson.Doc", func(t *testing.T) {
+		input := `{"type":6,"properties":{"a\\b":{"type":1,"minLength":"2"},"a.b":{"type":3},"a*b?c|d#e@f":{"type":4},":colon":{"type":2},"[bracket]":{"type":5,"items":{"type":1}}},"patternProperties":{"^\\d+$":{"type":1,"maxLength":"4"}}}`
+		got := NormalizeJSONSchemaNumericConstraints(input)
+		parsed := ojson.Parse(got)
+		props := parsed.Get("properties").Map()
+		if v := props[`a\b`].Get("type"); v.Type != ojson.String || v.String() != "string" {
+			t.Fatalf(`properties["a\\b"].type = %s, want string; output=%s`, v.Raw, got)
+		}
+		if v := props[`a\b`].Get("minLength"); v.Type != ojson.Number || v.Int() != 2 {
+			t.Fatalf(`properties["a\\b"].minLength = %s, want 2; output=%s`, v.Raw, got)
+		}
+		if _, bogus := props["ab"]; bogus {
+			t.Fatalf(`unexpected fabricated property "ab": %s`, got)
+		}
+		if v := props["a.b"].Get("type"); v.Type != ojson.String || v.String() != "integer" {
+			t.Fatalf(`properties["a.b"].type = %s, want integer; output=%s`, v.Raw, got)
+		}
+		if v := props["a*b?c|d#e@f"].Get("type"); v.Type != ojson.String || v.String() != "boolean" {
+			t.Fatalf(`properties["a*b?c|d#e@f"].type = %s, want boolean; output=%s`, v.Raw, got)
+		}
+		if v := props[":colon"].Get("type"); v.Type != ojson.String || v.String() != "number" {
+			t.Fatalf(`properties[":colon"].type = %s, want number; output=%s`, v.Raw, got)
+		}
+		if v := props["[bracket]"].Get("items.type"); v.Type != ojson.String || v.String() != "string" {
+			t.Fatalf(`properties["[bracket]"].items.type = %s, want string; output=%s`, v.Raw, got)
+		}
+		pat := parsed.Get("patternProperties").Map()[`^\d+$`]
+		if v := pat.Get("type"); v.Type != ojson.String || v.String() != "string" {
+			t.Fatalf(`patternProperties["^\\d+$"].type = %s, want string; output=%s`, v.Raw, got)
+		}
+		if v := pat.Get("maxLength"); v.Type != ojson.Number || v.Int() != 4 {
+			t.Fatalf(`patternProperties["^\\d+$"].maxLength = %s, want 4; output=%s`, v.Raw, got)
+		}
+	})
+
+	t.Run("normalizeMalformedSchemaObjects respects non-object numeric proto types", func(t *testing.T) {
+		input := `{"type": 1, "customNested": {"k": "v"}}`
+		got := CleanJSONSchemaForGemini(input)
+		parsed := ojson.Parse(got)
+		if val := parsed.Get("type"); val.Type != ojson.String || val.String() != "string" {
+			t.Fatalf("type = %s, want string; output=%s", val.Raw, got)
+		}
+		if parsed.Get("properties").Exists() {
+			t.Fatalf("non-object numeric type must not wrap unknown nested map into properties: %s", got)
+		}
+	})
+}

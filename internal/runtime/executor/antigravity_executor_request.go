@@ -688,11 +688,12 @@ const antigravitySchemaWrapperKey = "schema"
 // cleaning always saw tool schemas nested inside the request, so nesting is reproduced here to keep
 // the emitted schema byte-identical to the previous behaviour.
 func cleanNestedSchema(clean func(string) string, schemaRaw string) string {
-	wrapped, errWrap := ojson.SetRaw("{}", antigravitySchemaWrapperKey, schemaRaw)
-	if errWrap != nil {
+	schemaRaw = util.NormalizeJSONSchemaNumericConstraints(schemaRaw)
+	wrappedDoc := ojson.NewDocString("{}")
+	if errWrap := wrappedDoc.SetRaw(antigravitySchemaWrapperKey, schemaRaw); errWrap != nil {
 		return clean(schemaRaw)
 	}
-	if unwrapped := ojson.Get(clean(wrapped), antigravitySchemaWrapperKey); unwrapped.Exists() {
+	if unwrapped := ojson.Get(clean(wrappedDoc.String()), antigravitySchemaWrapperKey); unwrapped.Exists() {
 		return unwrapped.Raw
 	}
 	return clean(schemaRaw)

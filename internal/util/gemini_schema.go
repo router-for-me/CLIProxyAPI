@@ -610,9 +610,24 @@ func isKnownSchemaKeywordOrExtension(key string) bool {
 	return false
 }
 
+func declaredProtoSchemaTypeName(t any) (string, bool) {
+	num, ok := t.(json.Number)
+	if !ok {
+		return "", false
+	}
+	n, okInt := parseSchemaNonNegativeInt(string(num))
+	if !okInt {
+		return "", false
+	}
+	return protoSchemaTypeName(n)
+}
+
 func isNonObjectDeclaredType(t any) bool {
 	if s, ok := t.(string); ok {
 		return s != "" && !strings.EqualFold(s, "object")
+	}
+	if typeName, ok := declaredProtoSchemaTypeName(t); ok {
+		return typeName != "object"
 	}
 	if arr, ok := t.([]any); ok {
 		for _, item := range arr {
@@ -629,6 +644,9 @@ func isArrayDeclaredType(t any) bool {
 	switch typeValue := t.(type) {
 	case string:
 		return strings.EqualFold(typeValue, "array")
+	case json.Number:
+		typeName, ok := declaredProtoSchemaTypeName(typeValue)
+		return ok && typeName == "array"
 	case []any:
 		for _, item := range typeValue {
 			if itemType, ok := item.(string); ok && strings.EqualFold(itemType, "array") {
@@ -1682,104 +1700,139 @@ var numericSchemaConstraintKeywords = []string{
 	"minProperties", "maxProperties",
 }
 
-type numericConstraintEdit struct {
-	offset      int
-	end         int
-	replacement string
-}
-
 // NormalizeJSONSchemaNumericConstraints converts string-encoded integer values on JSON Schema
 // numeric constraint keywords (minLength, maxLength, minItems, maxItems, minProperties,
-// maxProperties) to JSON numbers. Google's Protobuf Schema format represents these int64
-// fields as strings, whereas standard JSON Schema carriers (such as parametersJsonSchema)
-// require numeric values.
+// maxProperties) to JSON numbers, and converts numeric Google Protobuf Schema.Type enum values
+// (1..7) on schema "type" keywords to standard lowercase JSON Schema type strings.
+// Google's Protobuf Schema wire/JSON format can emit int64 constraints as strings and enum
+// types as integers, whereas standard JSON Schema carriers (such as parametersJsonSchema)
+// require numeric constraints and string type names.
 func NormalizeJSONSchemaNumericConstraints(jsonStr string) string {
-	if !hasNumericSchemaConstraintKeyword(jsonStr) && !strings.Contains(jsonStr, `\u`) && !strings.Contains(jsonStr, `\U`) {
+	if !hasNumericSchemaConstraintKeyword(jsonStr) && !hasNumericSchemaTypeCandidate(jsonStr) && !strings.Contains(jsonStr, `\u`) && !strings.Contains(jsonStr, `\U`) {
 		return jsonStr
 	}
 	root := ojson.Parse(jsonStr)
 	if !root.IsObject() {
 		return jsonStr
 	}
-	doc := root.Raw
-	root.Index = 0
-	var edits []numericConstraintEdit
-	collectNumericConstraintEdits(doc, root, &edits)
-	if len(edits) == 0 {
+	var doc *ojson.Doc
+	normalizeNumericSchemaNodeDoc(jsonStr, root, "", &doc)
+	if doc == nil {
 		return jsonStr
 	}
-	var sb strings.Builder
-	sb.Grow(len(doc))
-	cursor := 0
-	for _, edit := range edits {
-		if edit.offset < cursor || edit.end > len(doc) {
-			return jsonStr
-		}
-		sb.WriteString(doc[cursor:edit.offset])
-		sb.WriteString(edit.replacement)
-		cursor = edit.end
-	}
-	sb.WriteString(doc[cursor:])
-	return sb.String()
+	return doc.String()
 }
 
-func collectNumericConstraintEdits(doc string, node ojson.Result, edits *[]numericConstraintEdit) {
+func normalizeNumericSchemaNodeDoc(raw string, node ojson.Result, prefix string, doc **ojson.Doc) {
 	if !node.IsObject() {
 		return
+	}
+	ensureDoc := func() *ojson.Doc {
+		if *doc == nil {
+			*doc = ojson.NewDocString(raw)
+		}
+		return *doc
 	}
 	node.ForEach(func(key, val ojson.Result) bool {
 		keyStr := key.String()
 		switch keyStr {
+		case "type":
+			if val.Type == ojson.Number {
+				if n, ok := parseSchemaNonNegativeInt(val.Raw); ok {
+					if typeName, okType := protoSchemaTypeName(n); okType {
+						_ = ensureDoc().Set(joinOJSONSetPath(prefix, keyStr), typeName)
+					}
+				}
+			}
 		case "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties":
 			if val.Type == ojson.String {
 				if n, ok := parseSchemaNonNegativeInt(val.String()); ok {
-					end := val.Index + len(val.Raw)
-					if val.Index >= 0 && end <= len(doc) && doc[val.Index:end] == val.Raw {
-						*edits = append(*edits, numericConstraintEdit{
-							offset:      val.Index,
-							end:         end,
-							replacement: strconv.FormatInt(n, 10),
-						})
-					}
+					_ = ensureDoc().Set(joinOJSONSetPath(prefix, keyStr), n)
 				}
 			}
 		case "properties", "patternProperties", "dependentSchemas", "dependencies", "$defs", "definitions":
 			if val.IsObject() {
-				val.ForEach(func(_, propVal ojson.Result) bool {
+				mapPath := joinOJSONSetPath(prefix, keyStr)
+				val.ForEach(func(propKey, propVal ojson.Result) bool {
 					if propVal.IsObject() {
-						collectNumericConstraintEdits(doc, propVal, edits)
+						normalizeNumericSchemaNodeDoc(raw, propVal, joinOJSONSetPath(mapPath, escapeOJSONSetPathKey(propKey.String())), doc)
 					}
 					return true
 				})
 			}
 		case "items":
+			itemsPath := joinOJSONSetPath(prefix, keyStr)
 			if val.IsObject() {
-				collectNumericConstraintEdits(doc, val, edits)
+				normalizeNumericSchemaNodeDoc(raw, val, itemsPath, doc)
 			} else if val.IsArray() {
+				idx := 0
 				val.ForEach(func(_, item ojson.Result) bool {
 					if item.IsObject() {
-						collectNumericConstraintEdits(doc, item, edits)
+						normalizeNumericSchemaNodeDoc(raw, item, joinOJSONSetPath(itemsPath, strconv.Itoa(idx)), doc)
 					}
+					idx++
 					return true
 				})
 			}
 		case "additionalProperties", "additionalItems", "unevaluatedProperties", "unevaluatedItems",
 			"if", "then", "else", "not", "contains", "propertyNames", "contentSchema":
 			if val.IsObject() {
-				collectNumericConstraintEdits(doc, val, edits)
+				normalizeNumericSchemaNodeDoc(raw, val, joinOJSONSetPath(prefix, keyStr), doc)
 			}
 		case "prefixItems", "anyOf", "oneOf", "allOf":
 			if val.IsArray() {
+				listPath := joinOJSONSetPath(prefix, keyStr)
+				idx := 0
 				val.ForEach(func(_, item ojson.Result) bool {
 					if item.IsObject() {
-						collectNumericConstraintEdits(doc, item, edits)
+						normalizeNumericSchemaNodeDoc(raw, item, joinOJSONSetPath(listPath, strconv.Itoa(idx)), doc)
 					}
+					idx++
 					return true
 				})
 			}
 		}
 		return true
 	})
+}
+
+func joinOJSONSetPath(prefix, segment string) string {
+	if prefix == "" {
+		return segment
+	}
+	return prefix + "." + segment
+}
+
+func escapeOJSONSetPathKey(key string) string {
+	if key == "" {
+		return key
+	}
+	needsEscape := key[0] == ':' || key[0] == '[' || key[0] == '{' || key[0] == '!'
+	if !needsEscape {
+		for i := 0; i < len(key); i++ {
+			switch key[i] {
+			case '.', '\\', '|', '#', '*', '?', '@':
+				needsEscape = true
+			}
+			if needsEscape {
+				break
+			}
+		}
+	}
+	if !needsEscape {
+		return key
+	}
+	var sb strings.Builder
+	sb.Grow(len(key) + 4)
+	for i := 0; i < len(key); i++ {
+		b := key[i]
+		if (i == 0 && (b == ':' || b == '[' || b == '{' || b == '!')) ||
+			b == '.' || b == '\\' || b == '|' || b == '#' || b == '*' || b == '?' || b == '@' {
+			sb.WriteByte('\\')
+		}
+		sb.WriteByte(b)
+	}
+	return sb.String()
 }
 
 func hasNumericSchemaConstraintKeyword(jsonStr string) bool {
@@ -1789,6 +1842,56 @@ func hasNumericSchemaConstraintKeyword(jsonStr string) bool {
 		}
 	}
 	return false
+}
+
+func hasNumericSchemaTypeCandidate(jsonStr string) bool {
+	const token = `"type"`
+	search := jsonStr
+	for {
+		idx := strings.Index(search, token)
+		if idx < 0 {
+			return false
+		}
+		i := idx + len(token)
+		for i < len(search) && isJSONWhitespace(search[i]) {
+			i++
+		}
+		if i < len(search) && search[i] == ':' {
+			i++
+			for i < len(search) && isJSONWhitespace(search[i]) {
+				i++
+			}
+			if i < len(search) && search[i] >= '1' && search[i] <= '7' {
+				return true
+			}
+		}
+		search = search[idx+len(token):]
+	}
+}
+
+func isJSONWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+func protoSchemaTypeName(n int64) (string, bool) {
+	switch n {
+	case 1:
+		return "string", true
+	case 2:
+		return "number", true
+	case 3:
+		return "integer", true
+	case 4:
+		return "boolean", true
+	case 5:
+		return "array", true
+	case 6:
+		return "object", true
+	case 7:
+		return "null", true
+	default:
+		return "", false
+	}
 }
 
 func parseSchemaNonNegativeInt(raw string) (int64, bool) {

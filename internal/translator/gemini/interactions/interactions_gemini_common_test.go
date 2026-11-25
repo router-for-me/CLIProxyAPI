@@ -1959,3 +1959,58 @@ func TestConvertGeminiRequestToInteractions_FunctionResponsePartsMedia(t *testin
 		}
 	})
 }
+
+func TestConvertGeminiRequestToInteractions_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search",
+				"parameters": {
+					"type": 6,
+					"properties": {
+						"query": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}}
+					}
+				}
+			}]
+		}],
+		"generationConfig": {
+			"responseSchema": {
+				"type": 6,
+				"properties": {
+					"answer": {"type": 1}
+				}
+			}
+		}
+	}`)
+
+	out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToInteractions returned error: %v", err)
+	}
+
+	toolSchema := ojson.GetBytesNoCopy(out, "tools.0.parameters")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.query.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+	} {
+		got := toolSchema.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("tools.0.parameters.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+
+	respSchema := ojson.GetBytesNoCopy(out, "response_format.schema")
+	if got := respSchema.Get("type"); got.Type != ojson.String || got.String() != "object" {
+		t.Errorf("response_format.schema.type = %s (type %v), want string object", got.Raw, got.Type)
+	}
+	if got := respSchema.Get("properties.answer.type"); got.Type != ojson.String || got.String() != "string" {
+		t.Errorf("response_format.schema.properties.answer.type = %s (type %v), want string", got.Raw, got.Type)
+	}
+}
