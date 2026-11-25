@@ -203,26 +203,14 @@ func TestShadowCopyPluginFallbackCacheIsolatesDistinctPluginDirs(t *testing.T) {
 }
 
 func TestShadowDirectoryDigestResolvesRelativePathsByWorkingDirectory(t *testing.T) {
-	origWD, errWD := os.Getwd()
-	if errWD != nil {
-		t.Fatalf("Getwd() error = %v", errWD)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(origWD)
-	})
-
 	workA := t.TempDir()
 	workB := t.TempDir()
 	relDir := filepath.Join("plugins", runtime.GOOS, runtime.GOARCH)
 
-	if errChdir := os.Chdir(workA); errChdir != nil {
-		t.Fatalf("Chdir(workA) error = %v", errChdir)
-	}
+	t.Chdir(workA)
 	digestA := shadowDirectoryDigest(relDir)
 
-	if errChdir := os.Chdir(workB); errChdir != nil {
-		t.Fatalf("Chdir(workB) error = %v", errChdir)
-	}
+	t.Chdir(workB)
 	digestB := shadowDirectoryDigest(relDir)
 
 	if digestA == digestB {
