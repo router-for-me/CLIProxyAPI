@@ -351,6 +351,7 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth); ok && hint.Known && !hint.Available {
 		if hadFailure || !cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
 			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{})
+			antigravityCreditsBalanceByAuth.Delete(key)
 		}
 	}
 }
@@ -884,6 +885,8 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		runIfCurrentTask(func() {
 			if balance != nil {
 				storeAntigravityCreditsBalanceBestEffort(auth, *balance)
+			} else {
+				deleteAntigravityCreditsBalanceBestEffort(auth)
 			}
 			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, hint)
 			if balance != nil && hint.Available {
@@ -1179,6 +1182,31 @@ func storeAntigravityCreditsBalanceBestEffort(auth *cliproxyauth.Auth, bal antig
 	if current {
 		defer unlock()
 		antigravityCreditsBalanceByAuth.Store(key, bal)
+	}
+}
+
+func deleteAntigravityCreditsBalanceBestEffort(auth *cliproxyauth.Auth) {
+	if auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance delete failed prefix=cpa:antigravity:*: %v", errClient)
+			return
+		}
+		if _, errDel := client.KVDel(context.Background(), antigravityCreditsBalanceKey(authID, cliproxyauth.AntigravityCreditsScope(auth))); errDel != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance delete failed prefix=cpa:antigravity:*: %v", errDel)
+		}
+		return
+	}
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if current {
+		defer unlock()
+		antigravityCreditsBalanceByAuth.Delete(key)
 	}
 }
 
