@@ -309,32 +309,7 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	}
 
 	// tools -> tools[].functionDeclarations + tools[].googleSearch/codeExecution/urlContext passthrough
-	allowedToolNames := make(map[string]struct{})
-	isAllowedTools := false
-	allowedMode := "auto"
-	if toolChoice := ojson.GetBytesNoCopy(rawJSON, "tool_choice"); toolChoice.Exists() && toolChoice.IsObject() && toolChoice.Get("type").String() == "allowed_tools" {
-		isAllowedTools = true
-		toolList := toolChoice.Get("allowed_tools.tools").Array()
-		if len(toolList) == 0 {
-			toolList = toolChoice.Get("tools").Array()
-		}
-		for _, t := range toolList {
-			fnName := strings.TrimSpace(t.Get("function.name").String())
-			if fnName == "" {
-				fnName = strings.TrimSpace(t.Get("name").String())
-			}
-			if fnName != "" {
-				allowedToolNames[fnName] = struct{}{}
-			}
-		}
-		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
-		if modeVal == "" {
-			modeVal = strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
-		}
-		if modeVal != "" {
-			allowedMode = modeVal
-		}
-	}
+	allowedToolNames, isAllowedTools, allowedMode := parseGeminiOpenAIAllowedTools(rawJSON)
 
 	declaredOriginalToSanitized := make(map[string]string)
 	sanitizedToOriginalCounts := make(map[string]int)
@@ -539,6 +514,36 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	common.AttachDefaultSafetySettingsDoc(outDoc, "safetySettings")
 
 	return outDoc.Bytes(), drops.Err()
+}
+
+func parseGeminiOpenAIAllowedTools(rawJSON []byte) (map[string]struct{}, bool, string) {
+	allowedToolNames := make(map[string]struct{})
+	isAllowedTools := false
+	allowedMode := "auto"
+	if toolChoice := ojson.GetBytesNoCopy(rawJSON, "tool_choice"); toolChoice.Exists() && toolChoice.IsObject() && toolChoice.Get("type").String() == "allowed_tools" {
+		isAllowedTools = true
+		toolList := toolChoice.Get("allowed_tools.tools").Array()
+		if len(toolList) == 0 {
+			toolList = toolChoice.Get("tools").Array()
+		}
+		for _, t := range toolList {
+			fnName := strings.TrimSpace(t.Get("function.name").String())
+			if fnName == "" {
+				fnName = strings.TrimSpace(t.Get("name").String())
+			}
+			if fnName != "" {
+				allowedToolNames[fnName] = struct{}{}
+			}
+		}
+		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
+		if modeVal == "" {
+			modeVal = strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
+		}
+		if modeVal != "" {
+			allowedMode = modeVal
+		}
+	}
+	return allowedToolNames, isAllowedTools, allowedMode
 }
 
 func geminiTextPart(text string) []byte {

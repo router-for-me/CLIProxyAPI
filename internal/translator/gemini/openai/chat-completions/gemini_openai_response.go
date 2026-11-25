@@ -51,6 +51,74 @@ func geminiOpenAIToolThoughtSignature(raw string) string {
 	return signature
 }
 
+// geminiOpenAISanitizedToolNameMap builds the sanitized-name -> original-name map
+// matching the effective function tool declarations emitted by ConvertOpenAIRequestToGemini
+// (including tool_choice.allowed_tools filtering and collision exclusion), while also
+// accepting legacy top-level tool declarations without a type field.
+func geminiOpenAISanitizedToolNameMap(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !ojson.ValidBytes(rawJSON) {
+		return nil
+	}
+	tools := ojson.GetBytesNoCopy(rawJSON, "tools")
+	if !tools.IsArray() {
+		return nil
+	}
+
+	allowedToolNames, isAllowedTools, _ := parseGeminiOpenAIAllowedTools(rawJSON)
+	sanitizedToOriginal := make(map[string]string)
+	collided := make(map[string]bool)
+
+	recordName := func(originalName string) {
+		if originalName == "" {
+			return
+		}
+		if isAllowedTools {
+			if _, ok := allowedToolNames[originalName]; !ok {
+				return
+			}
+		}
+		sanitizedName := util.SanitizeFunctionName(originalName)
+		if sanitizedName == "" {
+			return
+		}
+		if existing, exists := sanitizedToOriginal[sanitizedName]; exists {
+			if existing != originalName {
+				collided[sanitizedName] = true
+			}
+			return
+		}
+		sanitizedToOriginal[strings.Clone(sanitizedName)] = strings.Clone(originalName)
+	}
+
+	tools.ForEach(func(_, t ojson.Result) bool {
+		toolType := t.Get("type").String()
+		if toolType == "function" {
+			if fn := t.Get("function"); fn.Exists() && fn.IsObject() {
+				recordName(fn.Get("name").String())
+			}
+			return true
+		}
+		if toolType == "" {
+			if name := strings.TrimSpace(t.Get("name").String()); name != "" {
+				recordName(name)
+			}
+		}
+		return true
+	})
+
+	var out map[string]string
+	for sanitizedName, originalName := range sanitizedToOriginal {
+		if collided[sanitizedName] || sanitizedName == originalName {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[sanitizedName] = originalName
+	}
+	return out
+}
+
 // ConvertGeminiResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini event types and transforms them into OpenAI-compatible JSON responses.
@@ -74,7 +142,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			SawToolCall:              make(map[int]bool),
 			SawFinishReason:          make(map[int]bool),
 			UpstreamFinishReason:     make(map[int]string),
-			SanitizedNameMap:         util.SanitizedToolNameMap(originalRequestRawJSON),
+			SanitizedNameMap:         geminiOpenAISanitizedToolNameMap(originalRequestRawJSON),
 			SanitizedNameMapResolved: true,
 		}
 	}
@@ -104,7 +172,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	}
 	if !p.SanitizedNameMapResolved {
 		if p.SanitizedNameMap == nil {
-			p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+			p.SanitizedNameMap = geminiOpenAISanitizedToolNameMap(originalRequestRawJSON)
 		}
 		p.SanitizedNameMapResolved = true
 	}
@@ -517,7 +585,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	sanitizedNameMap := geminiOpenAISanitizedToolNameMap(originalRequestRawJSON)
 	var unixTimestamp int64
 	// Initialize template with an empty choices array to support multiple candidates.
 	templateDoc := ojson.NewDocString(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[]}`)

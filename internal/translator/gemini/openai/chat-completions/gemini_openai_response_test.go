@@ -796,6 +796,93 @@ func TestConvertGeminiResponseToOpenAI_FunctionCallWithoutArgsUsesEmptyObject(t 
 	})
 }
 
+func TestConvertGeminiResponseToOpenAI_RestoresSanitizedOpenAIToolNames(t *testing.T) {
+	ctx := context.Background()
+	originalReq := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"mcp/search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}]}`)
+	upstream := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp_search","args":{"q":"test"}}}]},"finishReason":"STOP"}]}`)
+
+	t.Run("streaming", func(t *testing.T) {
+		var param any
+		outputs := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", originalReq, nil, upstream, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", outputs[0])
+		}
+	})
+
+	t.Run("streaming vertex partial args", func(t *testing.T) {
+		var param any
+		partial := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp_search","willContinue":true,"partialArgs":[{"jsonPath":"$.q","stringValue":"test"}]}}]}}]}`)
+		outputs := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", originalReq, nil, partial, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", outputs[0])
+		}
+	})
+
+	t.Run("streaming reused param lazy init", func(t *testing.T) {
+		var param any = &convertGeminiResponseToOpenAIChatParams{}
+		outputs := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", originalReq, nil, upstream, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", outputs[0])
+		}
+	})
+
+	t.Run("non-streaming", func(t *testing.T) {
+		output := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-4-argon", originalReq, nil, upstream, nil)
+		if got := ojson.GetBytesNoCopy(output, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", output)
+		}
+	})
+
+	t.Run("allowed_tools excludes colliding sibling round-trip", func(t *testing.T) {
+		filteredReq := []byte(`{
+			"model":"gemini-4-argon",
+			"messages":[{"role":"user","content":"hi"}],
+			"tools":[
+				{"type":"function","function":{"name":"mcp/search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}},
+				{"type":"function","function":{"name":"mcp_search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}
+			],
+			"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"mcp/search"}}]}}
+		}`)
+		geminiReq, errConv := ConvertOpenAIRequestToGemini("gemini-4-argon", filteredReq, false)
+		if errConv != nil {
+			t.Fatalf("ConvertOpenAIRequestToGemini unexpected error: %v", errConv)
+		}
+		decls := ojson.GetBytesNoCopy(geminiReq, "tools.0.functionDeclarations").Array()
+		if len(decls) != 1 {
+			t.Fatalf("functionDeclarations count = %d, want 1; req=%s", len(decls), geminiReq)
+		}
+		sentName := decls[0].Get("name").String()
+		if sentName != "mcp_search" {
+			t.Fatalf("sent declaration name = %q, want %q", sentName, "mcp_search")
+		}
+
+		roundTripUpstream := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"` + sentName + `","args":{"q":"test"}}}]},"finishReason":"STOP"}]}`)
+
+		var param any
+		streamOut := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", filteredReq, geminiReq, roundTripUpstream, &param)
+		if len(streamOut) != 1 {
+			t.Fatalf("stream output count = %d, want 1", len(streamOut))
+		}
+		if got := ojson.GetBytesNoCopy(streamOut[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("stream function.name = %q, want %q; payload=%s", got, "mcp/search", streamOut[0])
+		}
+
+		nonStreamOut := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-4-argon", filteredReq, geminiReq, roundTripUpstream, nil)
+		if got := ojson.GetBytesNoCopy(nonStreamOut, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("non-stream function.name = %q, want %q; payload=%s", got, "mcp/search", nonStreamOut)
+		}
+	})
+}
+
 func BenchmarkConvertGeminiResponseToOpenAI_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"` + strings.Repeat("x", 1024*1024) + `"}]}`)
 	delta := []byte(`{"candidates":[{"content":{"parts":[{"text":"token "}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)

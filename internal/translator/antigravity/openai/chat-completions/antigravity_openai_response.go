@@ -668,7 +668,8 @@ func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName 
 	responseResult := ojson.GetBytesNoCopy(rawJSON, "response")
 	if responseResult.Exists() {
 		responseJSON := restoreAntigravityOpenAIFunctionNames([]byte(responseResult.Raw), originalRequestRawJSON)
-		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, responseJSON, param)
+		// Function names are already restored above; pass nil for originalRequestRawJSON to prevent double restoration.
+		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, nil, requestRawJSON, responseJSON, param)
 	}
 	return []byte{}
 }

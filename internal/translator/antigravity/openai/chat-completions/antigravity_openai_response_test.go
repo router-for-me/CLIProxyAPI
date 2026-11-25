@@ -743,6 +743,53 @@ func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t 
 	}
 }
 
+func TestConvertAntigravityResponseToOpenAINonStream_DoesNotRemapRestoredCollidingName(t *testing.T) {
+	original := []byte(`{"tools":[
+		{"type":"function","function":{"name":"mcp/search"}},
+		{"type":"function","function":{"name":"mcp_search"}}
+	]}`)
+	mapped := util.SanitizedFunctionNameMap(original)["mcp_search"]
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{"q":"test"}}}]}}]}}`)
+
+	output := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash", original, nil, responseJSON, nil)
+	if got := ojson.GetBytesNoCopy(output, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp_search" {
+		t.Fatalf("function.name = %q, want %q. Output: %s", got, "mcp_search", output)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAINonStream_DoesNotDoubleRestoreChainedAlias(t *testing.T) {
+	// Build a 3-tool chain where the third tool's original name equals the
+	// disambiguated upstream alias assigned to the first tool.
+	twoTools := []byte(`{"tools":[
+		{"type":"function","function":{"name":"mcp/search"}},
+		{"type":"function","function":{"name":"mcp_search"}}
+	]}`)
+	firstAlias := util.SanitizedFunctionNameMap(twoTools)["mcp/search"]
+	if firstAlias == "" || firstAlias == "mcp/search" {
+		t.Fatalf("expected disambiguated alias for mcp/search, got %q", firstAlias)
+	}
+
+	original := []byte(`{"tools":[
+		{"type":"function","function":{"name":"mcp/search"}},
+		{"type":"function","function":{"name":"mcp_search"}},
+		{"type":"function","function":{"name":"` + firstAlias + `"}}
+	]}`)
+	forward := util.SanitizedFunctionNameMap(original)
+	if forward["mcp/search"] != firstAlias {
+		t.Fatalf("forward[mcp/search] = %q, want %q", forward["mcp/search"], firstAlias)
+	}
+	thirdMapped := forward[firstAlias]
+	if thirdMapped == "" || thirdMapped == firstAlias {
+		t.Fatalf("expected disambiguated upstream name for third tool %q, got %q", firstAlias, thirdMapped)
+	}
+
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + thirdMapped + `","args":{"q":"test"}}}]}}]}}`)
+	output := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash", original, nil, responseJSON, nil)
+	if got := ojson.GetBytesNoCopy(output, "choices.0.message.tool_calls.0.function.name").String(); got != firstAlias {
+		t.Fatalf("function.name = %q, want %q. Output: %s", got, firstAlias, output)
+	}
+}
+
 func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *testing.T) {
 	ctx := context.Background()
 	responseJSON := []byte(`{
