@@ -105,6 +105,16 @@ type Params struct {
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
 
+// claudeResponseIDCounter provides a process-wide unique counter for synthesized Claude message IDs.
+var claudeResponseIDCounter uint64
+
+func resolveAntigravityClaudeMessageID(rawID string) string {
+	if trimmed := strings.TrimSpace(rawID); trimmed != "" {
+		return trimmed
+	}
+	return fmt.Sprintf("msg_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&claudeResponseIDCounter, 1))
+}
+
 const antigravityMalformedFunctionCallErrorPayload = `{"type":"error","error":{"type":"api_error","message":"Gemini response finished with MALFORMED_FUNCTION_CALL"}}`
 
 func isAntigravityMalformedFunctionCall(finishReason string, hasVisibleOutput bool) bool {
@@ -329,7 +339,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	if !params.HasFirstResponse {
 		// Create the initial message structure with default values according to Claude Code API specification
 		// This follows the Claude Code API specification for streaming message initialization
-		messageStartDoc := ojson.NewDoc([]byte(`{"type": "message_start", "message": {"id": "msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY", "type": "message", "role": "assistant", "content": [], "model": "claude-3-5-sonnet-20241022", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}`))
+		messageStartDoc := ojson.NewDoc([]byte(`{"type": "message_start", "message": {"id": "", "type": "message", "role": "assistant", "content": [], "model": "claude-3-5-sonnet-20241022", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}`))
 
 		// Use cpaUsageMetadata within the message_start event for Claude.
 		if promptTokenCount := ojson.GetBytesNoCopy(rawJSON, "response.cpaUsageMetadata.promptTokenCount"); promptTokenCount.Exists() {
@@ -343,9 +353,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		if modelVersionResult := ojson.GetBytesNoCopy(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 			_ = messageStartDoc.Set("message.model", modelVersionResult.String())
 		}
-		if responseIDResult := ojson.GetBytesNoCopy(rawJSON, "response.responseId"); responseIDResult.Exists() {
-			_ = messageStartDoc.Set("message.id", responseIDResult.String())
-		}
+		_ = messageStartDoc.Set("message.id", resolveAntigravityClaudeMessageID(ojson.GetBytesNoCopy(rawJSON, "response.responseId").String()))
 		appendEvent("message_start", messageStartDoc.String())
 
 		params.HasFirstResponse = true
@@ -778,7 +786,7 @@ func ConvertAntigravityResponseToClaudeNonStream(ctx context.Context, _ string, 
 	}
 
 	responseDoc := ojson.NewDoc([]byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`))
-	_ = responseDoc.Set("id", root.Get("response.responseId").String())
+	_ = responseDoc.Set("id", resolveAntigravityClaudeMessageID(root.Get("response.responseId").String()))
 	_ = responseDoc.Set("model", root.Get("response.modelVersion").String())
 	_ = responseDoc.Set("usage.input_tokens", inputTokens)
 	_ = responseDoc.Set("usage.output_tokens", outputTokens)

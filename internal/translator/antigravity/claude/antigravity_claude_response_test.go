@@ -2170,3 +2170,104 @@ func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRespectsF
 		})
 	}
 }
+
+func TestConvertAntigravityResponseToClaudeNonStream_FallbackIDWhenResponseIDMissingOrBlank(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-sonnet-4-6"}`)
+	cases := []struct {
+		name    string
+		rawJSON []byte
+	}{
+		{
+			name:    "missing_response_id",
+			rawJSON: []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`),
+		},
+		{
+			name:    "empty_response_id",
+			rawJSON: []byte(`{"response":{"responseId":"","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`),
+		},
+		{
+			name:    "whitespace_response_id",
+			rawJSON: []byte(`{"response":{"responseId":"   ","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out1 := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, tc.rawJSON, nil)
+			out2 := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, tc.rawJSON, nil)
+
+			id1 := ojson.GetBytesNoCopy(out1, "id").String()
+			id2 := ojson.GetBytesNoCopy(out2, "id").String()
+			if !strings.HasPrefix(id1, "msg_") || len(id1) <= len("msg_") {
+				t.Fatalf("first fallback id = %q, want non-empty msg_ prefix; body=%s", id1, string(out1))
+			}
+			if !strings.HasPrefix(id2, "msg_") || len(id2) <= len("msg_") {
+				t.Fatalf("second fallback id = %q, want non-empty msg_ prefix; body=%s", id2, string(out2))
+			}
+			if id1 == id2 {
+				t.Fatalf("expected unique fallback ids across calls, got duplicate %q", id1)
+			}
+		})
+	}
+
+	t.Run("preserves_non_empty_response_id", func(t *testing.T) {
+		rawJSON := []byte(`{"response":{"responseId":"  req_vrtx_123  ","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`)
+		out := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, rawJSON, nil)
+		if got := ojson.GetBytesNoCopy(out, "id").String(); got != "req_vrtx_123" {
+			t.Fatalf("id = %q, want %q; body=%s", got, "req_vrtx_123", string(out))
+		}
+	})
+}
+
+func TestConvertAntigravityResponseToClaudeStream_FallbackIDWhenResponseIDMissingOrBlank(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-sonnet-4-6"}`)
+	cases := []struct {
+		name  string
+		chunk []byte
+	}{
+		{
+			name:  "missing_response_id",
+			chunk: []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`),
+		},
+		{
+			name:  "empty_response_id",
+			chunk: []byte(`{"response":{"responseId":"","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`),
+		},
+		{
+			name:  "whitespace_response_id",
+			chunk: []byte(`{"response":{"responseId":"  	 ","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}`),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var p1, p2 any
+			out1 := string(bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, tc.chunk, &p1), nil))
+			out2 := string(bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, tc.chunk, &p2), nil))
+
+			start1 := sseDataForEvent(t, out1, "message_start")
+			start2 := sseDataForEvent(t, out2, "message_start")
+			id1 := ojson.Get(start1, "message.id").String()
+			id2 := ojson.Get(start2, "message.id").String()
+			if !strings.HasPrefix(id1, "msg_") || len(id1) <= len("msg_") {
+				t.Fatalf("first stream fallback id = %q, want non-empty msg_ prefix; event=%s", id1, start1)
+			}
+			if !strings.HasPrefix(id2, "msg_") || len(id2) <= len("msg_") {
+				t.Fatalf("second stream fallback id = %q, want non-empty msg_ prefix; event=%s", id2, start2)
+			}
+			if id1 == id2 {
+				t.Fatalf("expected unique stream fallback ids across calls, got duplicate %q", id1)
+			}
+		})
+	}
+
+	t.Run("preserves_non_empty_response_id", func(t *testing.T) {
+		chunk := []byte(`{"response":{"responseId":"  req_vrtx_stream_1  ","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}]}}`)
+		var param any
+		out := string(bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, chunk, &param), nil))
+		start := sseDataForEvent(t, out, "message_start")
+		if got := ojson.Get(start, "message.id").String(); got != "req_vrtx_stream_1" {
+			t.Fatalf("message.id = %q, want %q; event=%s", got, "req_vrtx_stream_1", start)
+		}
+	})
+}
