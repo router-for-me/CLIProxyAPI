@@ -416,6 +416,11 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 			path:  "properties",
 			want:  []string{"z", ":id"},
 		},
+		"path syntax property names": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"z":{"$ref":"#/$defs/P"},"@this":{"type":"integer"},"#":{"type":"boolean"},"a|b":{"type":"number"},"[x]":{"type":"string"},"{y}":{"type":"string"},"!w":{"type":"string"},"q\"r":{"type":"string"},"b\\c":{"type":"string"},"a":{"type":"string"}}}`,
+			path:  "properties",
+			want:  []string{"z", "@this", "#", "a|b", "[x]", "{y}", "!w", `q"r`, `b\c`, "a"},
+		},
 		"nested under leading colon property name": {
 			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{":id":{"type":"object","properties":{"z":{"$ref":"#/$defs/P"},"a":{"type":"string"}}}}}`,
 			path:  `properties.\:id.properties`,
@@ -431,8 +436,11 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := InlineLocalRefs(tc.input)
 			var keys []string
-			ojson.Get(got, tc.path).ForEach(func(key, _ ojson.Result) bool {
+			ojson.Get(got, tc.path).ForEach(func(key, value ojson.Result) bool {
 				keys = append(keys, key.String())
+				if !value.Get("type").Exists() {
+					t.Errorf("property %q lost its schema: %s", key.String(), got)
+				}
 				return true
 			})
 			if strings.Join(keys, ",") != strings.Join(tc.want, ",") {

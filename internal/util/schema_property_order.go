@@ -96,5 +96,5 @@ func propertySignature(keys []string) string {
 }
 
 func escapeWritePathKey(key string) string {
-	return strings.ReplaceAll(escapeGJSONPathKey(key), ":", `\:`)
+	return strings.ReplaceAll(ojson.Escape(key), ":", `\:`)
 }
