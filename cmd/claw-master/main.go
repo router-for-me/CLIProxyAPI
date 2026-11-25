@@ -170,15 +170,17 @@ func run(args []string) (int, error) {
 		return runAgent(ctx, args[1:])
 	}
 	if len(args) < 2 {
-		return 2, errors.New("usage: claw-master check; claw-master login PROFILE; claw-master probe PROFILE --model MODEL; claw-master run PROFILE [--next-profile PROFILE ...] [--backup-api-key FILE|env:VARIABLE] [--map INCOMING:TARGET ...] [--diagnostics] -- [Claude arguments]; claw-master serve PROFILE [--next-profile PROFILE ...] --listen ADDRESS:PORT --state-dir DIR; claw-master issue --state-dir DIR --request FILE [--days N] [--out FILE]; claw-master client-init --dir DIR --name NAME; claw-master connect --server ADDRESS:PORT --dir DIR -- [Claude arguments]")
+		return 2, errors.New("usage: claw-master check; claw-master login PROFILE; claw-master probe PROFILE --model MODEL; claw-master reset PROFILE [--kind fable|weekly] [--claim]; claw-master run PROFILE [--next-profile PROFILE ...] [--backup-api-key FILE|env:VARIABLE] [--map INCOMING:TARGET ...] [--diagnostics] -- [Claude arguments]; claw-master serve PROFILE [--next-profile PROFILE ...] --listen ADDRESS:PORT --state-dir DIR; claw-master issue --state-dir DIR --request FILE [--days N] [--out FILE]; claw-master client-init --dir DIR --name NAME; claw-master connect --server ADDRESS:PORT --dir DIR -- [Claude arguments]")
 	}
 	command, name := args[0], args[1]
-	if command != "login" && command != "run" && command != "probe" && command != "serve" {
-		return 2, errors.New("expected login, run, serve, probe, issue, client-init, connect or agent")
+	if command != "login" && command != "run" && command != "probe" && command != "serve" && command != "reset" {
+		return 2, errors.New("expected login, run, serve, probe, reset, issue, client-init, connect or agent")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var model string
+	var resetKind string
+	var claimReset bool
 	var diagnostics bool
 	var nextProfiles stringListFlag
 	var backupAPIKeySource string
@@ -218,6 +220,9 @@ func run(args []string) (int, error) {
 		flags.StringVar(&profileReserveFile, "profile-reserve-file", "", "a file of PROFILE=N or PROFILE=N last-resort lines: hold the last N% (0-100) of that subscription's weekly allowance out of the pool, or with last-resort use it only when every other subscription is out; re-read when it changes")
 	case "probe":
 		flags.StringVar(&model, "model", "", "diagnostic model")
+	case "reset":
+		flags.StringVar(&resetKind, "kind", clawmaster.ResetKindFable, "the banked reset to read or claim: fable or weekly")
+		flags.BoolVar(&claimReset, "claim", false, "spend the reset (without it, only show what a claim would do)")
 	case "run":
 		flags.BoolVar(&diagnostics, "diagnostics", false, "print numeric proxy counters only")
 		flags.Var(&nextProfiles, "next-profile", "additional inference profile for quota-aware subscription rotation")
@@ -232,6 +237,12 @@ func run(args []string) (int, error) {
 	}
 	if command == "probe" && strings.TrimSpace(model) == "" {
 		return 2, errors.New("probe requires --model MODEL; provider comes from the selected profile")
+	}
+	if command == "reset" && len(flags.Args()) != 0 {
+		return 2, errors.New("reset takes only --kind and --claim")
+	}
+	if _, ok := clawmaster.ClaudeResetKind(resetKind); command == "reset" && !ok {
+		return 2, errors.New("--kind must be fable or weekly")
 	}
 	if command == "probe" && len(flags.Args()) != 0 {
 		return 2, errors.New("probe does not accept Claude arguments or proxy diagnostics")
@@ -367,6 +378,10 @@ func run(args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	if command == "reset" {
+		report, err := clawmaster.ResetClaudeLimit(ctx, profile, resetKind, claimReset)
+		return finishReset(os.Stdout, report, err, claimReset, time.Now())
+	}
 	if command == "probe" {
 		result, err := clawmaster.Probe(ctx, profile, model)
 		if err != nil {
@@ -378,7 +393,7 @@ func run(args []string) (int, error) {
 		}
 		return 0, nil
 	}
-	return 2, errors.New("expected login, run, or probe")
+	return 2, errors.New("expected login, run, probe or reset")
 }
 
 func launcherSignalContext() (context.Context, context.CancelFunc) {
