@@ -2773,3 +2773,166 @@ func TestConvertInteractionsResponseToGemini_StreamCompleteStringArgumentsEmitte
 		}
 	})
 }
+
+func TestConvertInteractionsResponseToGemini_FinishReasonMapping(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       string
+		finishReason string
+		want         string
+	}{
+		{name: "max_tokens", status: "completed", finishReason: "max_tokens", want: "MAX_TOKENS"},
+		{name: "length", status: "completed", finishReason: "length", want: "MAX_TOKENS"},
+		{name: "max_output_tokens", status: "incomplete", finishReason: "max_output_tokens", want: "MAX_TOKENS"},
+		{name: "incomplete_status_only", status: "incomplete", finishReason: "", want: "MAX_TOKENS"},
+		{name: "safety", status: "completed", finishReason: "safety", want: "SAFETY"},
+		{name: "content_filter", status: "completed", finishReason: "content_filter", want: "SAFETY"},
+		{name: "incomplete_with_content_filter", status: "incomplete", finishReason: "content_filter", want: "SAFETY"},
+		{name: "recitation", status: "completed", finishReason: "recitation", want: "RECITATION"},
+		{name: "uppercase_trimmed", status: "completed", finishReason: " MAX_TOKENS ", want: "MAX_TOKENS"},
+		{name: "completed_default", status: "completed", finishReason: "", want: "STOP"},
+		{name: "requires_action_default", status: "requires_action", finishReason: "", want: "STOP"},
+	}
+
+	buildFields := func(status, finishReason string) string {
+		var b strings.Builder
+		if status != "" {
+			b.WriteString(`,"status":"`)
+			b.WriteString(status)
+			b.WriteString(`"`)
+		}
+		if finishReason != "" {
+			b.WriteString(`,"finish_reason":"`)
+			b.WriteString(finishReason)
+			b.WriteString(`"`)
+		}
+		return b.String()
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fields := buildFields(tc.status, tc.finishReason)
+
+			// Non-stream flat payload
+			flatRaw := []byte(`{"id":"i1","model":"gemini-3.5-flash"` + fields + `,"steps":[{"type":"model_output","content":[{"text":"partial"}]}]}`)
+			flatOut := ConvertInteractionsResponseToGeminiNonStream(ctx, "gemini-3.5-flash", nil, nil, flatRaw, nil)
+			if got := ojson.GetBytesNoCopy(flatOut, "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("non-stream flat finishReason = %q, want %q; payload=%s", got, tc.want, string(flatOut))
+			}
+
+			// Non-stream nested interaction payload
+			nestedRaw := []byte(`{"interaction":{"id":"i1","model":"gemini-3.5-flash"` + fields + `,"steps":[{"type":"model_output","content":[{"text":"partial"}]}]}}`)
+			nestedOut := ConvertInteractionsResponseToGeminiNonStream(ctx, "gemini-3.5-flash", nil, nil, nestedRaw, nil)
+			if got := ojson.GetBytesNoCopy(nestedOut, "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("non-stream nested finishReason = %q, want %q; payload=%s", got, tc.want, string(nestedOut))
+			}
+
+			// Stream interaction.completed event
+			var streamParam any
+			streamEvent := []byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","model":"gemini-3.5-flash"` + fields + `}}`)
+			streamOut := ConvertInteractionsResponseToGemini(ctx, "gemini-3.5-flash", nil, nil, streamEvent, &streamParam)
+			if len(streamOut) != 1 {
+				t.Fatalf("stream interaction.completed chunk count = %d, want 1", len(streamOut))
+			}
+			if got := ojson.GetBytesNoCopy(streamOut[0], "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("stream interaction.completed finishReason = %q, want %q; payload=%s", got, tc.want, string(streamOut[0]))
+			}
+
+			// Stream finish event with top-level status/finish_reason
+			var finishParam any
+			finishEvent := []byte(`data: {"event_type":"finish"` + fields + `}`)
+			finishOut := ConvertInteractionsResponseToGemini(ctx, "gemini-3.5-flash", nil, nil, finishEvent, &finishParam)
+			if len(finishOut) != 1 {
+				t.Fatalf("stream finish chunk count = %d, want 1", len(finishOut))
+			}
+			if got := ojson.GetBytesNoCopy(finishOut[0], "candidates.0.finishReason").String(); got != tc.want {
+				t.Fatalf("stream finish finishReason = %q, want %q; payload=%s", got, tc.want, string(finishOut[0]))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_SynthesizedTotalTokenCountIncludesThoughtTokens(t *testing.T) {
+	cases := []struct {
+		name         string
+		usageJSON    string
+		wantPrompt   int64
+		wantCand     int64
+		wantThoughts int64
+		wantTotal    int64
+	}{
+		{
+			name:         "total_thought_tokens_included_when_total_tokens_absent",
+			usageJSON:    `{"total_input_tokens":10,"total_output_tokens":20,"total_thought_tokens":30}`,
+			wantPrompt:   10,
+			wantCand:     20,
+			wantThoughts: 30,
+			wantTotal:    60,
+		},
+		{
+			name:         "reasoning_tokens_included_when_total_tokens_absent",
+			usageJSON:    `{"input_tokens":5,"output_tokens":7,"reasoning_tokens":13}`,
+			wantPrompt:   5,
+			wantCand:     7,
+			wantThoughts: 13,
+			wantTotal:    25,
+		},
+		{
+			name:         "thought_tokens_only_synthesizes_total",
+			usageJSON:    `{"total_thought_tokens":15}`,
+			wantPrompt:   0,
+			wantCand:     0,
+			wantThoughts: 15,
+			wantTotal:    15,
+		},
+		{
+			name:         "explicit_total_tokens_preserved",
+			usageJSON:    `{"total_input_tokens":10,"total_output_tokens":20,"total_thought_tokens":30,"total_tokens":99}`,
+			wantPrompt:   10,
+			wantCand:     20,
+			wantThoughts: 30,
+			wantTotal:    99,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			// Non-stream
+			nonStreamRaw := []byte(`{"id":"i1","model":"gemini-3.5-flash","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":` + tc.usageJSON + `}`)
+			nonStreamOut := ConvertInteractionsResponseToGeminiNonStream(ctx, "gemini-3.5-flash", nil, nil, nonStreamRaw, nil)
+			if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.thoughtsTokenCount").Int(); got != tc.wantThoughts {
+				t.Fatalf("non-stream thoughtsTokenCount = %d, want %d; payload=%s", got, tc.wantThoughts, string(nonStreamOut))
+			}
+			if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.totalTokenCount").Int(); got != tc.wantTotal {
+				t.Fatalf("non-stream totalTokenCount = %d, want %d; payload=%s", got, tc.wantTotal, string(nonStreamOut))
+			}
+			if tc.wantPrompt > 0 {
+				if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.promptTokenCount").Int(); got != tc.wantPrompt {
+					t.Fatalf("non-stream promptTokenCount = %d, want %d; payload=%s", got, tc.wantPrompt, string(nonStreamOut))
+				}
+			}
+			if tc.wantCand > 0 {
+				if got := ojson.GetBytesNoCopy(nonStreamOut, "usageMetadata.candidatesTokenCount").Int(); got != tc.wantCand {
+					t.Fatalf("non-stream candidatesTokenCount = %d, want %d; payload=%s", got, tc.wantCand, string(nonStreamOut))
+				}
+			}
+
+			// Stream interaction.completed
+			var param any
+			streamEvent := []byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","model":"gemini-3.5-flash","status":"completed","usage":` + tc.usageJSON + `}}`)
+			streamOut := ConvertInteractionsResponseToGemini(ctx, "gemini-3.5-flash", nil, nil, streamEvent, &param)
+			if len(streamOut) != 1 {
+				t.Fatalf("stream chunk count = %d, want 1", len(streamOut))
+			}
+			if got := ojson.GetBytesNoCopy(streamOut[0], "usageMetadata.thoughtsTokenCount").Int(); got != tc.wantThoughts {
+				t.Fatalf("stream thoughtsTokenCount = %d, want %d; payload=%s", got, tc.wantThoughts, string(streamOut[0]))
+			}
+			if got := ojson.GetBytesNoCopy(streamOut[0], "usageMetadata.totalTokenCount").Int(); got != tc.wantTotal {
+				t.Fatalf("stream totalTokenCount = %d, want %d; payload=%s", got, tc.wantTotal, string(streamOut[0]))
+			}
+		})
+	}
+}

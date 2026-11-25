@@ -77,7 +77,7 @@ func ConvertInteractionsResponseToGeminiNonStream(_ context.Context, modelName s
 		parts = append(parts, interactionsStepToGeminiParts(step)...)
 		return true
 	})
-	out := buildInteractionsGeminiChunk(st, modelName, parts, "STOP", translatorcommon.InteractionsUsage(root), true)
+	out := buildInteractionsGeminiChunk(st, modelName, parts, mapInteractionsFinishReasonToGemini(root, interaction), translatorcommon.InteractionsUsage(root), true)
 	return out
 }
 
@@ -138,7 +138,7 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		st.ID = strings.Clone(firstNonEmptyInteractionString(st.ID, interaction.Get("id").String()))
 		st.Model = strings.Clone(firstNonEmptyInteractionString(st.Model, interaction.Get("model").String(), modelName))
 		st.ServiceTier = strings.Clone(firstNonEmptyInteractionString(st.ServiceTier, interaction.Get("service_tier").String()))
-		chunk := buildInteractionsGeminiChunk(st, modelName, nil, "STOP", translatorcommon.InteractionsUsage(root), true)
+		chunk := buildInteractionsGeminiChunk(st, modelName, nil, mapInteractionsFinishReasonToGemini(root, interaction), translatorcommon.InteractionsUsage(root), true)
 		return [][]byte{chunk}
 	case "response.failed", "interaction.failed":
 		errNode := root.Get("error")
@@ -158,6 +158,29 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		return [][]byte{errorResponseDoc.Bytes()}
 	}
 	return nil
+}
+
+func mapInteractionsFinishReasonToGemini(root, interaction ojson.Result) string {
+	finishReason := strings.ToLower(strings.TrimSpace(firstNonEmptyInteractionString(
+		interaction.Get("finish_reason").String(),
+		root.Get("finish_reason").String(),
+	)))
+	switch finishReason {
+	case "safety", "content_filter":
+		return "SAFETY"
+	case "recitation":
+		return "RECITATION"
+	case "max_tokens", "max_output_tokens", "length":
+		return "MAX_TOKENS"
+	}
+	status := strings.ToLower(strings.TrimSpace(firstNonEmptyInteractionString(
+		interaction.Get("status").String(),
+		root.Get("status").String(),
+	)))
+	if status == "incomplete" {
+		return "MAX_TOKENS"
+	}
+	return "STOP"
 }
 
 func mapInteractionsErrorToGemini(codeStr string) (int, string) {
@@ -479,6 +502,7 @@ func setGeminiUsageMetadataFromInteractionsUsageDoc(outDoc *ojson.Doc, usage ojs
 	}
 	inputTokens, hasInputTokens := interactionsUsageInt(usage, "input_tokens", "total_input_tokens")
 	outputTokens, hasOutputTokens := interactionsUsageInt(usage, "output_tokens", "total_output_tokens")
+	thoughtTokens, hasThoughtTokens := interactionsUsageInt(usage, "reasoning_tokens", "total_thought_tokens")
 	totalTokens, hasTotalTokens := interactionsUsageInt(usage, "total_tokens")
 	if hasInputTokens {
 		_ = outDoc.Set("usageMetadata.promptTokenCount", inputTokens)
@@ -489,10 +513,10 @@ func setGeminiUsageMetadataFromInteractionsUsageDoc(outDoc *ojson.Doc, usage ojs
 	}
 	if hasTotalTokens {
 		_ = outDoc.Set("usageMetadata.totalTokenCount", totalTokens)
-	} else if hasInputTokens || hasOutputTokens {
-		_ = outDoc.Set("usageMetadata.totalTokenCount", inputTokens+outputTokens)
+	} else if hasInputTokens || hasOutputTokens || hasThoughtTokens {
+		_ = outDoc.Set("usageMetadata.totalTokenCount", inputTokens+outputTokens+thoughtTokens)
 	}
-	if thoughtTokens, ok := interactionsUsageInt(usage, "reasoning_tokens", "total_thought_tokens"); ok {
+	if hasThoughtTokens {
 		_ = outDoc.Set("usageMetadata.thoughtsTokenCount", thoughtTokens)
 	}
 	if cachedTokens, ok := interactionsUsageInt(usage, "cached_tokens", "total_cached_tokens"); ok {
