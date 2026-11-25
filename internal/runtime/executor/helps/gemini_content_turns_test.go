@@ -59,6 +59,20 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 			wantLeadingEmpty: true,
 		},
 		{
+			name:             "leading assistant text gets empty user and preserves following turns",
+			inputJSON:        `{"contents":[{"role":"assistant","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}`,
+			path:             "contents",
+			wantRoles:        "user,assistant,user",
+			wantLeadingEmpty: true,
+		},
+		{
+			name:             "leading assistant function_call gets empty user",
+			inputJSON:        `{"contents":[{"role":"assistant","parts":[{"function_call":{"name":"run"}}]},{"role":"user","parts":[{"function_response":{"name":"run"}}]}]}`,
+			path:             "contents",
+			wantRoles:        "user,assistant,user",
+			wantLeadingEmpty: true,
+		},
+		{
 			name:             "nested contents are normalized",
 			inputJSON:        `{"request":{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}}`,
 			path:             "request.contents",
@@ -138,6 +152,32 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 			inputJSON: `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run"}}]},{"role":"model","parts":[{"functionResponse":{"name":"run","response":{"result":"ok"}}}]}]}`,
 			path:      "contents",
 			wantRoles: "model,model",
+		},
+		{
+			name:      "trailing snake_case function_response preserves model role without adding user",
+			inputJSON: `{"contents":[{"role":"model","parts":[{"function_call":{"name":"run"}}]},{"role":"model","parts":[{"function_response":{"name":"run","response":{"result":"ok"}}}]}]}`,
+			path:      "contents",
+			wantRoles: "model,model",
+		},
+		{
+			name:      "trailing snake_case function_response preserves assistant role without adding user",
+			inputJSON: `{"contents":[{"role":"assistant","parts":[{"function_call":{"name":"run"}}]},{"role":"assistant","parts":[{"function_response":{"name":"run","response":{"result":"ok"}}}]}]}`,
+			path:      "contents",
+			wantRoles: "assistant,assistant",
+		},
+		{
+			name:              "trailing model snake_case function_response with nested inline_data gets empty user",
+			inputJSON:         `{"contents":[{"role":"model","parts":[{"function_call":{"name":"view_image"}}]},{"role":"model","parts":[{"function_response":{"name":"view_image","response":{"result":""},"parts":[{"inline_data":{"mime_type":"image/png","data":"AAAA"}}]}}]}]}`,
+			path:              "contents",
+			wantRoles:         "model,model,user",
+			wantTrailingEmpty: true,
+		},
+		{
+			name:              "trailing model snake_case function_response with nested file_data gets empty user",
+			inputJSON:         `{"contents":[{"role":"model","parts":[{"function_call":{"name":"view_image"}}]},{"role":"model","parts":[{"function_response":{"name":"view_image","response":{"result":""},"parts":[{"file_data":{"mime_type":"image/png","file_uri":"gs://b/a.png"}}]}}]}]}`,
+			path:              "contents",
+			wantRoles:         "model,model,user",
+			wantTrailingEmpty: true,
 		},
 		{
 			name:              "trailing model functionResponse with nested inlineData gets empty user",
@@ -258,6 +298,21 @@ func TestDropGeminiTrailingThoughtOnlyContent(t *testing.T) {
 			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"functionCall":{"name":"run","args":{}}}]}]`,
 		},
 		{
+			name:  "keeps snake_case function_call",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"function_call":{"name":"run","args":{}}}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"function_call":{"name":"run","args":{}}}]}]`,
+		},
+		{
+			name:  "keeps snake_case function_response",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"function_response":{"name":"run","response":{"result":"ok"}}}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"function_response":{"name":"run","response":{"result":"ok"}}}]}]`,
+		},
+		{
+			name:  "keeps assistant snake_case function_call",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"assistant","parts":[{"thought":true,"function_call":{"name":"run","args":{}}}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"assistant","parts":[{"thought":true,"function_call":{"name":"run","args":{}}}]}]`,
+		},
+		{
 			name:  "keeps earlier signed reasoning",
 			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig"}]},{"role":"user","parts":[{"text":"next"}]},{"role":"model","parts":[{"text":"b","thought":true}]}]}`,
 			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig"}]},{"role":"user","parts":[{"text":"next"}]}]`,
@@ -273,6 +328,37 @@ func TestDropGeminiTrailingThoughtOnlyContent(t *testing.T) {
 			out := DropGeminiTrailingThoughtOnlyContent([]byte(tt.input), "contents")
 			if got := ojson.GetBytes(out, "contents").Raw; got != tt.want {
 				t.Fatalf("contents = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContentHasFunctionResponseMediaSnakeCase(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{
+			name:  "snake_case function_response with inline_data",
+			input: `{"role":"model","parts":[{"function_response":{"name":"view_image","parts":[{"inline_data":{"mime_type":"image/png","data":"AAAA"}}]}}]}`,
+			want:  true,
+		},
+		{
+			name:  "snake_case function_response with file_data",
+			input: `{"role":"model","parts":[{"function_response":{"name":"view_image","parts":[{"file_data":{"mime_type":"image/png","file_uri":"gs://b/a.png"}}]}}]}`,
+			want:  true,
+		},
+		{
+			name:  "snake_case function_response without media",
+			input: `{"role":"model","parts":[{"function_response":{"name":"run","response":{"result":"ok"}}}]}`,
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contentHasFunctionResponseMedia(ojson.Parse(tt.input)); got != tt.want {
+				t.Fatalf("contentHasFunctionResponseMedia() = %v, want %v", got, tt.want)
 			}
 		})
 	}
