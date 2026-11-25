@@ -679,7 +679,7 @@ func (e *AIStudioExecutor) consumeStream(
 					}
 				}
 			}
-			if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI) && !sawFinishReason {
+			if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI || responseFormat == sdktranslator.FormatOpenAIResponse) && !sawFinishReason {
 				truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason", streamTruncated: true}
 				helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
 				if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
