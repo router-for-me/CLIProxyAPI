@@ -778,3 +778,203 @@ func TestConvertGeminiRequestToClaude_NormalizesNumericProtoSchemaTypes_Issue803
 		}
 	}
 }
+
+func TestConvertGeminiRequestToClaude_NullAndNonNumericGenerationConfig_Issue8112(t *testing.T) {
+	inputJSON := []byte(`{
+		"generationConfig": {
+			"maxOutputTokens": null,
+			"topP": null,
+			"topK": null,
+			"temperature": 0.4,
+			"thinkingConfig": {
+				"thinkingBudget": null
+			}
+		},
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToClaude returned error: %v", errConvert)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "max_tokens").Int(); got != 32000 {
+		t.Fatalf("max_tokens = %d, want default 32000 when maxOutputTokens is null; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "top_p").Exists() {
+		t.Fatalf("top_p should be absent when topP is null; out=%s", out)
+	}
+	if ojson.GetBytesNoCopy(out, "top_k").Exists() {
+		t.Fatalf("top_k should be absent when topK is null; out=%s", out)
+	}
+	if ojson.GetBytesNoCopy(out, "temperature").Exists() {
+		t.Fatalf("temperature should remain dropped per #4071; out=%s", out)
+	}
+	if ojson.GetBytesNoCopy(out, "thinking").Exists() {
+		t.Fatalf("thinking should be absent when thinkingBudget is null; out=%s", out)
+	}
+
+	invalidLimits := []string{
+		`{"generationConfig":{"maxOutputTokens":0,"topP":"0.8","topK":"40"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		`{"generationConfig":{"maxOutputTokens":-5,"topK":-1},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		`{"generationConfig":{"maxOutputTokens":0,"topK":-0.5},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		`{"generationConfig":{"maxOutputTokens":"1024","topK":40.5},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+	}
+	for _, raw := range invalidLimits {
+		outInvalid, errInvalid := ConvertGeminiRequestToClaude("claude-sonnet-4-6", []byte(raw), false)
+		if errInvalid != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude(%s) error = %v", raw, errInvalid)
+		}
+		if got := ojson.GetBytesNoCopy(outInvalid, "max_tokens").Int(); got != 32000 {
+			t.Fatalf("max_tokens = %d, want default 32000 for %s; out=%s", got, raw, outInvalid)
+		}
+		if ojson.GetBytesNoCopy(outInvalid, "top_p").Exists() {
+			t.Fatalf("top_p should be absent for %s; out=%s", raw, outInvalid)
+		}
+		if ojson.GetBytesNoCopy(outInvalid, "top_k").Exists() {
+			t.Fatalf("top_k should be absent for %s; out=%s", raw, outInvalid)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToClaude_ForwardsNumericTopK_Issue8112(t *testing.T) {
+	raw := []byte(`{
+		"generationConfig": {
+			"maxOutputTokens": 4096,
+			"topP": 0.9,
+			"topK": 40
+		},
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToClaude("claude-sonnet-4-6", raw, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToClaude returned error: %v", errConvert)
+	}
+	if got := ojson.GetBytesNoCopy(out, "max_tokens").Int(); got != 4096 {
+		t.Fatalf("max_tokens = %d, want 4096; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "top_p").Float(); got != 0.9 {
+		t.Fatalf("top_p = %v, want 0.9; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "top_k").Int(); got != 40 {
+		t.Fatalf("top_k = %d, want 40; out=%s", got, out)
+	}
+
+	t.Run("zero maxOutputTokens falls back to positive max_output_tokens and negative fractional topK falls back to top_k", func(t *testing.T) {
+		fallbackRaw := []byte(`{
+			"generationConfig": {
+				"maxOutputTokens": 0,
+				"max_output_tokens": 2048,
+				"topK": -0.5,
+				"top_k": 24
+			},
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+		}`)
+		outFallback, errFallback := ConvertGeminiRequestToClaude("claude-sonnet-4-6", fallbackRaw, false)
+		if errFallback != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude returned error: %v", errFallback)
+		}
+		if got := ojson.GetBytesNoCopy(outFallback, "max_tokens").Int(); got != 2048 {
+			t.Fatalf("max_tokens = %d, want 2048; out=%s", got, outFallback)
+		}
+		if got := ojson.GetBytesNoCopy(outFallback, "top_k").Int(); got != 24 {
+			t.Fatalf("top_k = %d, want 24; out=%s", got, outFallback)
+		}
+	})
+}
+
+func TestConvertGeminiRequestToClaude_SnakeCaseGeminiSDKFields_Issue8112(t *testing.T) {
+	raw := []byte(`{
+		"generation_config": {
+			"max_output_tokens": 2048,
+			"top_p": 0.85,
+			"top_k": 32,
+			"stop_sequences": ["END", "STOP"],
+			"thinking_config": {
+				"thinking_level": "high",
+				"include_thoughts": true
+			}
+		},
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"function_declarations": [{
+				"name": "lookup_weather",
+				"description": "Look up weather",
+				"parameters": null,
+				"parameters_json_schema": {
+					"type": "OBJECT",
+					"properties": {
+						"city": {"type": "STRING"}
+					},
+					"required": ["city"]
+				}
+			}]
+		}]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToClaude("claude-opus-5-5", raw, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToClaude returned error: %v", errConvert)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "max_tokens").Int(); got != 2048 {
+		t.Fatalf("max_tokens = %d, want 2048; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "top_p").Float(); got != 0.85 {
+		t.Fatalf("top_p = %v, want 0.85; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "top_k").Int(); got != 32 {
+		t.Fatalf("top_k = %d, want 32; out=%s", got, out)
+	}
+	stopSeqs := ojson.GetBytesNoCopy(out, "stop_sequences").Array()
+	if len(stopSeqs) != 2 || stopSeqs[0].String() != "END" || stopSeqs[1].String() != "STOP" {
+		t.Fatalf("stop_sequences = %s, want [\"END\",\"STOP\"]; out=%s", ojson.GetBytesNoCopy(out, "stop_sequences").Raw, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "thinking.display").String(); got != "summarized" {
+		t.Fatalf("thinking.display = %q, want summarized; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tools.0.name").String(); got != "lookup_weather" {
+		t.Fatalf("tools.0.name = %q, want lookup_weather; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tools.0.input_schema.properties.city.type").String(); got != "string" {
+		t.Fatalf("tools.0.input_schema.properties.city.type = %q, want string; out=%s", got, out)
+	}
+
+	t.Run("null thinkingLevel falls back to numeric thinking_budget and mixed thinking_config summary", func(t *testing.T) {
+		mixed := []byte(`{
+			"generationConfig": {
+				"maxOutputTokens": null,
+				"max_output_tokens": 8192,
+				"thinking_config": {
+					"thinkingLevel": null,
+					"thinking_budget": 4096,
+					"include_thoughts": true
+				}
+			},
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+		}`)
+		outMixed, errMixed := ConvertGeminiRequestToClaude("claude-sonnet-4-5", mixed, false)
+		if errMixed != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude returned error: %v", errMixed)
+		}
+		if got := ojson.GetBytesNoCopy(outMixed, "max_tokens").Int(); got != 8192 {
+			t.Fatalf("max_tokens = %d, want 8192; out=%s", got, outMixed)
+		}
+		if got := ojson.GetBytesNoCopy(outMixed, "thinking.type").String(); got != "enabled" {
+			t.Fatalf("thinking.type = %q, want enabled; out=%s", got, outMixed)
+		}
+		if got := ojson.GetBytesNoCopy(outMixed, "thinking.budget_tokens").Int(); got != 4096 {
+			t.Fatalf("thinking.budget_tokens = %d, want 4096; out=%s", got, outMixed)
+		}
+		if got := ojson.GetBytesNoCopy(outMixed, "thinking.display").String(); got != "summarized" {
+			t.Fatalf("thinking.display = %q, want summarized; out=%s", got, outMixed)
+		}
+	})
+}

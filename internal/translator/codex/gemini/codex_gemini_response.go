@@ -231,18 +231,12 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			}
 
 			// Parse and set arguments
-			argsStr := itemResult.Get("arguments").String()
-			if argsStr != "" {
-				argsResult := ojson.Parse(argsStr)
-				if argsResult.IsObject() {
-					_ = functionCallDoc.SetRawBytes("functionCall.args", []byte(argsStr))
-				}
-			}
+			setGeminiFunctionCallArgsDoc(functionCallDoc, itemResult.Get("arguments").String())
 			setGeminiFunctionCallIDDoc(functionCallDoc, itemResult)
 			attachPendingThoughtSignatureDoc(functionCallDoc)
 
 			translatorcommon.SetRawArrayItemsDoc(templateDoc, "candidates.0.content.parts", [][]byte{functionCallDoc.Bytes()})
-			_ = templateDoc.Set("candidates.0.finishReason", "STOP")
+			// Do not set candidates.0.finishReason here; response.completed/response.incomplete emits the authoritative finishReason.
 
 			params.StorageOutputs = append(params.StorageOutputs, append([]byte(nil), templateDoc.Bytes()...))
 
@@ -520,12 +514,7 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 					}
 
 					// Parse and set arguments
-					if argsStr := value.Get("arguments").String(); argsStr != "" {
-						argsResult := ojson.Parse(argsStr)
-						if argsResult.IsObject() {
-							_ = functionCallDoc.SetRawBytes("functionCall.args", []byte(argsStr))
-						}
-					}
+					setGeminiFunctionCallArgsDoc(functionCallDoc, value.Get("arguments").String())
 					setGeminiFunctionCallIDDoc(functionCallDoc, value)
 
 					pendingFunctionCalls = append(pendingFunctionCalls, functionCallDoc.Bytes())
@@ -554,11 +543,7 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	var names []string
 	tarr := tools.Array()
 	for i := 0; i < len(tarr); i++ {
-		fns := tarr[i].Get("functionDeclarations")
-		if !fns.IsArray() {
-			continue
-		}
-		for _, fn := range fns.Array() {
+		for _, fn := range geminiToolFunctionDeclarations(tarr[i]) {
 			if v := fn.Get("name"); v.Exists() {
 				names = append(names, v.String())
 			}
@@ -628,6 +613,16 @@ func setGeminiThoughtSignatureDoc(doc *ojson.Doc, rawSignature string) {
 		return
 	}
 	_ = doc.Set("thoughtSignature", encoded)
+}
+
+func setGeminiFunctionCallArgsDoc(doc *ojson.Doc, rawArgs string) {
+	argsStr := strings.TrimSpace(rawArgs)
+	if argsStr == "" || !ojson.Valid(argsStr) {
+		return
+	}
+	if ojson.Parse(argsStr).IsObject() {
+		_ = doc.SetRaw("functionCall.args", argsStr)
+	}
 }
 
 func setGeminiFunctionCallIDDoc(doc *ojson.Doc, item ojson.Result) {

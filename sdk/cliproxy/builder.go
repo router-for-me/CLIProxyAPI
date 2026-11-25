@@ -317,6 +317,7 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
+		coreManager.SetHomePluginExecutorResolver(pluginHost)
 	}
 	if b.resultPolicy != nil {
 		coreManager.SetResultPolicy(b.resultPolicy)
