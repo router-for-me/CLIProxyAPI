@@ -64,6 +64,34 @@ func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
 	}
 }
 
+func TestAuthDispatchRequestAdvertisesExecutorPlugins(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		plugins map[string][]string
+		want    string
+	}{
+		{name: "absent"},
+		{name: "supported-with-no-plugins", plugins: map[string][]string{}, want: `{}`},
+		{name: "ready", plugins: map[string][]string{"demo": {"antigravity"}}, want: `{"demo":["antigravity"]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := newAuthDispatchRequest("model", "", "", nil, 1, "", nil, "")
+			req.ExecutorPlugins = tt.plugins
+			raw, errMarshal := json.Marshal(req)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			var payload map[string]json.RawMessage
+			if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+				t.Fatal(errUnmarshal)
+			}
+			if got := string(payload["executor_plugins"]); got != tt.want {
+				t.Errorf("executor_plugins = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
 	req := newAuthDispatchRequest("gpt-5.4", "", "", nil, 1, "codex_alpha_search_v1", nil, "")
 	raw, errMarshal := json.Marshal(&req)

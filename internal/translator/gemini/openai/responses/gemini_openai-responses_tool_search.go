@@ -45,7 +45,7 @@ func openAIResponsesToolSearchCallAsFunctionCall(item ojson.Result, forwardMap m
 	if arguments := item.Get("arguments"); arguments.Exists() {
 		if arguments.Type == ojson.String {
 			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(callDoc, "arguments", arguments.String())
-		} else if arguments.IsObject() || arguments.IsArray() {
+		} else if arguments.IsObject() {
 			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(callDoc, "arguments", arguments.Raw)
 		}
 	}

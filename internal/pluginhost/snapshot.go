@@ -16,6 +16,7 @@ type capabilityRecord struct {
 	priority int
 	meta     pluginapi.Metadata
 	plugin   pluginapi.Plugin
+	loaded   *loadedPlugin
 }
 
 type Snapshot struct {

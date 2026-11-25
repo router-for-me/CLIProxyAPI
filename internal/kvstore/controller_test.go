@@ -34,9 +34,9 @@ func TestControllerDefaultDisabledReturnsNilClient(t *testing.T) {
 }
 
 func TestControllerConfigureLocalLifecycleAndReuse(t *testing.T) {
+	dir := t.TempDir()
 	resetControllerForTest(t)
 
-	dir := t.TempDir()
 	dbPath1 := filepath.Join(dir, "kv1.db")
 	dbPath2 := filepath.Join(dir, "kv2.db")
 
@@ -121,9 +121,9 @@ func TestControllerConfigureLocalInvalidPathReportsUnavailableError(t *testing.T
 }
 
 func TestControllerPrioritizesHomeProviderOverLocalBoltStore(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "local.db")
 	resetControllerForTest(t)
 
-	localPath := filepath.Join(t.TempDir(), "local.db")
 	if errCfg := ConfigureLocal(true, localPath); errCfg != nil {
 		t.Fatalf("ConfigureLocal(true, localPath) error = %v", errCfg)
 	}
@@ -173,9 +173,9 @@ func TestControllerPrioritizesHomeProviderOverLocalBoltStore(t *testing.T) {
 }
 
 func TestControllerHelpersWithLocalBoltStore(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "helpers.db")
 	resetControllerForTest(t)
 
-	dbPath := filepath.Join(t.TempDir(), "helpers.db")
 	if errCfg := ConfigureLocal(true, dbPath); errCfg != nil {
 		t.Fatalf("ConfigureLocal(true, dbPath) error = %v", errCfg)
 	}
