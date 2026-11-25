@@ -80,6 +80,25 @@ func TestClaudeGenerationConstraintHelpers(t *testing.T) {
 		}
 	})
 
+	t.Run("OpenAIStopSequences", func(t *testing.T) {
+		if got, want := OpenAIStopSequences(ojson.Get(`{"stop":"END"}`, "stop")), []string{"END"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("OpenAIStopSequences(string) = %#v, want %#v", got, want)
+		}
+		if got, want := OpenAIStopSequences(ojson.Get(`{"stop":"\n"}`, "stop")), []string{"\n"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("OpenAIStopSequences(newline) = %#v, want %#v", got, want)
+		}
+		got := OpenAIStopSequences(ojson.Get(`{"stop":["END","\n\n"," ","",123,null]}`, "stop"))
+		want := []string{"END", "\n\n", " "}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("OpenAIStopSequences(array) = %#v, want %#v", got, want)
+		}
+		for _, body := range []string{`{}`, `{"stop":null}`, `{"stop":""}`, `{"stop":[]}`, `{"stop":["",123,null]}`, `{"stop":42}`, `{"stop":{}}`} {
+			if seqs := OpenAIStopSequences(ojson.Get(body, "stop")); len(seqs) != 0 {
+				t.Fatalf("OpenAIStopSequences(%s) = %#v, want nil", body, seqs)
+			}
+		}
+	})
+
 	t.Run("ClaudeOutputJSONSchema", func(t *testing.T) {
 		schema, ok := ClaudeOutputJSONSchema(ojson.Get(`{"output_config":{"format":{"type":" JSON_SCHEMA ","schema":{"type":"object","additionalProperties":false}}}}`, "output_config.format"))
 		if !ok || !schema.IsObject() || schema.Get("type").String() != "object" {

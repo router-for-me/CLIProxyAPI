@@ -2,10 +2,12 @@ package pluginhost
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"sync/atomic"
 )
+
+var errPluginClientClosed = errors.New("plugin client is closed")
 
 type pluginCallFinishKey struct{}
 
@@ -122,12 +124,12 @@ type guardedPluginCallResult struct {
 
 func (c *guardedPluginClient) acquire() (pluginClient, error) {
 	if c == nil {
-		return nil, fmt.Errorf("plugin client is closed")
+		return nil, errPluginClientClosed
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.inner == nil {
-		return nil, fmt.Errorf("plugin client is closed")
+		return nil, errPluginClientClosed
 	}
 	c.calls++
 	return c.inner, nil

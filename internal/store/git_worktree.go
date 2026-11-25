@@ -10,12 +10,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6"
+	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
@@ -123,6 +125,19 @@ func gitSnapshotFS(fs billy.Filesystem, snapshot *config.ConfigFileSnapshot) (bi
 	return gitScanFS{Filesystem: fs, config: memory}, nil
 }
 
+// gitWindowsScanStorage adapts worktree status without changing the saved Git config.
+type gitWindowsScanStorage struct{ storage.Storer }
+
+func (s gitWindowsScanStorage) Config() (*gitconfig.Config, error) {
+	cfg, errConfig := s.Storer.Config()
+	if errConfig != nil {
+		return nil, errConfig
+	}
+	scanConfig := *cfg
+	scanConfig.Core.FileMode = false
+	return &scanConfig, nil
+}
+
 func worktreeDirtyPaths(repo *git.Repository, snapshot *config.ConfigFileSnapshot) (map[string]struct{}, error) {
 	worktree, errWorktree := repo.Worktree()
 	if errWorktree != nil {
@@ -132,7 +147,11 @@ func worktreeDirtyPaths(repo *git.Repository, snapshot *config.ConfigFileSnapsho
 	if errSnapshot != nil {
 		return nil, errSnapshot
 	}
-	scanRepo, errOpen := git.Open(repo.Storer, fs)
+	scanStorage := repo.Storer
+	if runtime.GOOS == "windows" {
+		scanStorage = gitWindowsScanStorage{Storer: scanStorage}
+	}
+	scanRepo, errOpen := git.Open(scanStorage, fs)
 	if errOpen != nil {
 		return nil, errOpen
 	}

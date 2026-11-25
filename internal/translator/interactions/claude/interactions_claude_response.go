@@ -65,10 +65,20 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 	steps.ForEach(func(_, step ojson.Result) bool {
 		switch step.Get("type").String() {
 		case "thought":
-			for _, text := range interactionsContentTexts(step.Get("content")) {
+			texts := interactionsContentTexts(step.Get("content"))
+			signature := interactionsSignature(step)
+			if len(texts) == 0 {
+				if signature != "" {
+					blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
+					_ = blockDoc.Set("signature", signature)
+					contentBlocks = append(contentBlocks, blockDoc.Bytes())
+				}
+				break
+			}
+			for _, text := range texts {
 				blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
 				_ = blockDoc.Set("thinking", text)
-				if signature := interactionsSignature(step); signature != "" {
+				if signature != "" {
 					_ = blockDoc.Set("signature", signature)
 				}
 				contentBlocks = append(contentBlocks, blockDoc.Bytes())
@@ -145,14 +155,14 @@ func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *inte
 }
 
 func interactionsStepStartToClaude(modelName string, root ojson.Result, st *interactionsToClaudeStreamState) [][]byte {
-	out := appendClaudeMessageStart(nil, st)
-	out = appendClaudeContentBlockStop(out, st)
 	index := int(root.Get("index").Int())
 	step := root.Get("step")
 	stepType := step.Get("type").String()
 	st.StepTypes[index] = strings.Clone(stepType)
 	switch stepType {
 	case "function_call":
+		out := appendClaudeMessageStart(nil, st)
+		out = appendClaudeContentBlockStop(out, st)
 		st.SawToolCall = true
 		st.ToolNames[index] = strings.Clone(step.Get("name").String())
 		st.ToolIDs[index] = strings.Clone(interactionsToolID(step))
@@ -171,10 +181,16 @@ func interactionsStepStartToClaude(modelName string, root ojson.Result, st *inte
 		}
 		return appendClaudeContentDelta(out, "input_json_delta", "partial_json", arguments, st)
 	case "thought":
+		out := appendClaudeMessageStart(nil, st)
+		out = appendClaudeContentBlockStop(out, st)
 		return appendClaudeContentBlockStart(out, "thinking", st)
+	case "model_output", "text":
+		out := appendClaudeMessageStart(nil, st)
+		out = appendClaudeContentBlockStop(out, st)
+		return appendClaudeContentBlockStart(out, "text", st)
 	default:
 		_ = modelName
-		return appendClaudeContentBlockStart(out, "text", st)
+		return appendClaudeContentBlockStop(nil, st)
 	}
 }
 
@@ -188,9 +204,13 @@ func interactionsStepDeltaToClaude(modelName string, root ojson.Result, st *inte
 		text := firstNonEmpty(delta.Get("content.text").String(), delta.Get("text").String())
 		return appendClaudeContentDelta(out, "thinking_delta", "thinking", text, st)
 	case "thought_signature":
-		if st.ActiveBlock && st.ActiveBlockType == "thinking" {
-			return appendClaudeContentDelta(nil, "signature_delta", "signature", delta.Get("signature").String(), st)
+		signature := interactionsSignature(delta)
+		if signature == "" {
+			return nil
 		}
+		out := appendClaudeMessageStart(nil, st)
+		out = ensureClaudeContentBlock(out, "thinking", st)
+		return appendClaudeContentDelta(out, "signature_delta", "signature", signature, st)
 	case "arguments_delta":
 		out := appendClaudeMessageStart(nil, st)
 		if !st.ActiveBlock || st.ActiveBlockType != "tool_use" {
@@ -206,9 +226,13 @@ func interactionsStepDeltaToClaude(modelName string, root ojson.Result, st *inte
 		return appendClaudeContentDelta(out, "input_json_delta", "partial_json", delta.Get("arguments").String(), st)
 	default:
 		_ = modelName
+		text := delta.Get("text").String()
+		if text == "" {
+			return nil
+		}
 		out := appendClaudeMessageStart(nil, st)
 		out = ensureClaudeContentBlock(out, "text", st)
-		return appendClaudeContentDelta(out, "text_delta", "text", delta.Get("text").String(), st)
+		return appendClaudeContentDelta(out, "text_delta", "text", text, st)
 	}
 	return nil
 }
@@ -349,6 +373,28 @@ func setClaudeUsageFromInteractionsDoc(doc *ojson.Doc, path string, usage ojson.
 		return
 	}
 	outputTokens, hasOutput := firstUsageInt(usage, "output_tokens", "total_output_tokens")
+	if thoughtTokens, hasThought := firstUsageInt(usage, "reasoning_tokens", "total_thought_tokens"); hasThought && thoughtTokens > 0 {
+		addThought := !hasOutput
+		if hasOutput {
+			if totalTokens, hasTotal := firstUsageInt(usage, "total_tokens"); hasTotal && totalTokens > 0 {
+				// Separate reasoning leaves a gap between (input + output) and total_tokens;
+				// inclusive output already satisfies input + output == total_tokens.
+				rawInput, hasRawInput := firstUsageInt(usage, "total_input_tokens", "input_tokens", "prompt_tokens")
+				inNode := usage.Get("input_tokens")
+				inclusive := (hasRawInput && rawInput+outputTokens == totalTokens) ||
+					(inNode.Exists() && inNode.Int()+outputTokens == totalTokens)
+				addThought = !inclusive
+			} else {
+				// Without total_tokens, native Interactions total_output_tokens excludes
+				// total_thought_tokens, whereas OpenAI/Claude-style output_tokens already includes reasoning_tokens.
+				addThought = !usage.Get("output_tokens").Exists()
+			}
+		}
+		if addThought {
+			outputTokens += thoughtTokens
+			hasOutput = true
+		}
+	}
 	cachedTokens, hasCached := firstUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens", "total_cached_tokens")
 	cacheWriteTokens, hasCacheWrite := firstUsageInt(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens")
 
@@ -363,6 +409,8 @@ func setClaudeUsageFromInteractionsDoc(doc *ojson.Doc, path string, usage ojson.
 	hasInput := false
 	var inputTokens int64
 
+	// Preserve explicit uncached input_tokens semantics (including Claude -> Interactions round-trips);
+	// subtract cache tokens only from inclusive total_input_tokens / prompt_tokens counts.
 	if inNode := usage.Get("input_tokens"); inNode.Exists() {
 		hasInput = true
 		inputTokens = inNode.Int()
@@ -394,7 +442,7 @@ func interactionsSSEPayload(rawJSON []byte) []byte {
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
 		return trimmed
 	}
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
+	if bytes.HasPrefix(trimmed, []byte("data:")) && !bytes.ContainsRune(trimmed, '\n') {
 		return bytes.TrimSpace(trimmed[len("data:"):])
 	}
 	var dataLines [][]byte

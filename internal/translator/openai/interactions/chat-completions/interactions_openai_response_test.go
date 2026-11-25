@@ -192,6 +192,30 @@ func TestConvertInteractionsResponseToOpenAIStreamFinishMetadataUsage(t *testing
 func TestConvertInteractionsResponseToOpenAINonStreamToolCall(t *testing.T) {
 	raw := []byte(`{"id":"i1","model":"gemini-3.1-flash-lite","steps":[{"type":"function_call","id":"call_1","name":"get_weather","arguments":{"location":"北京"}}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`)
 	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+	if content := ojson.GetBytesNoCopy(out, "choices.0.message.content"); content.Type != ojson.Null {
+		t.Fatalf("message.content = %s (type %v), want null. Output: %s", content.Raw, content.Type, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("tool call id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.name").String(); got != "get_weather" {
+		t.Fatalf("tool name = %q, want get_weather. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"location":"北京"}` {
+		t.Fatalf("tool args = %q, want location JSON. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAINonStreamToolCallPreservesContent(t *testing.T) {
+	raw := []byte(`{"id":"i1","model":"gemini-3.1-flash-lite","steps":[{"type":"model_output","content":[{"type":"text","text":"Let me check the weather."}]},{"type":"function_call","id":"call_1","name":"get_weather","arguments":{"location":"北京"}}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`)
+	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+	content := ojson.GetBytesNoCopy(out, "choices.0.message.content")
+	if content.Type != ojson.String || content.String() != "Let me check the weather." {
+		t.Fatalf("message.content = %s (type %v), want %q. Output: %s", content.Raw, content.Type, "Let me check the weather.", string(out))
+	}
 	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.id").String(); got != "call_1" {
 		t.Fatalf("tool call id = %q, want call_1. Output: %s", got, string(out))
 	}
