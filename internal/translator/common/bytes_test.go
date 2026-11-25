@@ -184,3 +184,63 @@ func TestSSEEventData_ConcatenatedFramesSeparable(t *testing.T) {
 		t.Fatalf("unexpected frame2: %s", string(frames[1]))
 	}
 }
+
+func TestConvertJSONNodeKeys(t *testing.T) {
+	upper := func(s string) string {
+		b := []byte(s)
+		for i, c := range b {
+			if c >= 'a' && c <= 'z' {
+				b[i] = c - ('a' - 'A')
+			}
+		}
+		return string(b)
+	}
+
+	tests := []struct {
+		name      string
+		input     string
+		transform func(string) string
+		want      string
+	}{
+		{name: "empty object", input: `{}`, transform: upper, want: `{}`},
+		{name: "empty array", input: `[]`, transform: upper, want: `[]`},
+		{name: "root primitive string", input: `"ok"`, transform: upper, want: `"ok"`},
+		{name: "root primitive null", input: `null`, transform: upper, want: `null`},
+		{name: "root array of multi-key objects", input: `[{"a":1,"b":2},{"c":3,"d":{},"e":[]}]`, transform: upper, want: `[{"A":1,"B":2},{"C":3,"D":{},"E":[]}]`},
+		{name: "nested arrays", input: `{"m":[[1,2],[3,4]]}`, transform: upper, want: `{"M":[[1,2],[3,4]]}`},
+		{name: "nil transform preserves keys", input: `{"keep_me":1}`, transform: nil, want: `{"keep_me":1}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node := ojson.Parse(tc.input)
+			got := string(ConvertJSONNodeKeys(node, tc.transform))
+			if got != tc.want {
+				t.Fatalf("ConvertJSONNodeKeys(%s) = %s, want %s", tc.input, got, tc.want)
+			}
+		})
+	}
+
+	specialInput := `{"a.b":1,"a*b":2,"a?b":3,"a#b":4,"a\\b":5,"a\\":6,"a\"b":7,":colon":8,"":9,"0":10}`
+	gotSpecial := ConvertJSONNodeKeys(ojson.Parse(specialInput), nil)
+	if !ojson.ValidBytes(gotSpecial) {
+		t.Fatalf("ConvertJSONNodeKeys produced invalid JSON: %s", string(gotSpecial))
+	}
+	gotMap := ojson.ParseBytes(gotSpecial).Map()
+	for k, want := range map[string]int64{
+		"a.b":    1,
+		"a*b":    2,
+		"a?b":    3,
+		"a#b":    4,
+		"a\\b":   5,
+		"a\\":    6,
+		"a\"b":   7,
+		":colon": 8,
+		"":       9,
+		"0":      10,
+	} {
+		if v, ok := gotMap[k]; !ok || v.Int() != want {
+			t.Fatalf("special key %q = %v (ok=%v), want %d. Output: %s", k, v.Raw, ok, want, string(gotSpecial))
+		}
+	}
+}

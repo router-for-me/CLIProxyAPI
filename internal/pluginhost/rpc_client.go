@@ -37,6 +37,7 @@ type rpcFrontendAuthProvider struct {
 
 type rpcProviderExecutor struct {
 	*rpcPluginAdapter
+	registeredIdentifier *string
 }
 
 type rpcThinkingApplier struct {
@@ -146,6 +147,7 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		Capabilities: pluginapi.Capabilities{
 			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
 			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
+			ExecutorAuthProviders:         append([]string(nil), resp.Capabilities.ExecutorAuthProviders...),
 			ExecutorInputFormats:          append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
 			ExecutorOutputFormats:         append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
 		},
@@ -189,7 +191,17 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		plugin.Capabilities.ModelRouter = adapter
 	}
 	if resp.Capabilities.Executor {
-		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
+		executor := rpcProviderExecutor{rpcPluginAdapter: adapter}
+		if len(plugin.Capabilities.ExecutorAuthProviders) != 0 {
+			// Home dispatch advertises plugin readiness without calling into plugin code.
+			respIdentifier, errIdentifier := callPlugin[rpcIdentifierResponse](ctx, client, pluginabi.MethodExecutorIdentifier, rpcEmptyResponse{})
+			if errIdentifier != nil {
+				return pluginapi.Plugin{}, fmt.Errorf("register plugin %s executor identifier: %w", id, errIdentifier)
+			}
+			identifier := strings.TrimSpace(respIdentifier.Identifier)
+			executor.registeredIdentifier = &identifier
+		}
+		plugin.Capabilities.Executor = executor
 	}
 	if resp.Capabilities.RequestTranslator {
 		plugin.Capabilities.RequestTranslator = adapter
@@ -621,6 +633,9 @@ func (a rpcFrontendAuthProvider) Identifier() string {
 }
 
 func (a rpcProviderExecutor) Identifier() string {
+	if a.registeredIdentifier != nil {
+		return *a.registeredIdentifier
+	}
 	return callPluginIdentifier(context.Background(), a.client, pluginabi.MethodExecutorIdentifier)
 }
 

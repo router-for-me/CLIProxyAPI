@@ -136,6 +136,28 @@ func assertTask6FailedStream(t *testing.T, chunks <-chan cliproxyexecutor.Stream
 	}
 }
 
+func assertTask6ZeroOutputStream(t *testing.T, chunks <-chan cliproxyexecutor.StreamChunk) {
+	t.Helper()
+	var output []byte
+	errors := 0
+	for chunk := range chunks {
+		output = append(output, chunk.Payload...)
+		if chunk.Err != nil {
+			errors++
+			status, okStatus := chunk.Err.(interface {
+				StatusCode() int
+				ErrorCode() string
+			})
+			if !okStatus || status.StatusCode() != http.StatusBadGateway || status.ErrorCode() != cliproxyauth.ErrorCodeTransientTransport || chunk.Err.Error() != "upstream stream closed with zero output" {
+				t.Fatalf("expected transient zero-output 502, got %T %v", chunk.Err, chunk.Err)
+			}
+		}
+	}
+	if errors != 1 || len(output) != 0 {
+		t.Fatalf("zero-output stream contract: errors=%d output=%q", errors, output)
+	}
+}
+
 func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 	for _, provider := range []string{"custom-compat", "claude", "claude-oauth", "gemini", "gemini-interactions", "vertex", "antigravity", "kimi-chat"} {
 		for _, mode := range []string{"nonstream", "stream", "eof", "empty", "scanner"} {
@@ -198,7 +220,13 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 					if errExecuteStream != nil {
 						t.Fatal(errExecuteStream)
 					}
-					assertTask6FailedStream(t, stream.Chunks)
+					// Antigravity rejects HTTP 200 streams with no SSE JSON payload as transient zero-output 502
+					// so Conductor can retry before committing any response payload (#7990).
+					if provider == "antigravity" && mode == "empty" {
+						assertTask6ZeroOutputStream(t, stream.Chunks)
+					} else {
+						assertTask6FailedStream(t, stream.Chunks)
+					}
 				}
 			})
 		}
