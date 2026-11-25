@@ -142,9 +142,13 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	}
 
 	if len(r.pendingBuf) > 0 {
+		lastLine := r.pendingBuf
+		if idx := bytes.LastIndexByte(r.pendingBuf, '\n'); idx >= 0 {
+			lastLine = r.pendingBuf[idx+1:]
+		}
 		needNewline := r.pendingBuf[len(r.pendingBuf)-1] != '\n' &&
-			bytes.HasPrefix(bytes.TrimSpace(r.pendingBuf), []byte("event:")) &&
-			(bytes.HasPrefix(bytes.TrimSpace(chunk), []byte("data:")) || bytes.HasPrefix(bytes.TrimSpace(chunk), []byte("event:")))
+			isSSEControlOrCommentLine(lastLine) &&
+			isSSELineStart(chunk)
 		extra := 0
 		if needNewline {
 			extra = 1
@@ -282,6 +286,20 @@ func extractSSEDataLine(line []byte) (prefix []byte, jsonData []byte, ok bool) {
 		return []byte("data:"), jsonData, true
 	}
 	return nil, nil, false
+}
+
+func isSSEControlOrCommentLine(line []byte) bool {
+	trimmed := bytes.TrimSpace(line)
+	return bytes.HasPrefix(trimmed, []byte(":")) ||
+		bytes.HasPrefix(trimmed, []byte("event:")) ||
+		bytes.HasPrefix(trimmed, []byte("id:")) ||
+		bytes.HasPrefix(trimmed, []byte("retry:"))
+}
+
+func isSSELineStart(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	return bytes.HasPrefix(trimmed, []byte("data:")) ||
+		isSSEControlOrCommentLine(trimmed)
 }
 
 func normalizeGluedSSEEvents(chunk []byte) []byte {

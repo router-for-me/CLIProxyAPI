@@ -333,3 +333,60 @@ func TestStreamRewriter_LoggedOnceAndRewrittenChunksCount(t *testing.T) {
 		t.Fatalf("expected loggedFinished to be true after [DONE] and finish")
 	}
 }
+
+func TestStreamRewriter_PreservesSeparatorsAfterBufferedSSEControlLines(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "gpt-5.4-fast"})
+	chunks := [][]byte{
+		[]byte(": keepalive comment"),
+		[]byte("id: 42"),
+		[]byte("retry: 1000"),
+		[]byte("event: response.created"),
+		[]byte(`data: {"type":"response.created","response":{"model":"gpt-5.4"}}`),
+	}
+
+	var out []byte
+	for _, chunk := range chunks {
+		if rewritten := rewriter.RewriteChunk(chunk); len(rewritten) > 0 {
+			out = append(out, rewritten...)
+		}
+	}
+	if tail := rewriter.Finish(); len(tail) > 0 {
+		t.Fatalf("expected empty Finish() output after complete frame, got %q", string(tail))
+	}
+
+	got := string(out)
+	want := ": keepalive comment\n" +
+		"id: 42\n" +
+		"retry: 1000\n" +
+		"event: response.created\n" +
+		`data: {"type":"response.created","response":{"model":"gpt-5.4-fast"}}`
+	if got != want {
+		t.Fatalf("rewritten output =\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestStreamRewriter_SplitDataJSONStaysContiguous(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "gpt-5.4-fast"})
+	chunks := [][]byte{
+		[]byte("event: response.created"),
+		[]byte(`data: {"type":"response.created",`),
+		[]byte(`"response":{"model":"gpt-5.4"}}`),
+	}
+
+	var out []byte
+	for _, chunk := range chunks {
+		if rewritten := rewriter.RewriteChunk(chunk); len(rewritten) > 0 {
+			out = append(out, rewritten...)
+		}
+	}
+	if tail := rewriter.Finish(); len(tail) > 0 {
+		out = append(out, tail...)
+	}
+
+	got := string(out)
+	want := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"model":"gpt-5.4-fast"}}`
+	if got != want {
+		t.Fatalf("rewritten output = %q, want %q", got, want)
+	}
+}
