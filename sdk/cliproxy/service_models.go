@@ -261,10 +261,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					providerKey = "openai-compatibility"
 				}
 				if len(ms) > 0 {
-					ms = s.appendPluginModels(providerKey, ms, nil)
+					ms = s.appendPluginModels(providerKey, ms, nil, a.Prefix)
 					published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 				} else {
-					ms = s.appendPluginModels(providerKey, nil, nil)
+					ms = s.appendPluginModels(providerKey, nil, nil, a.Prefix)
 					if len(ms) > 0 {
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
@@ -284,10 +284,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					}
 					ms := cached.models
 					if len(ms) > 0 {
-						ms = s.appendPluginModels(providerKey, ms, nil)
+						ms = s.appendPluginModels(providerKey, ms, nil, a.Prefix)
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
-						ms = s.appendPluginModels(providerKey, nil, nil)
+						ms = s.appendPluginModels(providerKey, nil, nil, a.Prefix)
 						if len(ms) > 0 {
 							published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 						} else {
@@ -307,7 +307,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				}
 			}
 			if isCompatAuth {
-				models = s.appendPluginModels(providerKey, nil, nil)
+				models = s.appendPluginModels(providerKey, nil, nil, a.Prefix)
 				if len(models) > 0 {
 					published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(models, a.Prefix, cfg.ForceModelPrefix))
 				} else {
@@ -331,12 +331,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		models = appendDistinctModels(models, s.copilotPublicPluginModels(a, staticModels))
 		staticModels = nil
 	}
-	models = applyExcludedModels(models, excluded)
+	models = applyExcludedModels(models, excluded, a.Prefix)
 	models = applyOAuthModelAliasForAuth(cfg, provider, authKind, a.Attributes, models)
 	if ctx.Err() != nil {
 		return true
 	}
-	models = appendDistinctModels(models, applyExcludedModels(staticModels, excluded))
+	models = appendDistinctModels(models, applyExcludedModels(staticModels, excluded, a.Prefix))
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, provider, authKind, models)
 		published = s.registerResolvedModelsForAuthFenced(a, fence, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
@@ -714,7 +714,7 @@ func (s *Service) copilotPublicPluginModels(auth *coreauth.Auth, models []*Model
 	return out
 }
 
-func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
+func applyExcludedModels(models []*ModelInfo, excluded []string, authPrefix string) []*ModelInfo {
 	if len(models) == 0 || len(excluded) == 0 {
 		return models
 	}
@@ -729,6 +729,7 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		return models
 	}
 
+	prefix := strings.ToLower(strings.Trim(strings.TrimSpace(authPrefix), "/"))
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model == nil {
@@ -736,10 +737,28 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 		modelID := strings.ToLower(strings.TrimSpace(model.ID))
 		sourceID := strings.ToLower(strings.TrimSpace(model.SourceModelID))
+		prefixedModelID := ""
+		prefixedSourceID := ""
+		if prefix != "" {
+			prefixedModelID = prefix + "/" + modelID
+			if sourceID != "" && sourceID != modelID {
+				prefixedSourceID = prefix + "/" + sourceID
+			}
+		}
+
 		blocked := false
 		for _, pattern := range patterns {
-			if modelconfig.MatchExcludedModelPattern(pattern, modelID) || (sourceID != "" && sourceID != modelID && modelconfig.MatchExcludedModelPattern(pattern, sourceID)) {
-				blocked = true
+			blocked = modelconfig.MatchExcludedModelPattern(pattern, modelID)
+			if !blocked && prefixedModelID != "" {
+				blocked = modelconfig.MatchExcludedModelPattern(pattern, prefixedModelID)
+			}
+			if !blocked && sourceID != "" && sourceID != modelID {
+				blocked = modelconfig.MatchExcludedModelPattern(pattern, sourceID)
+				if !blocked && prefixedSourceID != "" {
+					blocked = modelconfig.MatchExcludedModelPattern(pattern, prefixedSourceID)
+				}
+			}
+			if blocked {
 				break
 			}
 		}
