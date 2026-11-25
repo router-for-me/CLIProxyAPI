@@ -128,7 +128,19 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 </tr>
 <tr>
 <td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
-<td><strong>SubRouter</strong><br>企业级多模型 AI API 中转平台，支持 Claude、GPT、Gemini、DeepSeek 等模型，兼容 OpenAI 和 Claude 协议，提供低延迟、高并发接入。<br>👉 <a href="https://subrouter.ai/register?aff=nP93">点击注册</a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 一站式 AI 模型平台：注册即送 100 万免费 Token！</strong>
+<p>🎁 免费试用: <a href="https://subrouter.ai/register?aff=nP93">立即注册</a>，即可领取 100 万免费 Token 用于测试！</p>
+<ul>
+<li>主流模型一站接入：用一个 API 密钥即可在 Claude、GPT、Gemini、Grok 和 DeepSeek 之间自由切换。</li>
+<li>智能路由与自动故障切换：节点发生故障时，负载均衡系统会自动切换到可用节点，确保请求顺利执行。</li>
+<li>计费完全透明：每次 API 调用均可查看实际路由路径和实时费用。</li>
+<li>余额永不过期：按量付费，未用完的额度不会按月清零。</li>
+<li>充值方式灵活：支持 USDT、Visa、微信支付和支付宝。</li>
+</ul>
+👉 领取 100 万免费 Token: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>

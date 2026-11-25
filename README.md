@@ -133,7 +133,19 @@ PackyCode provides special discounts for our software users: register using <a h
 </tr>
 <tr>
 <td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
-<td><strong>SubRouter</strong><br>Enterprise-grade multi-model AI API relay platform supporting Claude, GPT, Gemini, DeepSeek, and more with OpenAI/Claude protocol compatibility, low latency, and high concurrency.<br>👉 <a href="https://subrouter.ai/register?aff=nP93">Sign up</a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 All-in-One AI Models — Register &amp; Get 1,000,000 Free Tokens!</strong>
+<p>🎁 Free Trial Offer: <a href="https://subrouter.ai/register?aff=nP93">Sign up now</a> to immediately receive 1,000,000 FREE tokens for testing!</p>
+<ul>
+<li>All Top Models in One Place: Switch freely between Claude, GPT, Gemini, Grok, and DeepSeek with a single API key.</li>
+<li>Smart Routing &amp; Auto-Failover: Intelligent load balancing automatically switches failed nodes to keep your requests running smoothly.</li>
+<li>100% Transparent Billing: Every single API call displays the exact routing path and real-time cost.</li>
+<li>Balance Never Expires: True pay-as-you-go pricing—your credits stay valid forever with no monthly expiration.</li>
+<li>Flexible Top-Ups: Supports USDT, Visa, WeChat Pay, and Alipay.</li>
+</ul>
+👉 Claim Your 1M Free Tokens: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>

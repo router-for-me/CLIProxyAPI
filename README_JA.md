@@ -124,7 +124,19 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 </tr>
 <tr>
 <td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
-<td><strong>SubRouter</strong><br>Claude、GPT、Gemini、DeepSeek などに対応する企業向けのマルチモデル AI API 中継プラットフォームです。OpenAI と Claude のプロトコルに対応し、多数のリクエストを低遅延で同時に処理できます。<br>👉 <a href="https://subrouter.ai/register?aff=nP93">登録はこちら</a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 主要 AI モデルをひとつに。登録で 100 万トークンを無料プレゼント！</strong>
+<p>🎁 無料トライアル: <a href="https://subrouter.ai/register?aff=nP93">今すぐ登録</a>すると、テストに使える 100 万トークンをすぐに受け取れます！</p>
+<ul>
+<li>主要モデルをひとつの API キーで：Claude、GPT、Gemini、Grok、DeepSeek を自由に切り替えられます。</li>
+<li>スマートルーティングと自動フェイルオーバー：ノードに障害が発生すると、負荷分散システムが正常なノードに自動で切り替え、リクエストの処理を継続します。</li>
+<li>透明な料金体系：API 呼び出しごとに実際のルーティング経路と料金をリアルタイムで確認できます。</li>
+<li>残高に有効期限なし：使った分だけ支払う従量課金制で、クレジットは月をまたいでも失効しません。</li>
+<li>選べるチャージ方法：USDT、Visa、WeChat Pay、Alipay に対応しています。</li>
+</ul>
+👉 無料の 100 万トークンを受け取る: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>
