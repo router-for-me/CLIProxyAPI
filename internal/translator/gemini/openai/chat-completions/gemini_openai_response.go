@@ -262,8 +262,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			candidateIndex := int(candidate.Get("index").Int())
 			_ = templateDoc.Set("choices.0.index", candidateIndex)
 
-			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				p.UpstreamFinishReason[candidateIndex] = strings.Clone(strings.ToUpper(finishReasonResult.String()))
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Type == ojson.String {
+				if reason := strings.TrimSpace(finishReasonResult.String()); reason != "" {
+					p.UpstreamFinishReason[candidateIndex] = strings.Clone(strings.ToUpper(reason))
+				}
 			}
 
 			partsResult := candidate.Get("content.parts")
@@ -449,7 +451,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 								p.ActiveToolCall[candidateIndex] = nil
 							}
 							rawName := strings.TrimSpace(functionCallResult.Get("name").String())
-							if rawName == "" && !functionCallResult.Get("args").Exists() {
+							if rawName == "" && !functionCallResult.Get("args").IsObject() {
 								appendToolSignature(thoughtSignature)
 								sawNoopFunctionCall = true
 								continue
@@ -472,7 +474,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 							_ = fcDoc.Set("id", fcID)
 							_ = fcDoc.Set("index", functionCallIndex)
 							_ = fcDoc.Set("function.name", fcName)
-							if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+							if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.IsObject() {
 								_ = fcDoc.Set("function.arguments", fcArgsResult.Raw)
 							}
 							if thoughtSignature != "" {
@@ -664,15 +666,17 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			_ = choiceDoc.Set("index", candidate.Get("index").Int())
 
 			// Set finish reason.
-			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				finishReason := strings.ToLower(finishReasonResult.String())
-				if strings.EqualFold(strings.TrimSpace(finishReasonResult.String()), "MAX_TOKENS") {
-					finishReason = "length"
-				} else if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
-					finishReason = "content_filter"
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Type == ojson.String {
+				if rawReason := strings.TrimSpace(finishReasonResult.String()); rawReason != "" {
+					finishReason := strings.ToLower(rawReason)
+					if strings.EqualFold(rawReason, "MAX_TOKENS") {
+						finishReason = "length"
+					} else if isGeminiContentFilterFinishReason(rawReason) {
+						finishReason = "content_filter"
+					}
+					_ = choiceDoc.Set("finish_reason", finishReason)
+					_ = choiceDoc.Set("native_finish_reason", strings.ToLower(rawReason))
 				}
-				_ = choiceDoc.Set("finish_reason", finishReason)
-				_ = choiceDoc.Set("native_finish_reason", strings.ToLower(finishReasonResult.String()))
 			}
 
 			partsResult := candidate.Get("content.parts")
@@ -746,7 +750,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						}
 						_ = fcItemDoc.Set("id", fcID)
 						_ = fcItemDoc.Set("function.name", fcName)
-						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.IsObject() {
 							_ = fcItemDoc.Set("function.arguments", fcArgsResult.Raw)
 						}
 						if signature := geminiOpenAIToolThoughtSignature(thoughtSignatureResult.String()); signature != "" {
