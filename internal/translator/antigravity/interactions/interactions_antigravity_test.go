@@ -13,6 +13,9 @@ import (
 
 func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testing.T) {
 	out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
+	if got := ojson.GetBytesNoCopy(out, "request.systemInstruction.role").String(); got != "user" {
+		t.Fatalf("request.systemInstruction.role = %q, want user. Output: %s", got, string(out))
+	}
 	if got := ojson.GetBytesNoCopy(out, "request.systemInstruction.parts.0.text").String(); got != "be brief" {
 		t.Fatalf("request.systemInstruction.parts.0.text = %q, want be brief. Output: %s", got, string(out))
 	}
@@ -525,9 +528,9 @@ func TestConvertInteractionsRequestToAntigravity_FunctionResponseJSONRef(t *test
 		]
 	}`)
 	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
-	val := ojson.GetBytesNoCopy(out, "request.contents.0.parts.0.functionResponse.response.result")
+	val := ojson.GetBytesNoCopy(out, "request.contents.0.parts.0.functionResponse.response.output")
 	if val.Type != ojson.String {
-		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+		t.Fatalf("expected functionResponse.response.output to be string, got %s (raw: %s)", val.Type, val.Raw)
 	}
 	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
 		t.Fatalf("expected string result to contain ref target, got %q", val.String())
@@ -810,6 +813,32 @@ func TestConvertInteractionsRequestToAntigravity_ExplicitSignatureClearsPending(
 	}
 	if sig := parts[1].Get("thoughtSignature").String(); sig != "" {
 		t.Fatalf("expected f2 thoughtSignature to be empty, got %q", sig)
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravityMergesMultipartUserInput(t *testing.T) {
+	input := []byte(`{"model":"gemini-3-flash","input":[{"type":"user_input","content":[{"type":"text","text":"What is in this image?"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}]}]}`)
+
+	out, errConvert := ConvertInteractionsRequestToAntigravity("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("request.contents length = %d, want 1. Output: %s", len(contents), string(out))
+	}
+	if role := contents[0].Get("role").String(); role != "user" {
+		t.Fatalf("request.contents.0.role = %q, want user. Output: %s", role, string(out))
+	}
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("request.contents.0.parts length = %d, want 2. Output: %s", len(parts), string(out))
+	}
+	if text := parts[0].Get("text").String(); text != "What is in this image?" {
+		t.Fatalf("request.contents.0.parts.0.text = %q, want question text. Output: %s", text, string(out))
+	}
+	if data := parts[1].Get("inlineData.data").String(); data != "iVBORw0KGgo=" {
+		t.Fatalf("request.contents.0.parts.1.inlineData.data = %q, want image data. Output: %s", data, string(out))
 	}
 }
 

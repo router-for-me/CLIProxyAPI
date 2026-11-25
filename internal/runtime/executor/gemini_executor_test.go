@@ -21,15 +21,24 @@ import (
 )
 
 func TestCapGeminiMaxOutputTokensUsesOutputTokenLimit(t *testing.T) {
-	body := []byte(`{"generationConfig":{"maxOutputTokens":500000,"temperature":0.2},"contents":[]}`)
-
-	out := capGeminiMaxOutputTokens(body, "gemini-3.1-pro-preview")
-
-	if got := ojson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 65536 {
-		t.Fatalf("maxOutputTokens = %d, want 65536", got)
-	}
-	if got := ojson.GetBytes(out, "generationConfig.temperature").Float(); got != 0.2 {
-		t.Fatalf("temperature = %v, want 0.2", got)
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "integer above limit", raw: "500000"},
+		{name: "fractional above limit", raw: "65536.5"},
+		{name: "huge scientific float", raw: "1e30"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"generationConfig":{"maxOutputTokens":` + tc.raw + `,"temperature":0.2},"contents":[]}`)
+			out := capGeminiMaxOutputTokens(body, "gemini-3.1-pro-preview")
+			if got := ojson.GetBytes(out, "generationConfig.maxOutputTokens").Raw; got != "65536" {
+				t.Fatalf("maxOutputTokens raw = %q, want 65536; out=%s", got, out)
+			}
+			if got := ojson.GetBytes(out, "generationConfig.temperature").Float(); got != 0.2 {
+				t.Fatalf("temperature = %v, want 0.2", got)
+			}
+		})
 	}
 }
 

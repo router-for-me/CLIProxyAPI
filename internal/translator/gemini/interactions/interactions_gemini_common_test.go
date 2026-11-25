@@ -20,6 +20,32 @@ func TestConvertInteractionsRequestToGeminiStringInput(t *testing.T) {
 	}
 }
 
+func TestConvertInteractionsRequestToGeminiMergesMultipartUserInput(t *testing.T) {
+	input := []byte(`{"model":"gemini-3-flash","input":[{"type":"user_input","content":[{"type":"text","text":"What is in this image?"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}]}]}`)
+
+	out, errConvert := ConvertInteractionsRequestToGemini("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("contents length = %d, want 1. Output: %s", len(contents), string(out))
+	}
+	if role := contents[0].Get("role").String(); role != "user" {
+		t.Fatalf("contents.0.role = %q, want user. Output: %s", role, string(out))
+	}
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("contents.0.parts length = %d, want 2. Output: %s", len(parts), string(out))
+	}
+	if text := parts[0].Get("text").String(); text != "What is in this image?" {
+		t.Fatalf("contents.0.parts.0.text = %q, want question text. Output: %s", text, string(out))
+	}
+	if data := parts[1].Get("inlineData.data").String(); data != "iVBORw0KGgo=" {
+		t.Fatalf("contents.0.parts.1.inlineData.data = %q, want image data. Output: %s", data, string(out))
+	}
+}
+
 func TestConvertInteractionsRequestToGeminiSystemAndGenerationConfig(t *testing.T) {
 	out, _ := ConvertInteractionsRequestToGemini("gemini-3.5-flash", []byte(`{"model":"gemini-3.5-flash","system_instruction":{"text":"be brief"},"generation_config":{"max_output_tokens":32,"top_p":0.8},"input":"hi"}`), false)
 	if got := ojson.GetBytesNoCopy(out, "systemInstruction.parts.0.text").String(); got != "be brief" {
@@ -1932,4 +1958,59 @@ func TestConvertGeminiRequestToInteractions_FunctionResponsePartsMedia(t *testin
 			t.Fatalf("delta.result = %s, want [text, image]", ojson.GetBytesNoCopy(delta, "delta.result").Raw)
 		}
 	})
+}
+
+func TestConvertGeminiRequestToInteractions_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search",
+				"parameters": {
+					"type": 6,
+					"properties": {
+						"query": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}}
+					}
+				}
+			}]
+		}],
+		"generationConfig": {
+			"responseSchema": {
+				"type": 6,
+				"properties": {
+					"answer": {"type": 1}
+				}
+			}
+		}
+	}`)
+
+	out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToInteractions returned error: %v", err)
+	}
+
+	toolSchema := ojson.GetBytesNoCopy(out, "tools.0.parameters")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.query.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+	} {
+		got := toolSchema.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("tools.0.parameters.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+
+	respSchema := ojson.GetBytesNoCopy(out, "response_format.schema")
+	if got := respSchema.Get("type"); got.Type != ojson.String || got.String() != "object" {
+		t.Errorf("response_format.schema.type = %s (type %v), want string object", got.Raw, got.Type)
+	}
+	if got := respSchema.Get("properties.answer.type"); got.Type != ojson.String || got.String() != "string" {
+		t.Errorf("response_format.schema.properties.answer.type = %s (type %v), want string", got.Raw, got.Type)
+	}
 }

@@ -783,7 +783,7 @@ func TestHomeDispatchSessionIDsWithoutPresetProviderMetadata(t *testing.T) {
 	initialAuth := &Auth{ID: "auth-gemini-inferred-1"}
 	initialSessionID, _ := manager.homeDispatchSessionIDs(initialOpts)
 
-	// 2. Report result using the actual execution provider "gemini" (which canonicalizes to "google")
+	// 2. Report result using the actual execution provider "gemini" (which canonicalizes to "gemini")
 	manager.reportHomeResult(context.Background(), Result{
 		AuthID:   initialAuth.ID,
 		Provider: "gemini",
@@ -816,5 +816,269 @@ func TestHomeDispatchSessionIDsWithoutPresetProviderMetadata(t *testing.T) {
 	}
 	if nodeKind, ok := compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); !ok || nodeKind != "compaction" {
 		t.Fatalf("expected node_kind=compaction, got %v", compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey])
+	}
+}
+
+type homeVertexDispatchStub struct {
+	mu         sync.Mutex
+	sessionIDs []string
+	parentIDs  []string
+}
+
+func (*homeVertexDispatchStub) HeartbeatOK() bool { return true }
+
+func (*homeVertexDispatchStub) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	return nil, fmt.Errorf("unexpected fallback to legacy RPopAuth")
+}
+
+func (d *homeVertexDispatchStub) RPopAuthWithSessionHierarchy(_ context.Context, _ string, sessionID string, parentSessionID string, _ http.Header, _ int, _ string, _ *int, _ []string, _ string) ([]byte, error) {
+	d.mu.Lock()
+	d.sessionIDs = append(d.sessionIDs, sessionID)
+	d.parentIDs = append(d.parentIDs, parentSessionID)
+	d.mu.Unlock()
+	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
+		ID:       "auth-home-vertex-1",
+		Provider: "vertex",
+		Status:   StatusActive,
+	}})
+}
+
+func (*homeVertexDispatchStub) AbortAmbiguousDispatch() {}
+
+func TestExecuteHomeLCPPreservesNamespaceAcrossVertexDispatch(t *testing.T) {
+	dispatcher := &homeVertexDispatchStub{}
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+
+	manager := NewManager(nil, selector, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "vertex"})
+
+	payload := []byte(`{"contents":[
+		{"role":"user","parts":[{"text":"home vertex turn 1"}]},
+		{"role":"model","parts":[{"text":"ack 1"}]},
+		{"role":"user","parts":[{"text":"home vertex turn 2"}]}
+	]}`)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatGemini,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: "caller-home-vertex",
+		},
+	}
+	_, errExec := manager.executeHome(context.Background(), []string{"vertex"}, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: payload,
+	}, opts, false)
+	if errExec != nil {
+		t.Fatalf("executeHome() error = %v", errExec)
+	}
+
+	dispatcher.mu.Lock()
+	if len(dispatcher.sessionIDs) != 1 || dispatcher.sessionIDs[0] == "" {
+		dispatcher.mu.Unlock()
+		t.Fatalf("dispatched sessionIDs = %v, want 1 non-empty LCP session ID", dispatcher.sessionIDs)
+	}
+	initialSessionID := dispatcher.sessionIDs[0]
+	dispatcher.mu.Unlock()
+
+	boundAuths, ns, okLookup := selector.matcher.LookupSession(initialSessionID)
+	if !okLookup || len(boundAuths) == 0 || boundAuths[0] != "auth-home-vertex-1" {
+		t.Fatalf("LookupSession(%q) = (auths=%v, ns=%q, ok=%v), want auth-home-vertex-1 (not home-pending)", initialSessionID, boundAuths, ns, okLookup)
+	}
+}
+
+type homeCaptureExecutor struct {
+	schedulerTestExecutor
+	mu          sync.Mutex
+	onExecute   func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	capturedOpt []cliproxyexecutor.Options
+}
+
+func (e *homeCaptureExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.capturedOpt = append(e.capturedOpt, opts)
+	fn := e.onExecute
+	e.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, auth, req, opts)
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func TestExecuteHomeLCPLateFailurePreservesNewerBinding(t *testing.T) {
+	dispatcher := &homeVertexDispatchStub{}
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+
+	manager := NewManager(nil, selector, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+
+	startedA := make(chan struct{})
+	releaseA := make(chan struct{})
+	executor := &homeCaptureExecutor{
+		schedulerTestExecutor: schedulerTestExecutor{provider: "vertex"},
+		onExecute: func(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			payload := string(req.Payload)
+			if payload == `{"contents":[{"role":"user","parts":[{"text":"parent turn 1"}]},{"role":"model","parts":[{"text":"parent ack 1"}]},{"role":"user","parts":[{"text":"parent turn 2"}]},{"role":"model","parts":[{"text":"parent ack 2"}]},{"role":"user","parts":[{"text":"branch A slow fail"}]}]}` {
+				close(startedA)
+				<-releaseA
+				return cliproxyexecutor.Response{}, &Error{Code: "rate_limit", HTTPStatus: http.StatusTooManyRequests}
+			}
+			return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	newOpts := func(payload []byte) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatGemini,
+			OriginalRequest: payload,
+			Metadata: map[string]any{
+				cliproxyexecutor.CallerScopeMetadataKey: "caller-home-gen",
+			},
+		}
+	}
+
+	// 1. Establish initial Home LCP binding on auth-home-vertex-1.
+	basePayload := []byte(`{"contents":[{"role":"user","parts":[{"text":"parent turn 1"}]},{"role":"model","parts":[{"text":"parent ack 1"}]},{"role":"user","parts":[{"text":"parent turn 2"}]}]}`)
+	if _, errBase := manager.executeHome(context.Background(), []string{"vertex"}, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: basePayload,
+	}, newOpts(basePayload), false); errBase != nil {
+		t.Fatalf("base executeHome() error = %v", errBase)
+	}
+
+	dispatcher.mu.Lock()
+	initialSessionID := dispatcher.sessionIDs[0]
+	dispatcher.mu.Unlock()
+
+	// 2. Start continuation A (matches parent prefix, full sequence not yet bound) and hold it in-flight.
+	payloadA := []byte(`{"contents":[{"role":"user","parts":[{"text":"parent turn 1"}]},{"role":"model","parts":[{"text":"parent ack 1"}]},{"role":"user","parts":[{"text":"parent turn 2"}]},{"role":"model","parts":[{"text":"parent ack 2"}]},{"role":"user","parts":[{"text":"branch A slow fail"}]}]}`)
+	doneA := make(chan error, 1)
+	go func() {
+		_, errA := manager.executeHome(context.Background(), []string{"vertex"}, cliproxyexecutor.Request{
+			Model:   "gemini-2.5-pro",
+			Payload: payloadA,
+		}, newOpts(payloadA), false)
+		doneA <- errA
+	}()
+	<-startedA
+
+	// 3. While A is in-flight, continuation B matches the same parent and completes successfully.
+	payloadB := []byte(`{"contents":[{"role":"user","parts":[{"text":"parent turn 1"}]},{"role":"model","parts":[{"text":"parent ack 1"}]},{"role":"user","parts":[{"text":"parent turn 2"}]},{"role":"model","parts":[{"text":"parent ack 2"}]},{"role":"user","parts":[{"text":"branch B fast ok"}]}]}`)
+	if _, errB := manager.executeHome(context.Background(), []string{"vertex"}, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: payloadB,
+	}, newOpts(payloadB), false); errB != nil {
+		t.Fatalf("continuation B executeHome() error = %v", errB)
+	}
+
+	// 4. Release A so its late 429 failure reports after B's newer binding was recorded.
+	close(releaseA)
+	if errA := <-doneA; errA == nil {
+		t.Fatal("expected continuation A to return 429 error")
+	}
+
+	// 5. B's newer binding under initialSessionID must survive A's stale failure.
+	boundAuths, ns, okLookup := selector.matcher.LookupSession(initialSessionID)
+	if !okLookup || len(boundAuths) == 0 || boundAuths[0] != "auth-home-vertex-1" {
+		t.Fatalf("LookupSession(%q) after stale failure = (auths=%v, ns=%q, ok=%v), want preserved auth-home-vertex-1", initialSessionID, boundAuths, ns, okLookup)
+	}
+}
+
+func TestExecuteHomeLCPCompactionPreservesNodeKindInExecutorOptions(t *testing.T) {
+	dispatcher := &homeVertexDispatchStub{}
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+
+	manager := NewManager(nil, selector, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+
+	executor := &homeCaptureExecutor{
+		schedulerTestExecutor: schedulerTestExecutor{provider: "vertex"},
+	}
+	manager.RegisterExecutor(executor)
+
+	// 1. Initial 5-turn conversation in Home mode.
+	initialPayload := []byte(`{"contents":[
+		{"role":"user","parts":[{"text":"compact step 1"}]},
+		{"role":"model","parts":[{"text":"compact ack 1"}]},
+		{"role":"user","parts":[{"text":"compact step 2"}]},
+		{"role":"model","parts":[{"text":"compact ack 2"}]},
+		{"role":"user","parts":[{"text":"compact step 3"}]}
+	]}`)
+	initialOpts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatGemini,
+		OriginalRequest: initialPayload,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: "caller-home-compact",
+		},
+	}
+	if _, errInit := manager.executeHome(context.Background(), []string{"vertex"}, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: initialPayload,
+	}, initialOpts, false); errInit != nil {
+		t.Fatalf("initial executeHome() error = %v", errInit)
+	}
+
+	dispatcher.mu.Lock()
+	initialSessionID := dispatcher.sessionIDs[0]
+	dispatcher.mu.Unlock()
+
+	// 2. Post-compaction continuation via executeHome.
+	compactedPayload := []byte(`{"contents":[
+		{"role":"user","parts":[{"text":"<summary>Steps 1-2 compacted</summary>"}]},
+		{"role":"model","parts":[{"text":"compact ack 2"}]},
+		{"role":"user","parts":[{"text":"compact step 3"}]},
+		{"role":"user","parts":[{"text":"compact step 4"}]}
+	]}`)
+	compactedOpts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatGemini,
+		OriginalRequest: compactedPayload,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: "caller-home-compact",
+		},
+	}
+	if _, errComp := manager.executeHome(context.Background(), []string{"vertex"}, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: compactedPayload,
+	}, compactedOpts, false); errComp != nil {
+		t.Fatalf("compacted executeHome() error = %v", errComp)
+	}
+
+	executor.mu.Lock()
+	if len(executor.capturedOpt) != 2 {
+		count := len(executor.capturedOpt)
+		executor.mu.Unlock()
+		t.Fatalf("captured executor calls = %d, want 2", count)
+	}
+	gotExecOpts := executor.capturedOpt[1]
+	executor.mu.Unlock()
+
+	info, okInfo := cliproxysession.ExtractSessionInfo(gotExecOpts.Headers, gotExecOpts.OriginalRequest, gotExecOpts.Metadata)
+	if !okInfo {
+		t.Fatalf("ExtractSessionInfo(execOpts) returned ok=false, metadata=%#v", gotExecOpts.Metadata)
+	}
+	if !info.IsCompaction || info.IsFork || info.NodeKind != "compaction" || info.AgentName != "main" {
+		t.Fatalf("ExtractSessionInfo(execOpts) = {IsCompaction:%v IsFork:%v NodeKind:%q AgentName:%q}, want compaction/non-fork/main", info.IsCompaction, info.IsFork, info.NodeKind, info.AgentName)
+	}
+	if info.ParentSessionID != initialSessionID {
+		t.Fatalf("ExtractSessionInfo(execOpts).ParentSessionID = %q, want %q", info.ParentSessionID, initialSessionID)
+	}
+	if gotNodeKind, _ := gotExecOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); gotNodeKind != "compaction" {
+		t.Fatalf("execOpts.Metadata[NodeKind] = %q, want compaction", gotNodeKind)
 	}
 }

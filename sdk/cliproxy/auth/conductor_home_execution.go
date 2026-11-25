@@ -285,7 +285,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
-			result := Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}
+			prepareOpts := opts
+			prepareOpts.Metadata = applyHomeSelectionSessionMetadata(opts.Metadata, selection)
+			result := Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: prepareOpts}
 			if ra := retryAfterFromError(errPrepare); ra != nil {
 				result.RetryAfter = ra
 			}
@@ -331,18 +333,8 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
-			if selection != nil && selection.CanonicalSessionID != "" {
-				meta := make(map[string]any, len(execOpts.Metadata)+2)
-				for k, v := range execOpts.Metadata {
-					meta[k] = v
-				}
-				meta[cliproxyexecutor.CanonicalSessionIDMetadataKey] = selection.CanonicalSessionID
-				if selection.ParentSessionID != "" && selection.ParentSessionID != selection.CanonicalSessionID {
-					meta[cliproxyexecutor.ParentSessionIDMetadataKey] = selection.ParentSessionID
-				} else {
-					delete(meta, cliproxyexecutor.ParentSessionIDMetadataKey)
-				}
-				execOpts.Metadata = meta
+			if selection != nil && (selection.CanonicalSessionID != "" || selection.lcpAffinitySessionID != "") {
+				execOpts.Metadata = applyHomeSelectionSessionMetadata(execOpts.Metadata, selection)
 			} else {
 				payload := execOpts.OriginalRequest
 				if len(payload) == 0 {

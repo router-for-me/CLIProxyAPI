@@ -998,3 +998,53 @@ func TestSanitizeAntigravityRequestSchemasPreservesToolArrayWhitespace(t *testin
 		t.Fatalf("pretty-printed tools lost whitespace outside the cleaned declaration\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }
+
+func TestSanitizeAntigravityRequestSchemasNormalizesNumericProtoTypesInWrappedDeclarations_Issue8032(t *testing.T) {
+	input := `{
+		"request": {
+			"tools": [{
+				"function_declarations": [{
+					"name": "search",
+					"parameters_json_schema": {
+						"type": 6,
+						"properties": {
+							"query": {"type": 1},
+							"tags": {"type": 5, "items": {"type": 1}},
+							"emptyObj": {"type": 6}
+						},
+						"required": ["query"]
+					},
+					"response": {
+						"type": 6,
+						"properties": {
+							"matches": {"type": 5, "items": {"type": 1}}
+						}
+					}
+				}]
+			}]
+		}
+	}`
+
+	got := sanitizeAntigravityRequestSchemasForModel(input, true, false)
+	decl := ojson.Get(got, "request.tools.0.function_declarations.0")
+
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"parameters_json_schema.type", "object"},
+		{"parameters_json_schema.properties.query.type", "string"},
+		{"parameters_json_schema.properties.tags.type", "array"},
+		{"parameters_json_schema.properties.tags.items.type", "string"},
+		{"parameters_json_schema.properties.emptyObj.type", "object"},
+		{"parameters_json_schema.properties.emptyObj.properties.reason.type", "string"},
+		{"response.type", "object"},
+		{"response.properties.matches.type", "array"},
+		{"response.properties.matches.items.type", "string"},
+	} {
+		val := decl.Get(tc.path)
+		if val.Type != ojson.String || val.String() != tc.want {
+			t.Fatalf("%s = %s (type %v), want string %q; decl=%s", tc.path, val.Raw, val.Type, tc.want, decl.Raw)
+		}
+	}
+}

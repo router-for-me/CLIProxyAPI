@@ -370,6 +370,64 @@ func TestNewAntigravityHTTPClientDistinctProxiesUseDistinctPools(t *testing.T) {
 	}
 }
 
+func TestNewAntigravityHTTPClientIsolatesReplacedCredentialPool(t *testing.T) {
+	enabledPool := true
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledPool,
+			},
+		},
+	}
+
+	oldAuth := &cliproxyauth.Auth{
+		ID:                "shared-credential-file",
+		RegistrationEpoch: 1,
+		Metadata: map[string]any{
+			"refresh_token": "refresh-account-a",
+			"project_id":    "project-a",
+		},
+	}
+	newAuth := oldAuth.Clone()
+	newAuth.RegistrationEpoch = 2
+	newAuth.Metadata["refresh_token"] = "refresh-account-b"
+	newAuth.Metadata["project_id"] = "project-b"
+
+	var mu sync.Mutex
+	var remoteAddrs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		remoteAddrs = append(remoteAddrs, r.RemoteAddr)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	request := func(auth *cliproxyauth.Auth) {
+		client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+		resp, errGet := client.Get(server.URL)
+		if errGet != nil {
+			t.Fatalf("GET with epoch %d failed: %v", auth.RegistrationEpoch, errGet)
+		}
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Fatalf("close response body with epoch %d: %v", auth.RegistrationEpoch, errClose)
+		}
+	}
+
+	request(oldAuth)
+	request(newAuth)
+
+	mu.Lock()
+	got := append([]string(nil), remoteAddrs...)
+	mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("observed %d upstream requests, want 2", len(got))
+	}
+	if got[0] == got[1] {
+		t.Fatalf("replacement credential reused the previous account TCP connection %q", got[0])
+	}
+}
+
 func TestNewAntigravityHTTPClientScopesPoolsByAuthIdentity(t *testing.T) {
 	cfg := &config.Config{}
 	const proxyURL = "http://127.0.0.1:18092"
@@ -508,9 +566,9 @@ func TestAntigravityTransportScopeIgnoresNonUniqueLabel(t *testing.T) {
 // refreshing an access token must not move a credential onto a new pool, and a refresh
 // request that runs before any access token exists must resolve to the same scope.
 func TestAntigravityTransportScopeSurvivesAccessTokenRotation(t *testing.T) {
-	refreshOnly := &cliproxyauth.Auth{Metadata: map[string]any{"refresh_token": "stable-refresh"}}
-	beforeRotation := &cliproxyauth.Auth{Metadata: map[string]any{"refresh_token": "stable-refresh", "access_token": "access-1"}}
-	afterRotation := &cliproxyauth.Auth{Metadata: map[string]any{"refresh_token": "stable-refresh", "access_token": "access-2"}}
+	refreshOnly := &cliproxyauth.Auth{ID: "stable-id", Metadata: map[string]any{"refresh_token": "stable-refresh"}}
+	beforeRotation := &cliproxyauth.Auth{ID: "stable-id", Metadata: map[string]any{"refresh_token": "stable-refresh", "access_token": "access-1"}}
+	afterRotation := &cliproxyauth.Auth{ID: "stable-id", Metadata: map[string]any{"refresh_token": "stable-refresh", "access_token": "access-2"}}
 
 	want := antigravityTransportScope(refreshOnly)
 	if got := antigravityTransportScope(beforeRotation); got != want {
