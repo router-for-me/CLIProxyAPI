@@ -250,10 +250,13 @@ func (s *backendSeriesSelector) observePolledQuotaLifting(authID string, quota b
 		return false, false
 	}
 	quota.used = min(max(quota.used, 0), 1)
-	lifted = s.liftResetWeeklyHoldLocked(authID, s.currentQuotaLocked(authID), quota)
+	lifted = s.liftResetWeeklyHoldLocked(authID, quota)
 	s.quota[authID] = quota
 	s.quotaRevision[authID]++
 	s.noteQuotaLocked(authID, quota)
+	if !lifted {
+		s.notePollHoldPeakLocked(authID, quota)
+	}
 	observeUsagePoll(s.profileNameLocked(authID), "ok")
 	return true, lifted
 }
@@ -272,14 +275,91 @@ func (s *backendSeriesSelector) noteCredentialRejection(authID string, headers h
 	s.quotaHoldWeekly[authID] = status("7d") == "rejected" && status("5h") != "rejected"
 }
 
+// How far below a hold's peak a poll must read the week before the hold is lifted. Within a week the use only
+// grows; it falls only when the week is reset, and a reset can be small: a claimed Fable reset gives the week
+// back only Fable's share (2026-11-25: 100% to 55% and to 50%; a smaller share is a smaller fall). Two polls of
+// the same week (the same resets_at) are the same meter, so a fall of a few points between them is a reset.
+// The 429's headers and a poll are not: a poll lags behind a figure the headers already carried, so against a
+// peak from headers only a fall too large for lag counts.
+const (
+	pollResetFall   = 0.03
+	headerResetFall = 0.25
+)
+
+// weeklyHoldPeak is the highest weekly use read during a hold: from polls (poll, with its week's resetsAt) and
+// from response headers, the 429's own first (header, with its resetsAt).
+type weeklyHoldPeak struct {
+	poll, header           float64
+	pollReset, headerReset time.Time
+	pollSeen, headerSeen   bool
+}
+
+// sameWeek: two readings of the week with resets within a minute of each other, or one without a reset.
+func sameWeek(a, b time.Time) bool {
+	return a.IsZero() || b.IsZero() || a.Sub(b).Abs() < time.Minute
+}
+
+// notePollHoldPeakLocked keeps the highest weekly use a poll read during the current hold. A poll of another
+// week (resets_at moved) starts the peaks over: the readings before it say nothing about the new week.
+func (s *backendSeriesSelector) notePollHoldPeakLocked(authID string, q backendWeeklyQuota) {
+	if !s.quotaBlockedLocked(authID) {
+		return
+	}
+	if s.quotaHoldPeak == nil {
+		s.quotaHoldPeak = make(map[string]weeklyHoldPeak, len(s.authIDs))
+	}
+	peak := s.quotaHoldPeak[authID]
+	if peak.pollSeen && !sameWeek(q.resetsAt, peak.pollReset) {
+		peak = weeklyHoldPeak{}
+	}
+	if !peak.pollSeen || q.used > peak.poll {
+		peak.poll, peak.pollReset, peak.pollSeen = q.used, q.resetsAt, true
+	}
+	s.quotaHoldPeak[authID] = peak
+}
+
+// noteHeaderHoldPeakLocked keeps the highest weekly use response headers carried during the current hold.
+func (s *backendSeriesSelector) noteHeaderHoldPeakLocked(authID string, q backendWeeklyQuota) {
+	if !s.quotaBlockedLocked(authID) {
+		return
+	}
+	if s.quotaHoldPeak == nil {
+		s.quotaHoldPeak = make(map[string]weeklyHoldPeak, len(s.authIDs))
+	}
+	peak := s.quotaHoldPeak[authID]
+	if !peak.headerSeen || q.used > peak.header {
+		peak.header, peak.headerReset, peak.headerSeen = q.used, q.resetsAt, true
+	}
+	s.quotaHoldPeak[authID] = peak
+}
+
 // liftResetWeeklyHoldLocked: Anthropic refused the subscription for its week alone (7d rejected, 5h not)
-// and the poll, which read the week used up, now reads it well below that, with the five-hour window not
-// full: the week's usage was reset (a limit reset on claude.ai, seen 2026-11-22). Without this the hold
-// strands the whole week until the old reset. The hold is lifted so the next request asks Anthropic, which
-// decides; a refusal holds the subscription again and the request moves on. It reports a lift, so the
-// caller clears the core's cooldown for the same rejection.
-func (s *backendSeriesSelector) liftResetWeeklyHoldLocked(authID string, previous, polled backendWeeklyQuota) bool {
-	if !s.quotaBlockedLocked(authID) || !s.quotaHoldWeekly[authID] || !previous.known || previous.used < 1 || polled.used > 0.9 {
+// and the poll now reads the week below the highest use read during the hold (pollResetFall below an earlier
+// poll of the same week, or headerResetFall below the 429's own figure), with the five-hour window not full:
+// the week's usage was reset (a limit reset on claude.ai, seen 2026-11-22). Without this the hold strands the
+// whole week until the old reset. The hold is lifted so the next request asks Anthropic, which decides; a
+// refusal holds the subscription again and the request moves on. It reports a lift, so the caller clears the
+// core's cooldown for the same rejection.
+//
+// The fall is measured from the hold's peaks, not from the reading just before: on 2026-11-25 Anthropic refused
+// a subscription its lagging poll read at 90%, the polls kept reading 90% through the hold, and when the week
+// was reset (90% to 41%) a rule that wanted the previous reading at 100% kept the hold until the old reset,
+// with every other subscription out: the pool refused every request until a restart. A poll of another week
+// lifts nothing: the hold's own expiry handles a week's end.
+func (s *backendSeriesSelector) liftResetWeeklyHoldLocked(authID string, polled backendWeeklyQuota) bool {
+	if !s.quotaBlockedLocked(authID) || !s.quotaHoldWeekly[authID] {
+		return false
+	}
+	peak := s.quotaHoldPeak[authID]
+	var from float64
+	switch {
+	case peak.pollSeen && !sameWeek(polled.resetsAt, peak.pollReset):
+		return false
+	case peak.pollSeen && polled.used <= peak.poll-pollResetFall:
+		from = peak.poll
+	case peak.headerSeen && sameWeek(polled.resetsAt, peak.headerReset) && polled.used <= peak.header-headerResetFall:
+		from = peak.header
+	default:
 		return false
 	}
 	if five, known := s.fiveHourNowLocked(authID, s.nowOrReal()); known && five.UsedFraction >= 1 {
@@ -288,7 +368,9 @@ func (s *backendSeriesSelector) liftResetWeeklyHoldLocked(authID string, previou
 	delete(s.quotaBlockedUntil, authID)
 	delete(s.quotaBackoffLevel, authID)
 	delete(s.quotaHoldWeekly, authID)
+	delete(s.quotaHoldPeak, authID)
 	lg().Info("weekly usage reset while Anthropic refused the subscription; asking Anthropic again",
-		"profile", s.profileNameLocked(authID), "used_pct", fmt.Sprintf("%.0f", polled.used*100))
+		"profile", s.profileNameLocked(authID), "used_pct", fmt.Sprintf("%.0f", polled.used*100),
+		"peak_used_pct", fmt.Sprintf("%.0f", from*100))
 	return true
 }

@@ -729,7 +729,10 @@ type backendSeriesSelector struct {
 	fableBlockedUntil map[string]time.Time
 	// quotaHoldWeekly: the hold in quotaBlockedUntil is Anthropic's rejection of the week alone (7d rejected,
 	// 5h not), the only kind a poll showing the week reset may lift (liftResetWeeklyHoldLocked).
-	quotaHoldWeekly   map[string]bool
+	quotaHoldWeekly map[string]bool
+	// quotaHoldPeak: the highest weekly use read while the hold in quotaBlockedUntil lasts, kept apart by source
+	// (polls; the 429 and other response headers), for liftResetWeeklyHoldLocked. Dropped when the hold ends.
+	quotaHoldPeak     map[string]weeklyHoldPeak
 	fableBackoffLevel map[string]int       // refusals in a row with no reset known, for the backoff
 	fableHoldGuessed  map[string]bool      // the hold is a backoff, not a reset: a reset learned later ends it sooner
 	fableHoldFloor    map[string]time.Time // the last reset Anthropic gave for a refusal: no hold ends before it
@@ -1256,6 +1259,7 @@ func (s *backendSeriesSelector) quotaBlockedLocked(authID string) bool {
 	until, blocked := s.quotaBlockedUntil[authID]
 	if blocked && !s.now().Before(until) {
 		delete(s.quotaBlockedUntil, authID)
+		delete(s.quotaHoldPeak, authID)
 		return false
 	}
 	return blocked
@@ -1287,6 +1291,7 @@ func (s *backendSeriesSelector) observeQuota(authID string, quota backendWeeklyQ
 				existing.used = quota.used
 				s.quota[authID] = existing
 				s.noteQuotaLocked(authID, existing)
+				s.noteHeaderHoldPeakLocked(authID, existing)
 			}
 			return
 		case !quota.resetsAt.IsZero() && !existing.resetsAt.IsZero() && quota.resetsAt.Before(existing.resetsAt):
@@ -1297,6 +1302,7 @@ func (s *backendSeriesSelector) observeQuota(authID string, quota backendWeeklyQ
 	}
 	s.quota[authID] = quota
 	s.noteQuotaLocked(authID, quota)
+	s.noteHeaderHoldPeakLocked(authID, quota)
 }
 
 func backendAvailabilityModel(selectionModel string, opts coreexecutor.Options) string {
@@ -1350,6 +1356,9 @@ func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 		s.noteResultLocked(result, 0, time.Time{}, false)
 		return
 	}
+	// A hold that has ended is dropped now, with its peaks, before this rejection starts a new one: the map is
+	// read directly below, and an old hold's peak must not carry into the next.
+	s.quotaBlockedLocked(result.AuthID)
 	s.quotaRevision[result.AuthID]++
 	// Credential-wide rejection can be a five-hour limit, not an exhausted
 	// weekly allocation. Keep that deadline separate from measured weekly usage.
@@ -1380,6 +1389,9 @@ func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 		until = previous
 	}
 	s.quotaBlockedUntil[result.AuthID] = until
+	if q := s.currentQuotaLocked(result.AuthID); q.known {
+		s.noteHeaderHoldPeakLocked(result.AuthID, q) // the figure the 429 itself carried, stored just before
+	}
 	s.noteResultLocked(result, cooldown, until, result.RetryAfter != nil)
 }
 
