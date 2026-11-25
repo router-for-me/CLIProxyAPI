@@ -3782,3 +3782,110 @@ func TestConvertOpenAIResponsesRequestToGemini_ValidatesFunctionCallArguments(t 
 		})
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_GuardsOptionalFields(t *testing.T) {
+	t.Run("null optional fields and empty stop_sequences are omitted", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-3.6-flash",
+			"instructions": null,
+			"max_output_tokens": null,
+			"temperature": null,
+			"top_p": null,
+			"stop_sequences": [],
+			"input": "hello"
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if root.Get("systemInstruction").Exists() {
+			t.Fatalf("expected systemInstruction omitted for null instructions, got %s", root.Get("systemInstruction").Raw)
+		}
+		for _, path := range []string{
+			"generationConfig.maxOutputTokens",
+			"generationConfig.temperature",
+			"generationConfig.topP",
+			"generationConfig.stopSequences",
+		} {
+			if v := root.Get(path); v.Exists() {
+				t.Fatalf("expected %s omitted, got %s. Output: %s", path, v.Raw, out)
+			}
+		}
+	})
+
+	t.Run("empty instructions non-positive max_output_tokens and non-typed fields are omitted", func(t *testing.T) {
+		cases := []struct {
+			name string
+			req  string
+		}{
+			{
+				name: "empty instructions and zero max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","instructions":"","max_output_tokens":0,"temperature":"0.5","top_p":true,"stop_sequences":[null,123,""],"input":"hello"}`,
+			},
+			{
+				name: "non-string instructions and negative max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","instructions":123,"max_output_tokens":-10,"input":"hello"}`,
+			},
+			{
+				name: "string max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","max_output_tokens":"256","input":"hello"}`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", []byte(tc.req), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+				}
+				root := util.ParseGJSONBytesNoCopy(out)
+				if root.Get("systemInstruction").Exists() {
+					t.Fatalf("expected systemInstruction omitted, got %s", root.Get("systemInstruction").Raw)
+				}
+				for _, path := range []string{
+					"generationConfig.maxOutputTokens",
+					"generationConfig.temperature",
+					"generationConfig.topP",
+					"generationConfig.stopSequences",
+				} {
+					if v := root.Get(path); v.Exists() {
+						t.Fatalf("expected %s omitted, got %s. Output: %s", path, v.Raw, out)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("explicit valid values including zero temperature and top_p are preserved", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-3.6-flash",
+			"instructions": "Be concise.",
+			"max_output_tokens": 256,
+			"temperature": 0,
+			"top_p": 0,
+			"stop_sequences": ["END", null, "\n"],
+			"input": "hello"
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if got := root.Get("systemInstruction.parts.0.text").String(); got != "Be concise." {
+			t.Fatalf("systemInstruction.parts.0.text = %q, want %q", got, "Be concise.")
+		}
+		if got := root.Get("generationConfig.maxOutputTokens"); !got.Exists() || got.Type != ojson.Number || got.Int() != 256 {
+			t.Fatalf("maxOutputTokens = %s, want 256", got.Raw)
+		}
+		if got := root.Get("generationConfig.temperature"); !got.Exists() || got.Type != ojson.Number || got.Float() != 0 {
+			t.Fatalf("temperature = %s, want 0", got.Raw)
+		}
+		if got := root.Get("generationConfig.topP"); !got.Exists() || got.Type != ojson.Number || got.Float() != 0 {
+			t.Fatalf("topP = %s, want 0", got.Raw)
+		}
+		stops := root.Get("generationConfig.stopSequences")
+		if !stops.IsArray() || len(stops.Array()) != 2 || stops.Get("0").String() != "END" || stops.Get("1").String() != "\n" {
+			t.Fatalf("stopSequences = %s, want [\"END\",\"\\n\"]", stops.Raw)
+		}
+	})
+}

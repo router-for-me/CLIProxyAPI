@@ -76,7 +76,7 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Extract system instruction from OpenAI "instructions" field.
 	systemParts := make([][]byte, 0, 2)
-	if instructions := root.Get("instructions"); instructions.Exists() {
+	if instructions := root.Get("instructions"); instructions.Exists() && instructions.Type == ojson.String && instructions.String() != "" {
 		part := []byte(`{"text":""}`)
 		part, _ = ojson.SetBytes(part, "text", instructions.String())
 		systemParts = append(systemParts, part)
@@ -499,19 +499,17 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	}
 
 	// Handle generation config from OpenAI format
-	if maxOutputTokens := root.Get("max_output_tokens"); maxOutputTokens.Exists() {
-		genConfig := []byte(`{"maxOutputTokens":0}`)
-		genConfig, _ = ojson.SetBytes(genConfig, "maxOutputTokens", maxOutputTokens.Int())
-		_ = outDoc.SetRawBytes("generationConfig", genConfig)
+	if maxOutputTokens := root.Get("max_output_tokens"); maxOutputTokens.Exists() && maxOutputTokens.Type == ojson.Number && maxOutputTokens.Int() > 0 {
+		_ = outDoc.Set("generationConfig.maxOutputTokens", maxOutputTokens.Int())
 	}
 
 	// Handle temperature if present
-	if temperature := root.Get("temperature"); temperature.Exists() {
+	if temperature := root.Get("temperature"); temperature.Exists() && temperature.Type == ojson.Number {
 		_ = outDoc.Set("generationConfig.temperature", temperature.Float())
 	}
 
 	// Handle top_p if present
-	if topP := root.Get("top_p"); topP.Exists() {
+	if topP := root.Get("top_p"); topP.Exists() && topP.Type == ojson.Number {
 		_ = outDoc.Set("generationConfig.topP", topP.Float())
 	}
 
@@ -519,10 +517,14 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	if stopSequences := root.Get("stop_sequences"); stopSequences.Exists() && stopSequences.IsArray() {
 		var sequences []string
 		stopSequences.ForEach(func(_, seq ojson.Result) bool {
-			sequences = append(sequences, seq.String())
+			if seq.Type == ojson.String && seq.String() != "" {
+				sequences = append(sequences, seq.String())
+			}
 			return true
 		})
-		_ = outDoc.Set("generationConfig.stopSequences", sequences)
+		if len(sequences) > 0 {
+			_ = outDoc.Set("generationConfig.stopSequences", sequences)
+		}
 	}
 
 	applyOpenAIResponsesTextFormatToGeminiDoc(outDoc, root)
