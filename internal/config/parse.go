@@ -147,6 +147,9 @@ func validateStartupConfig(data []byte, optional bool) (*startupConfig, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+	if cfg.MaxRetryCredentialsPerProvider < 0 {
+		cfg.MaxRetryCredentialsPerProvider = 0
+	}
 
 	cfg.NormalizePluginsConfig()
 	cfg.NormalizeClaudeConfig()

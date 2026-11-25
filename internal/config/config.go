@@ -122,6 +122,14 @@ type Config struct {
 	// try in each credential retry round.
 	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
+	// MaxRetryCredentialsPerProvider caps how many different credentials of the
+	// same scheduling provider group may be attempted for one request. Once the
+	// cap is reached, the rest of that group is excluded for the remainder of
+	// the request so failover can move to another provider. Applies to local
+	// scheduling of API-key and keyless compatibility credentials; OAuth
+	// credentials and Home dispatch are not capped. Set to 0 or a negative
+	// value to disable the per-provider cap (legacy behavior).
+	MaxRetryCredentialsPerProvider int `yaml:"max-retry-credentials-per-provider" json:"max-retry-credentials-per-provider"`
 	// MaxRetryInterval defines the maximum positive cooldown wait, in seconds,
 	// allowed before starting another credential retry round. A non-positive value
 	// forbids positive cooldown waits; it does not disable same-round credential

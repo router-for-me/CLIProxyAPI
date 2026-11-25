@@ -1238,3 +1238,158 @@ func TestRelayRequestScopedContinueAndCooldownFailover(t *testing.T) {
 		}
 	})
 }
+
+func TestRelayRespectsProviderAttemptCap(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cap      int
+		exhaust  bool
+		wantCall int32
+	}{
+		{name: "cap_disabled_reaches_upstream", cap: 0, wantCall: 1},
+		{name: "cap_one_with_free_budget_reaches_upstream", cap: 1, wantCall: 1},
+		{name: "cap_one_with_exhausted_group_skips_upstream", cap: 1, exhaust: true, wantCall: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var upstreamCalls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"models":["upstream"]}`)
+			}))
+			defer upstream.Close()
+
+			cfg := &config.Config{MaxRetryCredentialsPerProvider: tc.cap}
+			manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
+			manager.SetConfig(cfg)
+			manager.RegisterExecutor(executor.NewMetaExecutor(cfg))
+			for _, id := range []string{"meta-cap-a", "meta-cap-b"} {
+				registerMetaTestCred(t, manager, &auth.Auth{
+					ID:       id,
+					Provider: "meta",
+					Status:   auth.StatusActive,
+					Attributes: map[string]string{
+						"api_key":  id,
+						"base_url": upstream.URL + "/v1",
+						"priority": "1",
+					},
+				}, "muse-wonder-1.0")
+			}
+
+			ctx := context.Background()
+			if tc.cap > 0 {
+				ctx = manager.WithProviderAttemptBudget(ctx)
+			}
+			if tc.exhaust {
+				// One credential of the shared group already failed upstream, so
+				// the cap removed the whole group for this request.
+				manager.NoteProviderAttemptFailure(ctx, "meta-cap-a", &auth.Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests})
+			}
+
+			router := newTestRouter(NewHandler(manager, cfg))
+			req := httptest.NewRequest(http.MethodGet, "/muse-code/config", nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if got := upstreamCalls.Load(); got != tc.wantCall {
+				t.Fatalf("upstream calls = %d, want %d (provider cap %d)", got, tc.wantCall, tc.cap)
+			}
+		})
+	}
+}
+
+func TestRelayChargesProviderCapOnRequestScopedContinue(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"scoped_continue_400"}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{MaxRetryCredentialsPerProvider: 1}
+	manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
+	manager.SetConfig(cfg)
+	manager.RegisterExecutor(executor.NewMetaExecutor(cfg))
+
+	rules := []any{map[string]any{"status": 400, "match": []string{"scoped_continue_400"}, "action": auth.RequestScopedActionContinue}}
+	for _, id := range []string{"meta-continue-cap-a", "meta-continue-cap-b"} {
+		registerMetaTestCred(t, manager, &auth.Auth{
+			ID:       id,
+			Provider: "meta",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{
+				"type":                  "meta",
+				"api_key":               id,
+				"base_url":              upstream.URL + "/v1",
+				"request_scoped_errors": rules,
+			},
+			Attributes: map[string]string{
+				"api_key":  id,
+				"base_url": upstream.URL + "/v1",
+				"priority": "1",
+			},
+		}, "muse-wonder-1.0")
+	}
+
+	ctx := manager.WithProviderAttemptBudget(context.Background())
+	router := newTestRouter(NewHandler(manager, cfg))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/muse-code/config", nil).WithContext(ctx))
+
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (the cap must remove the sibling after one failure)", got)
+	}
+	if !manager.ProviderAttemptBudgetExhausted(ctx) {
+		t.Fatalf("cap did not mark the Meta group as exhausted")
+	}
+}
+
+func TestRelayChargesProviderCapWhenReloadRemovesInflightCredential(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	var manager *auth.Manager
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if upstreamCalls.Add(1) == 1 {
+			// Simulate a config reload dropping the serving credential while the
+			// upstream request is still in flight.
+			manager.Remove(context.Background(), "meta-reload-cap-a")
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"scoped_continue_400"}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{MaxRetryCredentialsPerProvider: 1}
+	manager = auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
+	manager.SetConfig(cfg)
+	manager.RegisterExecutor(executor.NewMetaExecutor(cfg))
+
+	rules := []any{map[string]any{"status": 400, "match": []string{"scoped_continue_400"}, "action": auth.RequestScopedActionContinue}}
+	for _, id := range []string{"meta-reload-cap-a", "meta-reload-cap-b"} {
+		registerMetaTestCred(t, manager, &auth.Auth{
+			ID:       id,
+			Provider: "meta",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{
+				"type":                  "meta",
+				"api_key":               id,
+				"base_url":              upstream.URL + "/v1",
+				"request_scoped_errors": rules,
+			},
+			Attributes: map[string]string{
+				"api_key":  id,
+				"base_url": upstream.URL + "/v1",
+				"priority": "1",
+			},
+		}, "muse-wonder-1.0")
+	}
+
+	ctx := manager.WithProviderAttemptBudget(context.Background())
+	router := newTestRouter(NewHandler(manager, cfg))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/muse-code/config", nil).WithContext(ctx))
+
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (a removed serving credential must still exhaust its group)", got)
+	}
+}

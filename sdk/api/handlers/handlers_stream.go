@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -352,8 +353,39 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	return h.executeStreamWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, allowImageModel, modelExecutionOptions{})
 }
 
+// bootstrapFailedAuthID returns the credential that served the failed bootstrap
+// stream. The selected-auth callback is authoritative because the manager
+// publishes the ID into its own metadata clone; opts.Metadata is only a fallback
+// for callers that pre-populate it.
+func bootstrapFailedAuthID(selectedAuthID string, opts coreexecutor.Options) string {
+	if trimmed := strings.TrimSpace(selectedAuthID); trimmed != "" {
+		return trimmed
+	}
+	if fromMetadata, _ := opts.Metadata[coreexecutor.SelectedAuthMetadataKey].(string); strings.TrimSpace(fromMetadata) != "" {
+		return strings.TrimSpace(fromMetadata)
+	}
+	return ""
+}
+
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	if h != nil && h.AuthManager != nil {
+		ctx = h.AuthManager.WithProviderAttemptBudget(ctx)
+	}
+	// The manager publishes the selected credential into its own metadata clone,
+	// so the handler cannot read it back after ExecuteStream returns. Observe it
+	// through the existing callback channel without displacing a callback the
+	// caller already installed (websocket pinning, steering, video binding).
+	selectedAuthID := ""
+	previousSelectedAuthCallback := selectedAuthIDCallbackFromContext(ctx)
+	ctx = WithSelectedAuthIDCallback(ctx, func(authID string) {
+		if trimmed := strings.TrimSpace(authID); trimmed != "" {
+			selectedAuthID = trimmed
+		}
+		if previousSelectedAuthCallback != nil {
+			previousSelectedAuthCallback(authID)
+		}
+	})
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	var routeDecision modelRouteDecision
@@ -643,8 +675,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
 		readInitialStreamChunks()
-		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
+		if streamCanceledBeforeRead || ctx.Err() != nil || bootstrapErr != nil || bootstrapStreamErr == nil {
 			break
+		}
+		// Charge the failed post-return stream before any early exit, so an outer
+		// caller sharing the request budget (a WebSocket turn, or a further replay)
+		// sees the attempt even when no bootstrap retry is configured.
+		if h.AuthManager != nil {
+			h.AuthManager.NoteProviderAttemptFailure(ctx, bootstrapFailedAuthID(selectedAuthID, opts), bootstrapStreamErr)
 		}
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
 			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
@@ -661,12 +699,19 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 		}
 		bootstrapRetries++
+		// The callback publishes the credential of the next attempt; clearing the
+		// previous value keeps a failed selection from being charged again.
+		selectedAuthID = ""
 		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
-			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
-				bootstrapErr = originalBootstrapErr
-			} else {
+			switch {
+			case isAuthSelectionUnavailable(retryErr) && h.AuthManager != nil && h.AuthManager.ProviderAttemptBudgetExhausted(ctx):
+				// The provider cap removed this request's remaining candidates, so
+				// surface the real upstream error instead of auth_not_found.
+				bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+			case isAuthSelectionUnavailable(retryErr) && executionErrorMessage(bootstrapStreamErr).StatusCode >= http.StatusInternalServerError:
+				bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+			default:
 				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
 			}
 			break

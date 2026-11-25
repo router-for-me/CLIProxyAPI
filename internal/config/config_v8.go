@@ -83,6 +83,7 @@ func buildV8Paths() []configPath {
 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
 		{"force-model-prefix", "routing.force-model-prefix"},
 		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
+		{"max-retry-credentials-per-provider", "routing.retry.max-retry-credentials-per-provider"},
 		{"max-retry-interval", "routing.retry.max-retry-interval"},
 		{"disable-cooling", "routing.cooldown.disable-cooling"}, {"save-cooldown-status", "routing.cooldown.save-cooldown-status"},
 		{"transient-error-cooldown-seconds", "routing.cooldown.transient-error-cooldown-seconds"},
@@ -400,11 +401,37 @@ var sharedKeyFields = map[string]bool{
 	"connection-pool": true,
 }
 
+// generatedGroupNameFor returns a deterministic label for an unnamed key group
+// that does not collide with any explicitly configured group name.
+func generatedGroupNameFor(provider string, index int, explicit map[string]struct{}) string {
+	base := fmt.Sprintf("%s-unnamed-%d", provider, index+1)
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		if _, taken := explicit[candidate]; !taken {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
+}
+
 func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 	if groups.Kind != yaml.SequenceNode {
 		return nil, fmt.Errorf("api-keys.%s must be a list", provider)
 	}
 	out := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	// Explicit group names own the identity namespace; generated labels for
+	// unnamed groups must not collide with them.
+	explicitGroupNames := make(map[string]struct{}, len(groups.Content))
+	for _, group := range groups.Content {
+		if group.Kind != yaml.MappingNode {
+			continue
+		}
+		if nameNode := yamlPath(group, "name"); nameNode != nil && nameNode.Tag != "!!null" {
+			if name := strings.TrimSpace(nameNode.Value); name != "" {
+				explicitGroupNames[name] = struct{}{}
+			}
+		}
+	}
 	for index, group := range groups.Content {
 		if group.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("api-keys.%s[%d] must be a mapping", provider, index)
@@ -415,6 +442,14 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 		}
 		if err := validateWeightSequenceNode(keys, "api-keys."+provider+".keys"); err != nil {
 			return nil, err
+		}
+		groupName := ""
+		if nameNode := yamlPath(group, "name"); nameNode != nil && nameNode.Tag != "!!null" {
+			groupName = strings.TrimSpace(nameNode.Value)
+		}
+		generatedGroupName := ""
+		if groupName == "" && (provider == "gemini" || provider == "interactions") {
+			generatedGroupName = generatedGroupNameFor(provider, index, explicitGroupNames)
 		}
 		if provider == "openai-compatibility" {
 			item := deepCopyNode(group)
@@ -446,13 +481,24 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 			item := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			for i := 0; i < len(group.Content); i += 2 {
 				field := group.Content[i].Value
-				if field == "base-url" || sharedKeyFields[field] {
+				if field == "base-url" || sharedKeyFields[field] || ((provider == "gemini" || provider == "interactions") && field == "name") {
 					setYAMLPath(item, field, group.Content[i+1])
 				}
+			}
+			if generatedGroupName != "" {
+				// An explicitly blank or null group name must not reach the
+				// flattened keys, or every sibling would get its own identity.
+				setYAMLPath(item, "name", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: generatedGroupName})
 			}
 			for i := 0; i < len(key.Content); i += 2 {
 				field := key.Content[i].Value
 				if field == "auth_index" || field == "auth-index" {
+					continue
+				}
+				// The group name defines the scheduling identity for gemini and
+				// interactions credentials; a per-key name would split siblings
+				// into separate groups.
+				if field == "name" && (provider == "gemini" || provider == "interactions") {
 					continue
 				}
 				if key.Content[i+1].Tag == "!!null" {
@@ -509,6 +555,14 @@ func groupLegacyKeys(keys *yaml.Node, provider string) *yaml.Node {
 			key := deepCopyNode(entry)
 			for i := 0; i < len(entry.Content); i += 2 {
 				field := entry.Content[i].Value
+				if field == "name" && (provider == "gemini" || provider == "interactions") {
+					deleteYAMLPath(key, field)
+					value := entry.Content[i+1]
+					if value.Tag != "!!null" && strings.TrimSpace(value.Value) != "" {
+						setYAMLPath(group, field, value)
+					}
+					continue
+				}
 				if field == "base-url" || sharedKeyFields[field] {
 					setYAMLPath(group, field, entry.Content[i+1])
 					deleteYAMLPath(key, field)

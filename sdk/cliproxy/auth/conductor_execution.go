@@ -361,6 +361,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
+	ctx = m.WithProviderAttemptBudget(ctx)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -536,6 +537,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
+	ctx = m.WithProviderAttemptBudget(ctx)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -623,6 +625,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if errThread != nil {
 		return nil, errThread
 	}
+	ctx = m.WithProviderAttemptBudget(ctx)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1250,6 +1253,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			tried[authID] = struct{}{}
 		}
 	}
+	budget := m.providerAttemptBudgetForRequest(ctx)
+	seedTriedFromProviderBudget(budget, tried)
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
 	var lastErr error
@@ -1288,6 +1293,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
+		if providerAttemptBudgetExcludes(budget, auth) {
+			if _, alreadyTried := tried[auth.ID]; alreadyTried {
+				if lastErr != nil || upstreamErr != nil {
+					return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				}
+				return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+			}
+			tried[auth.ID] = struct{}{}
+			continue
+		}
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		execCtx = m.WithAuthTransport(execCtx, auth)
@@ -1305,6 +1320,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastAttemptedAuthID = authID
 		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		// Remember the group before the attempt runs: a failure that surfaces
+		// after a reload removed or regrouped this credential must still charge
+		// the group that actually made the request.
+		providerAttemptBudgetRemember(budget, auth)
 		if homeMode {
 			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
 		}
@@ -1343,6 +1362,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+			m.noteProviderAttemptFailure(budget, auth, tried)
 			continue
 		}
 		if preparedAuth != nil {
@@ -1510,6 +1530,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				continue
 			}
+			m.noteProviderAttemptFailure(budget, auth, tried)
 			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.requestScopedErrorConfig(execCtx))
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
@@ -1553,6 +1574,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			tried[authID] = struct{}{}
 		}
 	}
+	budget := m.providerAttemptBudgetForRequest(ctx)
+	seedTriedFromProviderBudget(budget, tried)
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
 	var lastErr error
@@ -1591,6 +1614,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
+		if providerAttemptBudgetExcludes(budget, auth) {
+			if _, alreadyTried := tried[auth.ID]; alreadyTried {
+				if lastErr != nil || upstreamErr != nil {
+					return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				}
+				return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+			}
+			tried[auth.ID] = struct{}{}
+			continue
+		}
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		execCtx = m.WithAuthTransport(execCtx, auth)
@@ -1608,6 +1641,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastAttemptedAuthID = authID
 		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		// Remember the group before the attempt runs: a failure that surfaces
+		// after a reload removed or regrouped this credential must still charge
+		// the group that actually made the request.
+		providerAttemptBudgetRemember(budget, auth)
 		if homeMode {
 			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
 		}
@@ -1646,6 +1683,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+			m.noteProviderAttemptFailure(budget, auth, tried)
 			continue
 		}
 		if preparedAuth != nil {
@@ -1818,6 +1856,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				continue
 			}
+			m.noteProviderAttemptFailure(budget, auth, tried)
 			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.requestScopedErrorConfig(execCtx))
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
@@ -1871,6 +1910,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeSameAuthRetries := make(map[string]int)
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
+	budget := m.providerAttemptBudgetForRequest(ctx)
+	seedTriedFromProviderBudget(budget, tried)
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
 	var lastErr error
@@ -2006,6 +2047,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
+		if selection == nil && providerAttemptBudgetExcludes(budget, auth) {
+			if _, alreadyTried := tried[auth.ID]; alreadyTried {
+				if lastErr != nil || upstreamErr != nil {
+					return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+				}
+				return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+			}
+			tried[auth.ID] = struct{}{}
+			continue
+		}
 		if selection != nil {
 			if errRuntimeAuth := m.bindHomeSelectionRuntimeAuth(ctx, opts, selection); errRuntimeAuth != nil {
 				selection.End("runtime_auth_bind_failed")
@@ -2067,6 +2118,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastAttemptedAuthID = authID
 		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		// Remember the group before the attempt runs: a failure that surfaces
+		// after a reload removed or regrouped this credential must still charge
+		// the group that actually made the request.
+		providerAttemptBudgetRemember(budget, auth)
 		if homeMode {
 			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
 		}
@@ -2125,6 +2180,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				releaseAttempt()
 			} else {
 				m.MarkResult(execCtx, result)
+				m.noteProviderAttemptFailure(budget, auth, tried)
 			}
 			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
 			if okAction && !isRequestStopError(errPrepare) && !isRequestScopedStop(action, okAction) {
@@ -2248,6 +2304,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
 					return nil, errEnd
 				}
+			} else {
+				m.noteProviderAttemptFailure(budget, auth, tried)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx

@@ -255,6 +255,16 @@ routing:
     # so the cap does not guarantee a fixed number of actual retries per credential.
     max-retry-credentials: 0
 
+    # Maximum number of API-key credentials from one provider group to attempt for
+    # one request. When a group reaches this cap, all of its remaining credentials
+    # are excluded for the rest of the request so failover can move to another
+    # provider. Gemini and Interactions groups use their api-keys.gemini /
+    # api-keys.interactions group name; OpenAI-compatible
+    # providers use their provider name; other providers fall back to base URL.
+    # OAuth credentials and Home dispatch are not capped. Set to 0 to disable
+    # (legacy behavior).
+    max-retry-credentials-per-provider: 0
+
     # Maximum cooldown wait in seconds between retry rounds.
     # Set to 0 or below to never wait for credential cooldown.
     # Retry rounds that need no wait remain controlled by request-retry.

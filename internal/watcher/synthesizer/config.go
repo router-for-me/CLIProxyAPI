@@ -151,6 +151,21 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		if key != "" {
 			attrs["api_key"] = key
 		}
+		name := strings.TrimSpace(entry.Name)
+		if name == "" && (sourceName == "gemini" || sourceName == "interactions") {
+			// Legacy lists have no group name. Use the same deterministic label
+			// that NormalizeConfigLayout assigns so migration does not change the
+			// scheduling group identity. Prefer the pre-sanitization position so
+			// skipped or duplicate entries cannot shift later labels.
+			index := entry.SourceIndex
+			if index <= 0 {
+				index = i + 1
+			}
+			name = fmt.Sprintf("%s-%d", sourceName, index)
+		}
+		if name != "" {
+			attrs[coreauth.AttributeProviderName] = name
+		}
 		metadata := map[string]any{}
 		if entry.DisableCooling != nil {
 			metadata["disable_cooling"] = *entry.DisableCooling

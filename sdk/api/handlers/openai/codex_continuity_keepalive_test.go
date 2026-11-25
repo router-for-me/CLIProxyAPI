@@ -3,6 +3,7 @@ package openai
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -360,6 +362,7 @@ func TestResponsesContinuityRequestAndTraceIDCorrelation(t *testing.T) {
 
 type bootstrapChunkErrCodexExecutor struct {
 	streamCalls atomic.Int32
+	err         error
 }
 
 func (e *bootstrapChunkErrCodexExecutor) Identifier() string { return "codex" }
@@ -370,7 +373,11 @@ func (e *bootstrapChunkErrCodexExecutor) ExecuteStream(ctx context.Context, _ *c
 	coreexecutor.MarkUpstreamAttempt(ctx)
 	e.streamCalls.Add(1)
 	ch := make(chan coreexecutor.StreamChunk, 1)
-	ch <- coreexecutor.StreamChunk{Err: bootstrapChunkQuotaErr{}}
+	if e.err != nil {
+		ch <- coreexecutor.StreamChunk{Err: e.err}
+	} else {
+		ch <- coreexecutor.StreamChunk{Err: bootstrapChunkQuotaErr{}}
+	}
 	close(ch)
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
@@ -383,6 +390,11 @@ func (e *bootstrapChunkErrCodexExecutor) CountTokens(context.Context, *coreauth.
 func (e *bootstrapChunkErrCodexExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
 }
+
+type bootstrapChunkServerErr struct{}
+
+func (bootstrapChunkServerErr) Error() string   { return "bootstrap upstream failure" }
+func (bootstrapChunkServerErr) StatusCode() int { return http.StatusInternalServerError }
 
 type bootstrapChunkQuotaErr struct{}
 
@@ -452,6 +464,64 @@ func TestResponsesSSEBootstrapRetriesCannotBypassContinuityTermination(t *testin
 				t.Fatalf("streamCalls=%d continuityCalls=%d, want 1 and 1 (no bootstrap-retries bypass)", exec.streamCalls.Load(), continuityCalls.Load())
 			}
 		})
+	}
+}
+
+func testResponsesBootstrapRetry(t *testing.T, cap int, streamErr error) (int, int32) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(1, 0, 0)
+	manager.SetConfig(&internalconfig.Config{MaxRetryCredentialsPerProvider: cap})
+	exec := &bootstrapChunkErrCodexExecutor{err: streamErr}
+	manager.RegisterExecutor(exec)
+
+	for i := 0; i < 2; i++ {
+		auth := &coreauth.Auth{ID: fmt.Sprintf("codex-bootstrap-cap-%d-%d", cap, i), Provider: "codex", Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	}
+
+	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 3}}
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(cfg, manager))
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5-codex","stream":true,"input":"hi"}`))
+
+	h.Responses(c)
+	return recorder.Code, exec.streamCalls.Load()
+}
+
+func TestResponsesBootstrapRetryRespectsProviderAttemptCap(t *testing.T) {
+	status, calls := testResponsesBootstrapRetry(t, 1, bootstrapChunkServerErr{})
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", status)
+	}
+	if calls != 1 {
+		t.Fatalf("streamCalls = %d, want 1 (bootstrap retry must not try a second key in the capped provider group)", calls)
+	}
+}
+
+func TestResponsesBootstrapRetryKeepsOriginalQuotaError(t *testing.T) {
+	status, calls := testResponsesBootstrapRetry(t, 1, bootstrapChunkQuotaErr{})
+	if calls != 1 {
+		t.Fatalf("streamCalls = %d, want 1", calls)
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want the upstream 429 preserved instead of auth_not_found", status)
+	}
+}
+
+func TestResponsesBootstrapRetryStillRunsWhenCapDisabled(t *testing.T) {
+	status, calls := testResponsesBootstrapRetry(t, 0, bootstrapChunkServerErr{})
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", status)
+	}
+	if calls < 2 {
+		t.Fatalf("streamCalls = %d, want bootstrap retries without a cap", calls)
 	}
 }
 
@@ -2007,4 +2077,78 @@ func TestResponsesWebsocketFailoverInPlaceRespectsPreOutput429GateWithZeroBootst
 			t.Fatalf("turn2 RequestIDs mismatched across initial pick, continuity gate, and failover replay: picks=%v conts=%v", picks, conts)
 		}
 	})
+}
+
+func TestResponsesWebsocketInPlaceFailoverRespectsProviderAttemptCap(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(1, 0, 0)
+	manager.SetConfig(&internalconfig.Config{MaxRetryCredentialsPerProvider: 1})
+	pinnedID := "codex-ws-cap-pinned"
+	altID := "codex-ws-cap-alt"
+	exec := &wsPinnedFailoverContinuityExecutor{pinnedID: pinnedID, altID: altID}
+	manager.RegisterExecutor(exec)
+
+	for i, id := range []string{pinnedID, altID} {
+		auth := &coreauth.Auth{
+			ID:       id,
+			Provider: "codex",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"websockets": "true",
+				"priority":   fmt.Sprintf("%d", 10-i),
+			},
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+		registered := id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(registered) })
+	}
+
+	// bootstrap-retries stays at its default of 0: the failed pinned stream must
+	// still be charged, otherwise the in-place failover below reaches the sibling.
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+	router := gin.New()
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial: %v", errDial)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil && !strings.Contains(errClose.Error(), "use of closed network connection") {
+			t.Logf("websocket close: %v", errClose)
+		}
+	}()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5-codex","input":[]}`)); errWrite != nil {
+		t.Fatalf("write turn 1: %v", errWrite)
+	}
+	_, payload1, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read turn 1: %v", errRead)
+	}
+	if !strings.Contains(string(payload1), "response.completed") {
+		t.Fatalf("turn 1 payload = %s, want response.completed", payload1)
+	}
+
+	// Turn 2 fails on the pinned credential before emitting any output.
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5-codex","input":[]}`)); errWrite != nil {
+		t.Fatalf("write turn 2: %v", errWrite)
+	}
+	_, payload2, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read turn 2: %v", errRead)
+	}
+	if !strings.Contains(string(payload2), "usage_limit_reached") {
+		t.Fatalf("turn 2 payload = %s, want the upstream quota error", payload2)
+	}
+	if got := exec.altCalls.Load(); got != 0 {
+		t.Fatalf("altCalls = %d, want 0 (cap 1 must keep in-place failover out of the exhausted group)", got)
+	}
 }

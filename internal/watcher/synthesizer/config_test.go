@@ -52,6 +52,19 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 		validate   func(*testing.T, []*coreauth.Auth)
 	}{
 		{
+			name: "gemini key preserves provider group name",
+			geminiKeys: []config.GeminiKey{
+				{Name: "pool-a", APIKey: "test-key-123", Prefix: "team-a"},
+			},
+			wantLen: 1,
+			validate: func(t *testing.T, auths []*coreauth.Auth) {
+				t.Helper()
+				if got := auths[0].Attributes[coreauth.AttributeProviderName]; got != "pool-a" {
+					t.Fatalf("provider_name = %q, want pool-a", got)
+				}
+			},
+		},
+		{
 			name: "single gemini key",
 			geminiKeys: []config.GeminiKey{
 				{APIKey: "test-key-123", Prefix: "team-a"},
@@ -75,6 +88,22 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 				}
 				if auths[0].Status != coreauth.StatusActive {
 					t.Errorf("expected status active, got %s", auths[0].Status)
+				}
+			},
+		},
+		{
+			name: "legacy unnamed gemini keys use deterministic group labels",
+			geminiKeys: []config.GeminiKey{
+				{APIKey: "test-key-a"},
+				{APIKey: "test-key-b"},
+			},
+			wantLen: 2,
+			validate: func(t *testing.T, auths []*coreauth.Auth) {
+				t.Helper()
+				for i, want := range []string{"gemini-1", "gemini-2"} {
+					if got := auths[i].Attributes[coreauth.AttributeProviderName]; got != want {
+						t.Fatalf("auths[%d] provider_name = %q, want %q", i, got, want)
+					}
 				}
 			},
 		},
@@ -150,7 +179,8 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 			synth := NewConfigSynthesizer()
 			ctx := &SynthesisContext{
 				Config: &config.Config{
-					GeminiKey: tt.geminiKeys,
+					MaxRetryCredentialsPerProvider: 1,
+					GeminiKey:                      tt.geminiKeys,
 				},
 				Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 				IDGenerator: NewStableIDGenerator(),
@@ -1496,5 +1526,151 @@ func TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn(t *testing.T) {
 	}
 	if len(keylessAuths) != 1 || keylessAuths[0].ProxyConnectionPool == nil {
 		t.Fatalf("keyless OpenAI-compatible entry lost its group connection-pool block: %+v", keylessAuths)
+	}
+}
+
+func TestGeminiGroupIdentityStableAcrossLegacyMigration(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{
+			name: "valid entries",
+			raw: `gemini-api-key:
+  - api-key: key-a
+    models:
+      - name: gemini-4-hydrogen
+  - api-key: key-b
+    models:
+      - name: gemini-4-hydrogen
+`,
+			want: 2,
+		},
+		{
+			name: "invalid leading entry",
+			raw: `gemini-api-key:
+  - api-key: ""
+    models:
+      - name: gemini-4-hydrogen
+  - api-key: key-b
+    models:
+      - name: gemini-4-hydrogen
+`,
+			want: 1,
+		},
+		{
+			name: "duplicate leading entry",
+			raw: `gemini-api-key:
+  - api-key: key-a
+    models:
+      - name: gemini-4-hydrogen
+  - api-key: key-a
+    models:
+      - name: gemini-4-hydrogen
+  - api-key: key-b
+    models:
+      - name: gemini-4-hydrogen
+`,
+			want: 2,
+		},
+	}
+	synth := NewConfigSynthesizer()
+	groupNames := func(t *testing.T, cfg *config.Config) []string {
+		t.Helper()
+		auths, err := synth.Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+		if err != nil {
+			t.Fatalf("Synthesize() error = %v", err)
+		}
+		names := make([]string, 0, len(auths))
+		for _, auth := range auths {
+			names = append(names, auth.Attributes[coreauth.AttributeProviderName])
+		}
+		return names
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			legacy, err := config.ParseConfigBytes([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("ParseConfigBytes(legacy) error = %v", err)
+			}
+			legacy.MaxRetryCredentialsPerProvider = 1
+			before := groupNames(t, legacy)
+
+			migrated, _, err := config.NormalizeConfigLayout([]byte(tt.raw), true)
+			if err != nil {
+				t.Fatalf("NormalizeConfigLayout() error = %v", err)
+			}
+			roundTripped, err := config.ParseConfigBytes(migrated)
+			if err != nil {
+				t.Fatalf("ParseConfigBytes(migrated) error = %v", err)
+			}
+			roundTripped.MaxRetryCredentialsPerProvider = 1
+			after := groupNames(t, roundTripped)
+
+			if len(before) != tt.want || len(after) != tt.want {
+				t.Fatalf("group names before=%v after=%v, want %d keys", before, after, tt.want)
+			}
+			for i := range before {
+				if before[i] != after[i] {
+					t.Fatalf("group identity changed across migration at %d: before=%q after=%q", i, before[i], after[i])
+				}
+			}
+		})
+	}
+}
+
+func TestUnnamedV8GeminiGroupSharesProviderName(t *testing.T) {
+	for _, groupName := range []string{"", "\n      name: \"\"", "\n      name: \"   \"", "\n      name: null"} {
+		raw := []byte(`config-version: 8
+api-keys:
+  gemini:
+    - ` + groupName + `
+      keys:
+        - api-key: key-a
+        - api-key: key-b
+      models:
+        - name: gemini-4-hydrogen
+`)
+		cfg, err := config.ParseConfigBytes(raw)
+		if err != nil {
+			t.Fatalf("ParseConfigBytes() error = %v", err)
+		}
+		cfg.MaxRetryCredentialsPerProvider = 1
+		auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+		if err != nil {
+			t.Fatalf("Synthesize() error = %v", err)
+		}
+		if len(auths) != 2 {
+			t.Fatalf("auth count = %d, want 2", len(auths))
+		}
+		first := auths[0].Attributes[coreauth.AttributeProviderName]
+		second := auths[1].Attributes[coreauth.AttributeProviderName]
+		if first == "" || first != second {
+			t.Fatalf("group %q: provider_name = %q and %q, want one shared non-empty group", groupName, first, second)
+		}
+	}
+}
+
+func TestProviderNameAttributeAlwaysPublished(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	for _, cap := range []int{0, 1} {
+		cfg := &config.Config{
+			MaxRetryCredentialsPerProvider: cap,
+			GeminiKey:                      []config.GeminiKey{{Name: "pool-a", APIKey: "k"}},
+		}
+		auths, err := synth.Synthesize(&SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()})
+		if err != nil {
+			t.Fatalf("Synthesize() error = %v", err)
+		}
+		if len(auths) != 1 {
+			t.Fatalf("auth count = %d, want 1", len(auths))
+		}
+		// The attribute is internal routing metadata; it must be present before
+		// the cap is enabled so a 0 -> N reload has no unlabeled window.
+		if got := auths[0].Attributes[coreauth.AttributeProviderName]; got != "pool-a" {
+			t.Fatalf("cap=%d provider_name = %q, want pool-a", cap, got)
+		}
 	}
 }

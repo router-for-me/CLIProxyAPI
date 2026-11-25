@@ -1714,6 +1714,7 @@ func (m *Manager) closestCooldownWaitWithAttemptedForRequest(ctx context.Context
 		return 0, false
 	}
 	now := time.Now()
+	budget := providerAttemptBudgetFromContext(ctx)
 	if defaultRequestRetry < 0 {
 		defaultRequestRetry = 0
 	}
@@ -1740,6 +1741,9 @@ func (m *Manager) closestCooldownWaitWithAttemptedForRequest(ctx context.Context
 			continue
 		}
 		if !eligibility.allows(auth) {
+			continue
+		}
+		if providerAttemptBudgetExcludes(budget, auth) {
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
@@ -1816,6 +1820,7 @@ func (m *Manager) retryAllowedForRequest(ctx context.Context, attempt int, provi
 		return false
 	}
 	now := time.Now()
+	budget := providerAttemptBudgetFromContext(ctx)
 	if defaultRequestRetry < 0 {
 		defaultRequestRetry = 0
 	}
@@ -1842,6 +1847,9 @@ func (m *Manager) retryAllowedForRequest(ctx context.Context, attempt int, provi
 			continue
 		}
 		if !eligibility.allows(auth) {
+			continue
+		}
+		if providerAttemptBudgetExcludes(budget, auth) {
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
@@ -2894,6 +2902,9 @@ func (m *Manager) HasAlternativeTargetForModel(ctx context.Context, providers []
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			continue
+		}
+		if providerAttemptBudgetExcludes(providerAttemptBudgetFromContext(ctx), candidate) {
 			continue
 		}
 		candidates = append(candidates, candidate)

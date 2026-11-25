@@ -156,12 +156,16 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 	sanitizedQuery := sanitizeQuery(c.Request.URL.RawQuery)
 	baseReqHeaders := relayRequestHeaders(c.Request.Header)
+	// Bind the request-scoped provider budget: this loop iterates credentials
+	// itself, so the per-provider cap has to be applied explicitly.
+	ctx = h.authManager.WithProviderAttemptBudget(ctx)
 	maxRetryCreds := h.authManager.MaxRetryCredentials()
 	tried := make(map[string]struct{})
 	var lastResp *relayAttemptResponse
 	var lastErr error
 
 	for attempt := 0; maxRetryCreds <= 0 || attempt < maxRetryCreds; attempt++ {
+		h.authManager.SeedProviderAttemptBudgetExclusions(ctx, tried)
 		selected, errSelect := h.selectMetaAuthExcluding(ctx, selectionOpts, tried)
 		if errSelect != nil {
 			if lastResp != nil {
@@ -192,6 +196,10 @@ func (h *Handler) Handle(c *gin.Context) {
 			return
 		}
 		tried[selected.ID] = struct{}{}
+		// Record the group before forwarding: if a reload drops this credential
+		// while the request is in flight, the failure must still charge the
+		// group that served it.
+		h.authManager.RememberProviderAttemptGroup(ctx, selected)
 
 		if exec, okExec := h.authManager.Executor("meta"); okExec && exec != nil {
 			if preparer, okPrep := exec.(auth.RequestAuthPreparer); okPrep && preparer.ShouldPrepareRequestAuth(selected) {
@@ -204,6 +212,7 @@ func (h *Handler) Handle(c *gin.Context) {
 					}
 					action, okAction := h.markFailure(ctx, selected, errPrep, nil, prepareSeq)
 					if isRequestScopedContinue(action, okAction) {
+						h.authManager.NoteProviderAttemptFailure(ctx, selected.ID, errPrep)
 						lastResp = nil
 						lastErr = errPrep
 						continue
@@ -225,6 +234,7 @@ func (h *Handler) Handle(c *gin.Context) {
 				return
 			}
 			if isRequestScopedContinue(action, okAction) {
+				h.authManager.NoteProviderAttemptFailure(ctx, selected.ID, errAttempt)
 				lastResp = nil
 				lastErr = errAttempt
 				continue
@@ -233,6 +243,11 @@ func (h *Handler) Handle(c *gin.Context) {
 			return
 		}
 		if isRequestScopedContinue(action, okAction) {
+			h.authManager.NoteProviderAttemptFailure(ctx, selected.ID, &auth.Error{
+				Code:       "provider_attempt_failed",
+				Message:    "request-scoped failover",
+				HTTPStatus: respAttempt.statusCode,
+			})
 			lastResp = respAttempt
 			lastErr = nil
 			continue

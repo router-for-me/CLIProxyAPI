@@ -1017,6 +1017,16 @@ type MetaModel = CodexModel
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
+	// SourceIndex preserves the credential position in the original list so
+	// synthesized group labels stay stable when sanitization drops entries.
+	// It is runtime metadata and is not serialized.
+	SourceIndex int `yaml:"-" json:"-"`
+
+	// Name is the optional provider-group name from the v8 api-keys.gemini
+	// group. It is preserved on the synthesized credential so request-scoped
+	// routing budgets can treat credentials from one group as one provider.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 

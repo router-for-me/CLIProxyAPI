@@ -1017,6 +1017,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var forwardErrMsg *interfaces.ErrorMessage
 
 		turnExecutionParent := coreauth.WithFreshRequestContinuitySession(executionParent)
+		if h.AuthManager != nil {
+			// One budget per downstream turn: in-place failover rebuilds cliCtx
+			// from this parent for every attempt.
+			turnExecutionParent = h.AuthManager.WithProviderAttemptBudget(turnExecutionParent)
+		}
 		for {
 			lastAttemptedAuthID = pinnedAuthID
 			attemptedUpstreamMode = responsesWebsocketUpstreamModeUnknown

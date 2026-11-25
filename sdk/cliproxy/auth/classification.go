@@ -18,6 +18,8 @@ const (
 	AttributeCodexAlphaSearch     = "codex_alpha_search"
 	AttributeCodexDisableCloaking = "codex_disable_cloaking"
 	AttributeConfigIndex          = "config_index"
+	AttributeProviderKey          = "provider_key"
+	AttributeProviderName         = "provider_name"
 	AttributePath                 = "path"
 	AttributeRuntimeOnly          = "runtime_only"
 	AttributeSource               = "source"

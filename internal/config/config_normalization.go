@@ -551,6 +551,9 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 	out := entries[:0]
 	for i := range entries {
 		entry := entries[i]
+		if entry.SourceIndex <= 0 {
+			entry.SourceIndex = i + 1
+		}
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		if entry.APIKey == "" && entry.BaseURL == "" {

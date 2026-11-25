@@ -91,6 +91,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.MaxRetryCredentials != newCfg.MaxRetryCredentials {
 		changes = append(changes, fmt.Sprintf("max-retry-credentials: %d -> %d", oldCfg.MaxRetryCredentials, newCfg.MaxRetryCredentials))
 	}
+	if oldCfg.MaxRetryCredentialsPerProvider != newCfg.MaxRetryCredentialsPerProvider {
+		changes = append(changes, fmt.Sprintf("max-retry-credentials-per-provider: %d -> %d", oldCfg.MaxRetryCredentialsPerProvider, newCfg.MaxRetryCredentialsPerProvider))
+	}
 	if oldCfg.MaxRetryInterval != newCfg.MaxRetryInterval {
 		changes = append(changes, fmt.Sprintf("max-retry-interval: %d -> %d", oldCfg.MaxRetryInterval, newCfg.MaxRetryInterval))
 	}
@@ -237,6 +240,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.GeminiKey {
 			o := oldCfg.GeminiKey[i]
 			n := newCfg.GeminiKey[i]
+			if strings.TrimSpace(o.Name) != strings.TrimSpace(n.Name) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].name: %s -> %s", i, strings.TrimSpace(o.Name), strings.TrimSpace(n.Name)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}
@@ -273,6 +279,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.InteractionsKey {
 			o := oldCfg.InteractionsKey[i]
 			n := newCfg.InteractionsKey[i]
+			if strings.TrimSpace(o.Name) != strings.TrimSpace(n.Name) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].name: %s -> %s", i, strings.TrimSpace(o.Name), strings.TrimSpace(n.Name)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(changes, fmt.Sprintf("interactions[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
 			}

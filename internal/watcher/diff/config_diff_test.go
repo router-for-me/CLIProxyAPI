@@ -982,3 +982,26 @@ func TestBuildConfigChangeDetails_VertexRequestScopedErrors(t *testing.T) {
 		t.Fatalf("expected no diff between nil and empty RequestScopedErrors slices, got %v", noDiff)
 	}
 }
+
+func TestBuildConfigChangeDetails_GroupNameRenames(t *testing.T) {
+	oldCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{
+			{APIKey: "g1", Name: "pool-a", BaseURL: "http://g"},
+		},
+		InteractionsKey: []config.GeminiKey{
+			{APIKey: "i1", Name: "interactions-a", BaseURL: "http://i"},
+		},
+	}
+	newCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{
+			{APIKey: "g1", Name: "pool-b", BaseURL: "http://g"},
+		},
+		InteractionsKey: []config.GeminiKey{
+			{APIKey: "i1", Name: "interactions-b", BaseURL: "http://i"},
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "gemini[0].name: pool-a -> pool-b")
+	expectContains(t, changes, "interactions[0].name: interactions-a -> interactions-b")
+}
