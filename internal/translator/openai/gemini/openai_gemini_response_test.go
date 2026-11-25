@@ -678,3 +678,166 @@ func TestConvertOpenAIResponseToGeminiStream_FirstChunkWithRolePreservesPayload(
 		}
 	})
 }
+
+func TestConvertOpenAIResponseToGeminiStream_UsageMetadataAndNullUsage(t *testing.T) {
+	assertUsage := func(t *testing.T, payload []byte, wantPrompt, wantCandidates, wantTotal int64) {
+		t.Helper()
+		if got := ojson.GetBytesNoCopy(payload, "usageMetadata.promptTokenCount").Int(); got != wantPrompt {
+			t.Fatalf("usageMetadata.promptTokenCount = %d, want %d; payload=%s", got, wantPrompt, payload)
+		}
+		if got := ojson.GetBytesNoCopy(payload, "usageMetadata.candidatesTokenCount").Int(); got != wantCandidates {
+			t.Fatalf("usageMetadata.candidatesTokenCount = %d, want %d; payload=%s", got, wantCandidates, payload)
+		}
+		if got := ojson.GetBytesNoCopy(payload, "usageMetadata.totalTokenCount").Int(); got != wantTotal {
+			t.Fatalf("usageMetadata.totalTokenCount = %d, want %d; payload=%s", got, wantTotal, payload)
+		}
+	}
+
+	t.Run("empty_choices_with_null_usage_ignored", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"model":"gpt-test","choices":[],"usage":null}`)
+		out := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, chunk, &param)
+		if len(out) != 0 {
+			t.Fatalf("expected 0 chunks for empty choices with null usage, got %d: %q", len(out), out)
+		}
+	})
+
+	t.Run("empty_choices_with_usage_object", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"model":"gpt-test","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		out := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 usage chunk for empty choices with usage object, got %d: %q", len(out), out)
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "model").String(); got != "gpt-test" {
+			t.Fatalf("model = %q, want gpt-test; payload=%s", got, out[0])
+		}
+		assertUsage(t, out[0], 10, 5, 15)
+	})
+
+	t.Run("intermediate_chunks_with_null_usage_ignored", func(t *testing.T) {
+		var param any
+		ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}`), &param)
+
+		outEmpty := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":null}`), &param)
+		if len(outEmpty) != 0 {
+			t.Fatalf("expected 0 chunks for empty delta with null usage, got %d: %q", len(outEmpty), outEmpty)
+		}
+
+		outContent := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}],"usage":null}`), &param)
+		if len(outContent) != 1 {
+			t.Fatalf("expected 1 content chunk with null usage, got %d: %q", len(outContent), outContent)
+		}
+		if got := ojson.GetBytesNoCopy(outContent[0], "candidates.0.content.parts.0.text").String(); got != "hello" {
+			t.Fatalf("text = %q, want hello; payload=%s", got, outContent[0])
+		}
+		if ojson.GetBytesNoCopy(outContent[0], "usageMetadata").Exists() {
+			t.Fatalf("unexpected usageMetadata on null usage content chunk: %s", outContent[0])
+		}
+	})
+
+	t.Run("finish_reason_with_cooccurring_usage", func(t *testing.T) {
+		var param any
+		ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}],"usage":null}`), &param)
+
+		out := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`), &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk for finish_reason + usage, got %d: %q", len(out), out)
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "candidates.0.finishReason").String(); got != "STOP" {
+			t.Fatalf("finishReason = %q, want STOP; payload=%s", got, out[0])
+		}
+		assertUsage(t, out[0], 12, 8, 20)
+	})
+
+	t.Run("content_and_finish_reason_with_cooccurring_usage", func(t *testing.T) {
+		var param any
+		out := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`), &param)
+		var gotText, gotFinish string
+		var usagePayload []byte
+		for _, c := range out {
+			if s := ojson.GetBytesNoCopy(c, "candidates.0.content.parts.0.text").String(); s != "" {
+				gotText = s
+			}
+			if fr := ojson.GetBytesNoCopy(c, "candidates.0.finishReason").String(); fr != "" {
+				gotFinish = fr
+			}
+			if ojson.GetBytesNoCopy(c, "usageMetadata").Exists() {
+				usagePayload = c
+			}
+		}
+		if gotText != "done" || gotFinish != "STOP" || len(usagePayload) == 0 {
+			t.Fatalf("got text=%q finish=%q hasUsage=%v; chunks=%q", gotText, gotFinish, len(usagePayload) > 0, out)
+		}
+		assertUsage(t, usagePayload, 12, 8, 20)
+	})
+
+	t.Run("reasoning_and_finish_reason_with_cooccurring_usage", func(t *testing.T) {
+		var param any
+		out := ConvertOpenAIResponseToGemini(context.Background(), "deepseek-r1", nil, nil, []byte(`{"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"final thought"},"finish_reason":"length"}],"usage":{"prompt_tokens":15,"completion_tokens":25,"total_tokens":40}}`), &param)
+		var gotThought, gotFinish string
+		var usagePayload []byte
+		for _, c := range out {
+			if ojson.GetBytesNoCopy(c, "candidates.0.content.parts.0.thought").Bool() {
+				gotThought = ojson.GetBytesNoCopy(c, "candidates.0.content.parts.0.text").String()
+			}
+			if fr := ojson.GetBytesNoCopy(c, "candidates.0.finishReason").String(); fr != "" {
+				gotFinish = fr
+			}
+			if ojson.GetBytesNoCopy(c, "usageMetadata").Exists() {
+				usagePayload = c
+			}
+		}
+		if gotThought != "final thought" || gotFinish != "MAX_TOKENS" || len(usagePayload) == 0 {
+			t.Fatalf("got thought=%q finish=%q hasUsage=%v; chunks=%q", gotThought, gotFinish, len(usagePayload) > 0, out)
+		}
+		assertUsage(t, usagePayload, 15, 25, 40)
+	})
+
+	t.Run("content_with_cooccurring_usage_without_finish_reason", func(t *testing.T) {
+		var param any
+		ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`), &param)
+
+		out := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"content":"chunk"},"finish_reason":null}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`), &param)
+		var gotText string
+		var usagePayload []byte
+		for _, c := range out {
+			if s := ojson.GetBytesNoCopy(c, "candidates.0.content.parts.0.text").String(); s != "" {
+				gotText = s
+			}
+			if ojson.GetBytesNoCopy(c, "usageMetadata").Exists() {
+				usagePayload = c
+			}
+		}
+		if gotText != "chunk" || len(usagePayload) == 0 {
+			t.Fatalf("got text=%q hasUsage=%v; chunks=%q", gotText, len(usagePayload) > 0, out)
+		}
+		assertUsage(t, usagePayload, 10, 4, 14)
+	})
+
+	t.Run("tool_calls_and_finish_reason_with_cooccurring_usage", func(t *testing.T) {
+		var param any
+		out := ConvertOpenAIResponseToGemini(context.Background(), "gpt-test", nil, nil, []byte(`{"model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_u1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"go\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":9,"completion_tokens":6,"total_tokens":15}}`), &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk for tool_calls + finish_reason + usage, got %d: %q", len(out), out)
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0.functionCall.name").String(); got != "lookup" {
+			t.Fatalf("functionCall.name = %q, want lookup; payload=%s", got, out[0])
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "candidates.0.finishReason").String(); got != "STOP" {
+			t.Fatalf("finishReason = %q, want STOP; payload=%s", got, out[0])
+		}
+		assertUsage(t, out[0], 9, 6, 15)
+	})
+}
+
+func TestConvertOpenAIResponseToGeminiNonStream_NullUsageIgnored(t *testing.T) {
+	raw := []byte(`{"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":null}`)
+	out := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
+	if ojson.GetBytesNoCopy(out, "usageMetadata").Exists() {
+		t.Fatalf("unexpected usageMetadata on non-stream null usage: %s", out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.text").String(); got != "hello" {
+		t.Fatalf("text = %q, want hello; payload=%s", got, out)
+	}
+}

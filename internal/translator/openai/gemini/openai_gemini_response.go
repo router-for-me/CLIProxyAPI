@@ -78,7 +78,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		// Handle empty choices array (usage-only chunk)
 		if len(choices.Array()) == 0 {
 			// This is a usage-only chunk, handle usage and return
-			if usage := root.Get("usage"); usage.Exists() {
+			if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
 				templateDoc := ojson.NewDocString(`{"candidates":[],"usageMetadata":{}}`)
 
 				// Set model if available
@@ -706,7 +706,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 	}
 
 	// Handle usage information
-	if usage := root.Get("usage"); usage.Exists() {
+	if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
 		setGeminiUsageMetadataFromOpenAIUsageDoc(outDoc, usage)
 	}
 
