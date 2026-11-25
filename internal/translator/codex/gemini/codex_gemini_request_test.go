@@ -653,3 +653,279 @@ func TestConvertGeminiRequestToCodex_NormalizesNumericProtoSchemaTypes_Issue8032
 		}
 	}
 }
+
+func TestConvertGeminiRequestToCodex_ToolChoiceUsesShortMap_Issue8098(t *testing.T) {
+	prefix := strings.Repeat("a", 65)
+	tool1 := prefix + "_first"
+	tool2 := prefix + "_second"
+
+	cases := []struct {
+		name      string
+		buildJSON func() []byte
+	}{
+		{
+			name: "camelCase toolConfig and functionDeclarations",
+			buildJSON: func() []byte {
+				doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+				_ = doc.Set("tools.0.functionDeclarations.0.name", tool1)
+				_ = doc.Set("tools.0.functionDeclarations.1.name", tool2)
+				_ = doc.Set("toolConfig.functionCallingConfig.mode", "ANY")
+				_ = doc.Set("toolConfig.functionCallingConfig.allowedFunctionNames.0", tool2)
+				return doc.Bytes()
+			},
+		},
+		{
+			name: "snake_case tool_config and function_declarations",
+			buildJSON: func() []byte {
+				doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+				_ = doc.Set("tools.0.function_declarations.0.name", tool1)
+				_ = doc.Set("tools.0.function_declarations.1.name", tool2)
+				_ = doc.Set("tool_config.function_calling_config.mode", "ANY")
+				_ = doc.Set("tool_config.function_calling_config.allowed_function_names.0", tool2)
+				return doc.Bytes()
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertGeminiRequestToCodex("gpt-5.1-codex", tc.buildJSON(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+			}
+			declared0 := ojson.GetBytesNoCopy(out, "tools.0.name").String()
+			declared1 := ojson.GetBytesNoCopy(out, "tools.1.name").String()
+			if declared0 == "" || declared1 == "" || declared0 == declared1 {
+				t.Fatalf("expected distinct shortened tool names, got tools.0=%q tools.1=%q; out=%s", declared0, declared1, out)
+			}
+			if gotType := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); gotType != "function" {
+				t.Fatalf("tool_choice.type = %q, want function; out=%s", gotType, out)
+			}
+			if gotName := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); gotName != declared1 {
+				t.Fatalf("tool_choice.name = %q, want %q (not %q); out=%s", gotName, declared1, declared0, out)
+			}
+		})
+	}
+
+	t.Run("multi-entry snake_case allowed_function_names restricts allowed_tools subset", func(t *testing.T) {
+		doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		_ = doc.Set("tools.0.function_declarations.0.name", tool1)
+		_ = doc.Set("tools.0.function_declarations.1.name", tool2)
+		_ = doc.Set("tools.0.function_declarations.2.name", "disallowed_tool")
+		_ = doc.Set("tool_config.function_calling_config.mode", "ANY")
+		_ = doc.Set("tool_config.function_calling_config.allowed_function_names.0", tool1)
+		_ = doc.Set("tool_config.function_calling_config.allowed_function_names.1", tool2)
+
+		out, errConvert := ConvertGeminiRequestToCodex("gpt-5.1-codex", doc.Bytes(), false)
+		if errConvert != nil {
+			t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+		}
+		declared0 := ojson.GetBytesNoCopy(out, "tools.0.name").String()
+		declared1 := ojson.GetBytesNoCopy(out, "tools.1.name").String()
+		if gotType := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); gotType != "allowed_tools" {
+			t.Fatalf("tool_choice.type = %q, want allowed_tools; out=%s", gotType, out)
+		}
+		if gotMode := ojson.GetBytesNoCopy(out, "tool_choice.mode").String(); gotMode != "required" {
+			t.Fatalf("tool_choice.mode = %q, want required; out=%s", gotMode, out)
+		}
+		allowedTools := ojson.GetBytesNoCopy(out, "tool_choice.tools").Array()
+		if len(allowedTools) != 2 {
+			t.Fatalf("len(tool_choice.tools) = %d, want 2 (excluding disallowed_tool); out=%s", len(allowedTools), out)
+		}
+		if allowedTools[0].Get("type").String() != "function" || allowedTools[0].Get("name").String() != declared0 {
+			t.Fatalf("tool_choice.tools.0 = %s, want function %q; out=%s", allowedTools[0].Raw, declared0, out)
+		}
+		if allowedTools[1].Get("type").String() != "function" || allowedTools[1].Get("name").String() != declared1 {
+			t.Fatalf("tool_choice.tools.1 = %s, want function %q; out=%s", allowedTools[1].Raw, declared1, out)
+		}
+	})
+}
+
+func TestConvertGeminiRequestToCodex_SnakeCaseSDKFields_Issue8098(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		wantEffort string
+	}{
+		{
+			name: "snake_case tools, parameters_json_schema, tool_config, thinking_budget",
+			input: `{
+				"contents": [{"role": "user", "parts": [{"text": "check weather"}]}],
+				"tools": [{
+					"function_declarations": [{
+						"name": "lookup_weather",
+						"description": "Get weather",
+						"parameters": null,
+						"parameters_json_schema": {
+							"type": "OBJECT",
+							"properties": {"city": {"type": "STRING"}}
+						}
+					}]
+				}],
+				"tool_config": {
+					"function_calling_config": {
+						"mode": "ANY",
+						"allowed_function_names": ["lookup_weather"]
+					}
+				},
+				"generation_config": {
+					"thinking_config": {
+						"thinking_budget": 1024
+					}
+				}
+			}`,
+			wantEffort: "low",
+		},
+		{
+			name: "camel generationConfig with snake thinking_config and mixed toolConfig",
+			input: `{
+				"contents": [{"role": "user", "parts": [{"text": "check weather"}]}],
+				"tools": [{
+					"function_declarations": [{
+						"name": "lookup_weather",
+						"parameters_json_schema": {
+							"type": "OBJECT",
+							"properties": {"city": {"type": "STRING"}}
+						}
+					}]
+				}],
+				"toolConfig": {
+					"function_calling_config": {
+						"mode": "ANY",
+						"allowed_function_names": ["lookup_weather"]
+					}
+				},
+				"generationConfig": {
+					"thinking_config": {
+						"thinking_level": "HIGH"
+					}
+				}
+			}`,
+			wantEffort: "high",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertGeminiRequestToCodex("gpt-5.1-codex", []byte(tc.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tools.0.name").String(); got != "lookup_weather" {
+				t.Fatalf("tools.0.name = %q, want lookup_weather; out=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tools.0.parameters.type").String(); got != "object" {
+				t.Fatalf("tools.0.parameters.type = %q, want object; out=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tools.0.parameters.properties.city.type").String(); got != "string" {
+				t.Fatalf("tools.0.parameters.properties.city.type = %q, want string; out=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "function" {
+				t.Fatalf("tool_choice.type = %q, want function; out=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); got != "lookup_weather" {
+				t.Fatalf("tool_choice.name = %q, want lookup_weather; out=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "reasoning.effort").String(); got != tc.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; out=%s", got, tc.wantEffort, out)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToCodex_FunctionCallArgsDefaults_Issue8098(t *testing.T) {
+	cases := []struct {
+		name     string
+		partJSON string
+		wantArgs string
+	}{
+		{
+			name:     "omitted args",
+			partJSON: `{"functionCall":{"name":"get_time"}}`,
+			wantArgs: `{}`,
+		},
+		{
+			name:     "null args",
+			partJSON: `{"functionCall":{"name":"get_time","args":null}}`,
+			wantArgs: `{}`,
+		},
+		{
+			name:     "non-object args",
+			partJSON: `{"functionCall":{"name":"get_time","args":[1,2]}}`,
+			wantArgs: `{}`,
+		},
+		{
+			name:     "object args preserved",
+			partJSON: `{"functionCall":{"name":"get_time","args":{"tz":"UTC"}}}`,
+			wantArgs: `{"tz":"UTC"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"contents":[{"role":"model","parts":[%s]}]}`, tc.partJSON))
+			out, errConvert := ConvertGeminiRequestToCodex("gpt-5.1-codex", payload, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+			}
+			argsRes := ojson.GetBytesNoCopy(out, "input.0.arguments")
+			if !argsRes.Exists() || argsRes.Type != ojson.String {
+				t.Fatalf("input.0.arguments missing or non-string (%v); out=%s", argsRes.Type, out)
+			}
+			if argsRes.String() != tc.wantArgs {
+				t.Fatalf("input.0.arguments = %q, want %q; out=%s", argsRes.String(), tc.wantArgs, out)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToCodex_NullThinkingBudgetDoesNotDisableReasoning_Issue8098(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		wantEffort string
+	}{
+		{
+			name:       "null camelCase thinkingBudget falls back to default medium",
+			input:      `{"generationConfig":{"thinkingConfig":{"thinkingBudget":null}}}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "null snake_case thinking_budget falls back to default medium",
+			input:      `{"generation_config":{"thinking_config":{"thinking_budget":null}}}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "string thinkingBudget ignored",
+			input:      `{"generationConfig":{"thinkingConfig":{"thinkingBudget":"invalid"}}}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "null thinkingBudget falls back to numeric thinking_budget",
+			input:      `{"generationConfig":{"thinkingConfig":{"thinkingBudget":null,"thinking_budget":20000}}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "null thinkingLevel does not shadow numeric thinkingBudget",
+			input:      `{"generationConfig":{"thinkingLevel":null,"thinkingConfig":{"thinkingLevel":null,"thinkingBudget":20000}}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "explicit numeric zero thinkingBudget disables reasoning",
+			input:      `{"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
+			wantEffort: "none",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertGeminiRequestToCodex("gpt-5.1-codex", []byte(tc.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "reasoning.effort").String(); got != tc.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; out=%s", got, tc.wantEffort, out)
+			}
+		})
+	}
+}

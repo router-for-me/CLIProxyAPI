@@ -123,7 +123,7 @@ func TestHomeCredentialBoundaryWarnLogUsesSafeDiagnostic(t *testing.T) {
 	auth := &Auth{ID: "auth-1", Provider: "antigravity"}
 	executor := &requestPrepareExecutor{prepareErr: upstreamErr}
 	selection := &HomeDispatchSelection{Auth: auth, Executor: executor, Provider: "antigravity"}
-	_, errPrepare := NewManager(nil, nil, nil).prepareHomeRequestAuth(context.Background(), executor, selection)
+	_, errPrepare := NewManager(nil, nil, nil).prepareHomeRequestAuth(context.Background(), selection, "gemini-2.5-pro")
 	if errPrepare == nil || errPrepare.Error() != upstreamErr.message {
 		t.Fatalf("operation error = %v, want generic error %q", errPrepare, upstreamErr.message)
 	}

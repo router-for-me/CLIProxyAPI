@@ -595,10 +595,37 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(changes, fmt.Sprintf("vertex[%d].headers: updated", i))
 			}
 			changes = appendOptionalIntChange(changes, fmt.Sprintf("vertex[%d].request-retry", i), o.RequestRetry, n.RequestRetry)
+			if !equalRequestScopedErrorRules(o.RequestScopedErrors, n.RequestScopedErrors) {
+				changes = append(changes, fmt.Sprintf("vertex[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+			}
 		}
 	}
 
 	return changes
+}
+
+func equalRequestScopedErrorRules(a, b []config.RequestScopedErrorRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Status != b[i].Status || a[i].Action != b[i].Action || !equalStringSlices(a[i].Match, b[i].Match) || !equalStringSlices(a[i].MatchRegexr, b[i].MatchRegexr) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func trimStrings(in []string) []string {

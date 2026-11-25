@@ -29,6 +29,7 @@ type loadedPlugin struct {
 	plugin           pluginapi.Plugin
 	registered       bool
 	needsRecovery    bool
+	homeSuspended    bool // Protected by Host.mu.
 	client           pluginClient
 	callbackInstance *hostCallbackInstance
 }
@@ -443,6 +444,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			priority: item.Priority,
 			meta:     plugin.Metadata,
 			plugin:   plugin,
+			loaded:   lp,
 		}
 		h.updateActivePluginRecord(record)
 		readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
@@ -1153,19 +1155,14 @@ func (h *Host) pluginNeedsUsageRecovery(pluginID string) bool {
 	return unrecovered
 }
 
-func (h *Host) setPluginNeedsRecovery(lp *loadedPlugin, needsRecovery bool) {
-	if h == nil || lp == nil {
-		return
-	}
-	h.mu.Lock()
-	lp.needsRecovery = needsRecovery
-	h.mu.Unlock()
-}
-
 func (h *Host) callQuiesceWithOutcome(ctx context.Context, lp *loadedPlugin) (quiesced bool, proceed bool) {
 	if h == nil || lp == nil || lp.client == nil {
 		return false, false
 	}
+	// The plugin may stop taking new requests before its quiesce RPC returns.
+	h.mu.Lock()
+	lp.homeSuspended = true
+	h.mu.Unlock()
 	callDone := make(chan struct{})
 	callCtx, finishCall := withPluginCallFinish(ctx, func() {
 		close(callDone)
@@ -1180,19 +1177,16 @@ func (h *Host) callQuiesceWithOutcome(ctx context.Context, lp *loadedPlugin) (qu
 	if errQuiesce != nil {
 		logQuiesceError(lp.id, errQuiesce)
 	}
-	if !okCall {
-		h.setPluginNeedsRecovery(lp, true)
-		return false, false
+	unsupported := okCall && quiesceUnsupported(errQuiesce)
+	h.mu.Lock()
+	if unsupported {
+		lp.homeSuspended = lp.needsRecovery
+	} else {
+		lp.needsRecovery = true
 	}
-	if errQuiesce == nil {
-		h.setPluginNeedsRecovery(lp, true)
-		return true, true
-	}
-	if quiesceUnsupported(errQuiesce) {
-		return false, true
-	}
-	h.setPluginNeedsRecovery(lp, true)
-	return false, false
+	h.mu.Unlock()
+	quiesced = okCall && errQuiesce == nil
+	return quiesced, quiesced || unsupported
 }
 
 func logQuiesceError(id string, errQuiesce error) {
@@ -1272,6 +1266,7 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 		priority: item.Priority,
 		meta:     plugin.Metadata,
 		plugin:   plugin,
+		loaded:   lp,
 	}
 	h.updateActivePluginRecord(record)
 	return record, pluginFile{
@@ -1331,6 +1326,10 @@ func (h *Host) updateActivePluginRecord(record capabilityRecord) {
 	h.pluginFileVersions[path] = version
 	h.activePluginVersions[id] = version
 	h.activePluginPaths[id] = path
+	if record.loaded != nil && !record.loaded.needsRecovery {
+		// A recovered instance can take Home requests once its capabilities are published.
+		record.loaded.homeSuspended = false
+	}
 
 	raw := h.snapshot.Load()
 	snap, _ := raw.(*Snapshot)
