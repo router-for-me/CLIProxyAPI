@@ -1120,6 +1120,107 @@ func TestConvertGeminiResponseToOpenAI_SeparatesDeltaPayloadFromTerminalFinishRe
 	})
 }
 
+func TestConvertGeminiResponseToOpenAI_NullOrEmptyFinishReasonDoesNotClobberCachedReason(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("null finishReason in trailing usage chunk preserves cached finishReason", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"index":0,"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`)
+		chunk2 := []byte(`{"candidates":[{"index":0,"finishReason":null}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}`)
+
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, chunk1, &param)
+		out2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, chunk2, &param)
+		if len(out2) != 1 {
+			t.Fatalf("output count = %d, want 1; outputs=%q", len(out2), out2)
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("finish_reason = %q, want %q; payload=%s", got, "stop", out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.native_finish_reason").String(); got != "stop" {
+			t.Fatalf("native_finish_reason = %q, want %q; payload=%s", got, "stop", out2[0])
+		}
+	})
+
+	t.Run("empty or whitespace finishReason preserves cached finishReason until DONE", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"index":0,"content":{"parts":[{"text":"hi"}]},"finishReason":"MAX_TOKENS"}]}`)
+		chunk2 := []byte(`{"candidates":[{"index":0,"finishReason":""}]}`)
+		chunk3 := []byte(`{"candidates":[{"index":0,"finishReason":"   "}]}`)
+
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, chunk1, &param)
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, chunk2, &param)
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, chunk3, &param)
+		done := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, []byte("[DONE]"), &param)
+		if len(done) != 1 {
+			t.Fatalf("DONE output count = %d, want 1; outputs=%q", len(done), done)
+		}
+		if got := ojson.GetBytesNoCopy(done[0], "choices.0.finish_reason").String(); got != "length" {
+			t.Fatalf("finish_reason = %q, want %q; payload=%s", got, "length", done[0])
+		}
+		if got := ojson.GetBytesNoCopy(done[0], "choices.0.native_finish_reason").String(); got != "max_tokens" {
+			t.Fatalf("native_finish_reason = %q, want %q; payload=%s", got, "max_tokens", done[0])
+		}
+	})
+
+	t.Run("non-streaming null or empty finishReason keeps null finish_reason", func(t *testing.T) {
+		for _, rawFinish := range []string{"null", `""`, `"   "`} {
+			upstream := []byte(`{"candidates":[{"index":0,"content":{"parts":[{"text":"hi"}]},"finishReason":` + rawFinish + `}]}`)
+			output := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-2.5-flash", nil, nil, upstream, nil)
+			fr := ojson.GetBytesNoCopy(output, "choices.0.finish_reason")
+			if fr.Type != ojson.Null {
+				t.Fatalf("finishReason=%s: finish_reason = %s, want null; payload=%s", rawFinish, fr.Raw, output)
+			}
+			nfr := ojson.GetBytesNoCopy(output, "choices.0.native_finish_reason")
+			if nfr.Type != ojson.Null {
+				t.Fatalf("finishReason=%s: native_finish_reason = %s, want null; payload=%s", rawFinish, nfr.Raw, output)
+			}
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAI_FunctionCallNullOrNonObjectArgsUsesEmptyObject(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		rawArgs string
+	}{
+		{name: "null", rawArgs: "null"},
+		{name: "array", rawArgs: "[]"},
+		{name: "string", rawArgs: `"invalid"`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_time","args":` + tc.rawArgs + `}}]},"finishReason":"STOP"}]}`)
+
+			var param any
+			streamOut := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, upstream, &param)
+			if len(streamOut) != 1 {
+				t.Fatalf("streaming output count = %d, want 1", len(streamOut))
+			}
+			streamArgs := ojson.GetBytesNoCopy(streamOut[0], "choices.0.delta.tool_calls.0.function.arguments")
+			if streamArgs.Type != ojson.String || streamArgs.String() != "{}" {
+				t.Fatalf("streaming function.arguments = %s, want JSON string %q; payload=%s", streamArgs.Raw, "{}", streamOut[0])
+			}
+
+			nonStreamOut := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-2.5-flash", nil, nil, upstream, nil)
+			nonStreamArgs := ojson.GetBytesNoCopy(nonStreamOut, "choices.0.message.tool_calls.0.function.arguments")
+			if nonStreamArgs.Type != ojson.String || nonStreamArgs.String() != "{}" {
+				t.Fatalf("non-streaming function.arguments = %s, want JSON string %q; payload=%s", nonStreamArgs.Raw, "{}", nonStreamOut)
+			}
+		})
+	}
+
+	t.Run("streaming nameless functionCall with null args is treated as noop", func(t *testing.T) {
+		var param any
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"","args":null}}]}}]}`)
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, upstream, &param)
+		if len(out) != 0 {
+			t.Fatalf("expected 0 chunks for nameless functionCall with null args, got %d: %q", len(out), out)
+		}
+	})
+}
+
 func BenchmarkConvertGeminiResponseToOpenAI_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"` + strings.Repeat("x", 1024*1024) + `"}]}`)
 	delta := []byte(`{"candidates":[{"content":{"parts":[{"text":"token "}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)

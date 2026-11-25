@@ -60,8 +60,9 @@ func copyClaudeGenerationConfigToInteractionsDoc(outDoc *ojson.Doc, root ojson.R
 	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(root.Get("max_tokens")); ok {
 		_ = outDoc.SetRaw("generation_config.max_output_tokens", rawMaxTokens)
 	}
-	copyClaudeJSONFieldDoc(outDoc, root, "temperature", "generation_config.temperature")
-	copyClaudeJSONFieldDoc(outDoc, root, "top_p", "generation_config.top_p")
+	copyClaudeNumberFieldDoc(outDoc, root, "temperature", "generation_config.temperature")
+	copyClaudeNumberFieldDoc(outDoc, root, "top_p", "generation_config.top_p")
+	copyClaudeNumberFieldDoc(outDoc, root, "top_k", "generation_config.top_k")
 	if sequences := translatorcommon.ClaudeStopSequences(root.Get("stop_sequences")); len(sequences) > 0 {
 		_ = outDoc.Set("generation_config.stop_sequences", sequences)
 	}
@@ -69,9 +70,9 @@ func copyClaudeGenerationConfigToInteractionsDoc(outDoc *ojson.Doc, root ojson.R
 	copyClaudeToolChoiceToInteractionsDoc(outDoc, root.Get("tool_choice"))
 }
 
-func copyClaudeJSONFieldDoc(outDoc *ojson.Doc, root ojson.Result, from, to string) {
+func copyClaudeNumberFieldDoc(outDoc *ojson.Doc, root ojson.Result, from, to string) {
 	value := root.Get(from)
-	if !value.Exists() {
+	if !value.Exists() || value.Type != ojson.Number || value.Raw == "" {
 		return
 	}
 	_ = outDoc.SetRaw(to, value.Raw)
@@ -94,7 +95,7 @@ func copyClaudeThinkingToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 		case "disabled":
 			_ = outDoc.Set("generation_config.thinking_level", "none")
 		case "enabled":
-			if budget := thinking.Get("budget_tokens"); budget.Exists() {
+			if budget := thinking.Get("budget_tokens"); budget.Exists() && budget.Type == ojson.Number && budget.Raw != "" {
 				_ = outDoc.SetRaw("generation_config.thinking_config.thinking_budget", budget.Raw)
 			} else {
 				_ = outDoc.Set("generation_config.thinking_level", "high")
@@ -104,7 +105,13 @@ func copyClaudeThinkingToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 		}
 	}
 	if effort := root.Get("output_config.effort"); effort.Exists() && effort.Type == ojson.String {
-		_ = outDoc.Set("generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
+		if level := strings.ToLower(strings.TrimSpace(effort.String())); level != "" {
+			_ = util.DeleteJSONDocIfExists(outDoc, "generation_config.thinking_config.thinking_budget")
+			if thinkingCfg := outDoc.Get("generation_config.thinking_config"); thinkingCfg.Exists() && thinkingCfg.IsObject() && len(thinkingCfg.Map()) == 0 {
+				_ = outDoc.Delete("generation_config.thinking_config")
+			}
+			_ = outDoc.Set("generation_config.thinking_level", level)
+		}
 	}
 }
 
@@ -115,6 +122,8 @@ func copyClaudeToolChoiceToInteractionsDoc(outDoc *ojson.Doc, toolChoice ojson.R
 	switch toolChoice.Type {
 	case ojson.String:
 		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+		case "none":
+			_ = outDoc.Set("generation_config.tool_choice", "none")
 		case "auto":
 			_ = outDoc.Set("generation_config.tool_choice", "auto")
 		case "any", "required":
@@ -123,6 +132,8 @@ func copyClaudeToolChoiceToInteractionsDoc(outDoc *ojson.Doc, toolChoice ojson.R
 	case ojson.JSON:
 		toolType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
 		switch toolType {
+		case "none":
+			_ = outDoc.Set("generation_config.tool_choice", "none")
 		case "auto":
 			_ = outDoc.Set("generation_config.tool_choice", "auto")
 		case "any", "required":
@@ -239,10 +250,19 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 		case "thinking":
 			flushContent()
 			text := part.Get("thinking").String()
-			if text != "" || preserveEmptyThinkingBlocks {
-				step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
-				step, _ = ojson.SetBytes(step, "content.0.text", text)
-				*items = append(*items, step)
+			signature := claudeSignature(part)
+			if text != "" || signature != "" || preserveEmptyThinkingBlocks {
+				var stepDoc *ojson.Doc
+				if text != "" || preserveEmptyThinkingBlocks {
+					stepDoc = ojson.NewDocString(`{"type":"thought","content":[{"type":"text","text":""}]}`)
+					_ = stepDoc.Set("content.0.text", text)
+				} else {
+					stepDoc = ojson.NewDocString(`{"type":"thought"}`)
+				}
+				if signature != "" {
+					_ = stepDoc.Set("signature", signature)
+				}
+				*items = append(*items, stepDoc.Bytes())
 				sendable++
 			}
 		case "image", "document", "container_upload":
@@ -362,11 +382,22 @@ func claudeToolUseToInteractions(part ojson.Result) []byte {
 	if id := part.Get("id").String(); id != "" {
 		_ = stepDoc.Set("id", id)
 	}
+	if signature := claudeSignature(part); signature != "" {
+		_ = stepDoc.Set("signature", signature)
+	}
 	input := part.Get("input")
 	if input.Exists() && input.IsObject() {
 		_ = stepDoc.SetRaw("arguments", input.Raw)
 	}
 	return stepDoc.Bytes()
+}
+
+func claudeSignature(part ojson.Result) string {
+	sig := part.Get("signature")
+	if sig.Type != ojson.String {
+		return ""
+	}
+	return strings.TrimSpace(sig.String())
 }
 
 func claudeToolResultToInteractions(part ojson.Result, toolNamesByID map[string]string) []byte {

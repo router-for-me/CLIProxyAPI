@@ -945,3 +945,40 @@ func TestBuildConfigChangeDetails_SensitivePatternsReplace(t *testing.T) {
 		t.Fatalf("expected no diff between nil and empty SensitivePatternsReplace slices, got %v", noDiff)
 	}
 }
+
+func TestBuildConfigChangeDetails_VertexRequestScopedErrors(t *testing.T) {
+	ruleA := config.RequestScopedErrorRule{Status: 400, Match: []string{"err_a"}, Action: "stop"}
+	ruleB := config.RequestScopedErrorRule{Status: 500, Match: []string{"err_b"}, Action: "continue"}
+
+	oldCfg := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{APIKey: "v1", RequestScopedErrors: []config.RequestScopedErrorRule{ruleA}},
+		},
+	}
+	newCfg := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{APIKey: "v1", RequestScopedErrors: []config.RequestScopedErrorRule{ruleA, ruleB}},
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "vertex[0].request-scoped-errors: updated (1 -> 2 entries)")
+
+	commaOld := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{APIKey: "v1", RequestScopedErrors: []config.RequestScopedErrorRule{{Status: 400, Match: []string{"a,b"}, Action: "stop"}}},
+		},
+	}
+	commaNew := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{APIKey: "v1", RequestScopedErrors: []config.RequestScopedErrorRule{{Status: 400, Match: []string{"a", "b"}, Action: "stop"}}},
+		},
+	}
+	expectContains(t, BuildConfigChangeDetails(commaOld, commaNew), "vertex[0].request-scoped-errors: updated (1 -> 1 entries)")
+
+	emptyNil := &config.Config{VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "v1"}}}
+	emptySlice := &config.Config{VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "v1", RequestScopedErrors: []config.RequestScopedErrorRule{}}}}
+	if noDiff := BuildConfigChangeDetails(emptyNil, emptySlice); len(noDiff) != 0 {
+		t.Fatalf("expected no diff between nil and empty RequestScopedErrors slices, got %v", noDiff)
+	}
+}

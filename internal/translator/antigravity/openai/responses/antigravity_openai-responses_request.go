@@ -55,7 +55,7 @@ func buildAntigravityResponsesWebSearchRequest(model string, payload []byte, str
 	includedDomains := ExtractResponsesWebSearchAllowedDomains(util.ParseGJSONBytesNoCopy(payload))
 	rawJSON, errConvert := ConvertOpenAIResponsesRequestToGemini(model, payload, stream)
 	rawJSON = stripAntigravityServerSideToolInvocations(rawJSON)
-	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(model, payload, rawJSON)
+	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(model, rawJSON)
 	out, _ := ConvertGeminiRequestToAntigravity(model, rawJSON, stream)
 	outDoc := ojson.NewDoc(out)
 	_ = outDoc.Set("requestType", "web_search")
@@ -146,7 +146,7 @@ func ConvertOpenAIResponsesRequestEnvelopeToAntigravity(_ context.Context, req s
 	inputRawJSON := req.Body
 	req.Body, req.Err = ConvertOpenAIResponsesRequestToGemini(req.Model, req.Body, req.Stream)
 	req.Body = stripAntigravityResponsesGoogleSearch(req.Body)
-	req.Body = rewriteOpenAIResponsesReasoningForAntigravityClaude(req.Model, inputRawJSON, req.Body)
+	req.Body = rewriteOpenAIResponsesReasoningForAntigravityClaude(req.Model, req.Body)
 	req.Body, _ = ConvertGeminiRequestToAntigravity(req.Model, req.Body, req.Stream)
 	req.Body = stripAntigravityResponsesGoogleSearch(req.Body)
 	req.Body = enableAntigravityResponsesThinkingSummary(inputRawJSON, req.Body)
@@ -245,134 +245,128 @@ type antigravityClaudeReasoningSignature struct {
 	DetectedProvider sigcompat.SignatureProvider
 }
 
-func rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName string, inputRawJSON, geminiJSON []byte) []byte {
+func rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName string, geminiJSON []byte) []byte {
 	if sigcompat.SignatureProviderFromModelName(modelName) != sigcompat.SignatureProviderClaude {
 		return geminiJSON
 	}
 
-	reasoningSignatures := antigravityClaudeReasoningSignatures(inputRawJSON)
-	if len(reasoningSignatures) == 0 {
+	contents := ojson.GetBytesNoCopy(geminiJSON, "contents")
+	if !contents.IsArray() {
 		return geminiJSON
 	}
 
-	var root map[string]any
-	if err := json.Unmarshal(geminiJSON, &root); err != nil {
-		log.WithError(err).Debug("antigravity responses translator: failed to parse Gemini request for Claude signature rewrite")
-		return geminiJSON
+	contentsArray := contents.Array()
+	var rewrittenContents [][]byte
+	ensureRewrittenContents := func(upTo int) {
+		if rewrittenContents != nil {
+			return
+		}
+		rewrittenContents = make([][]byte, 0, len(contentsArray))
+		for i := 0; i < upTo; i++ {
+			rewrittenContents = append(rewrittenContents, []byte(contentsArray[i].Raw))
+		}
 	}
 
-	contents, ok := root["contents"].([]any)
-	if !ok {
-		return geminiJSON
-	}
-
-	reasoningIndex := 0
-	changed := false
-	rewrittenContents := make([]any, 0, len(contents))
-	for contentIndex, contentValue := range contents {
-		content, ok := contentValue.(map[string]any)
-		if !ok {
-			rewrittenContents = append(rewrittenContents, contentValue)
+	for contentIndex, content := range contentsArray {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			if rewrittenContents != nil {
+				rewrittenContents = append(rewrittenContents, []byte(content.Raw))
+			}
 			continue
 		}
 
-		parts, ok := content["parts"].([]any)
-		if !ok {
-			rewrittenContents = append(rewrittenContents, content)
-			continue
+		partsArray := parts.Array()
+		var rewrittenParts [][]byte
+		ensureRewrittenParts := func(upTo int) {
+			if rewrittenParts != nil {
+				return
+			}
+			rewrittenParts = make([][]byte, 0, len(partsArray))
+			for i := 0; i < upTo; i++ {
+				rewrittenParts = append(rewrittenParts, []byte(partsArray[i].Raw))
+			}
 		}
 
-		rewrittenParts := make([]any, 0, len(parts))
-		for partIndex, partValue := range parts {
-			part, ok := partValue.(map[string]any)
-			if !ok || part["thought"] != true {
-				rewrittenParts = append(rewrittenParts, partValue)
+		for partIndex, part := range partsArray {
+			if !part.IsObject() || part.Get("thought").Type != ojson.True {
+				if rewrittenParts != nil {
+					rewrittenParts = append(rewrittenParts, []byte(part.Raw))
+				}
 				continue
 			}
 
-			var reasoningSig antigravityClaudeReasoningSignature
-			if reasoningIndex < len(reasoningSignatures) {
-				reasoningSig = reasoningSignatures[reasoningIndex]
+			sigResult := part.Get("thoughtSignature")
+			rawSignature := ""
+			if sigResult.Type == ojson.String {
+				rawSignature = sigResult.String()
 			}
-			reasoningIndex++
+			reasoningSig := antigravityClaudeReasoningSignature{
+				HasRawSignature:  sigResult.Exists(),
+				RawSignatureLen:  len(rawSignature),
+				DetectedProvider: sigcompat.SignatureProviderUnknown,
+			}
+			if rawSignature != "" {
+				reasoningSig.DetectedProvider = sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking)
+				if normalized, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSignature); ok {
+					reasoningSig.Signature = normalized
+				}
+			}
 
 			if reasoningSig.Signature == "" {
-				changed = true
-				logDroppedOpenAIResponsesAntigravityClaudeReasoning(modelName, contentIndex, partIndex, reasoningIndex-1, reasoningSig)
+				ensureRewrittenParts(partIndex)
+				logDroppedOpenAIResponsesAntigravityClaudeReasoning(modelName, contentIndex, partIndex, reasoningSig)
 				continue
 			}
-			if text, _ := part["text"].(string); strings.TrimSpace(text) == "" {
-				changed = true
-				logDroppedOpenAIResponsesAntigravityClaudeEmptyReasoning(modelName, contentIndex, partIndex, reasoningIndex-1, reasoningSig)
+			textResult := part.Get("text")
+			if textResult.Type != ojson.String || strings.TrimSpace(textResult.String()) == "" {
+				ensureRewrittenParts(partIndex)
+				logDroppedOpenAIResponsesAntigravityClaudeEmptyReasoning(modelName, contentIndex, partIndex, reasoningSig)
 				continue
 			}
 
-			if currentSignature, _ := part["thoughtSignature"].(string); currentSignature != reasoningSig.Signature {
-				changed = true
-				logNormalizedOpenAIResponsesAntigravityClaudeReasoning(modelName, contentIndex, partIndex, reasoningIndex-1, reasoningSig)
+			if rawSignature != reasoningSig.Signature {
+				ensureRewrittenParts(partIndex)
+				logNormalizedOpenAIResponsesAntigravityClaudeReasoning(modelName, contentIndex, partIndex, reasoningSig)
+				partDoc := ojson.NewDocString(part.Raw)
+				_ = partDoc.Set("thoughtSignature", reasoningSig.Signature)
+				rewrittenParts = append(rewrittenParts, partDoc.Bytes())
+				continue
 			}
-			part["thoughtSignature"] = reasoningSig.Signature
-			rewrittenParts = append(rewrittenParts, part)
+			if rewrittenParts != nil {
+				rewrittenParts = append(rewrittenParts, []byte(part.Raw))
+			}
 		}
 
-		if len(rewrittenParts) == 0 {
-			changed = true
+		if rewrittenParts == nil {
+			if rewrittenContents != nil {
+				rewrittenContents = append(rewrittenContents, []byte(content.Raw))
+			}
 			continue
 		}
-		content["parts"] = rewrittenParts
-		rewrittenContents = append(rewrittenContents, content)
+
+		ensureRewrittenContents(contentIndex)
+		if len(rewrittenParts) == 0 {
+			continue
+		}
+		contentDoc := ojson.NewDocString(content.Raw)
+		_ = contentDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(rewrittenParts))
+		rewrittenContents = append(rewrittenContents, contentDoc.Bytes())
 	}
 
-	if !changed {
+	if rewrittenContents == nil {
 		return geminiJSON
 	}
 
-	root["contents"] = rewrittenContents
-	out, err := json.Marshal(root)
-	if err != nil {
-		log.WithError(err).Debug("antigravity responses translator: failed to marshal Claude signature rewrite")
+	doc := ojson.NewDoc(geminiJSON)
+	if errSet := doc.SetRawBytes("contents", translatorcommon.JoinRawArray(rewrittenContents)); errSet != nil {
+		log.WithError(errSet).Debug("antigravity responses translator: failed to update contents for Claude signature rewrite")
 		return geminiJSON
 	}
-	return out
+	return doc.Bytes()
 }
 
-func antigravityClaudeReasoningSignatures(inputRawJSON []byte) []antigravityClaudeReasoningSignature {
-	input := ojson.GetBytesNoCopy(inputRawJSON, "input")
-	if !input.IsArray() {
-		return nil
-	}
-
-	signatures := make([]antigravityClaudeReasoningSignature, 0)
-	input.ForEach(func(_, item ojson.Result) bool {
-		itemType := item.Get("type").String()
-		if itemType == "" && item.Get("role").Exists() {
-			itemType = "message"
-		}
-		if itemType != "reasoning" {
-			return true
-		}
-
-		rawSignatureResult := item.Get("encrypted_content")
-		rawSignature := rawSignatureResult.String()
-		signature, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
-		reasoningSignature := antigravityClaudeReasoningSignature{
-			HasRawSignature:  rawSignatureResult.Exists(),
-			RawSignatureLen:  len(rawSignature),
-			DetectedProvider: sigcompat.SignatureProviderUnknown,
-		}
-		if rawSignature != "" {
-			reasoningSignature.DetectedProvider = sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking)
-		}
-		if ok {
-			reasoningSignature.Signature = signature
-		}
-		signatures = append(signatures, reasoningSignature)
-		return true
-	})
-	return signatures
-}
-
-func logDroppedOpenAIResponsesAntigravityClaudeReasoning(modelName string, contentIndex, partIndex, reasoningIndex int, sig antigravityClaudeReasoningSignature) {
+func logDroppedOpenAIResponsesAntigravityClaudeReasoning(modelName string, contentIndex, partIndex int, sig antigravityClaudeReasoningSignature) {
 	log.WithFields(log.Fields{
 		"component":         "signature_sanitizer",
 		"translator":        "antigravity_openai_responses",
@@ -382,14 +376,13 @@ func logDroppedOpenAIResponsesAntigravityClaudeReasoning(modelName string, conte
 		"model":             modelName,
 		"content_index":     contentIndex,
 		"part_index":        partIndex,
-		"reasoning_index":   reasoningIndex,
 		"has_signature":     sig.HasRawSignature,
 		"signature_length":  sig.RawSignatureLen,
 		"detected_provider": string(sig.DetectedProvider),
 	}).Debug("antigravity responses translator: dropped Claude reasoning block with incompatible encrypted_content")
 }
 
-func logDroppedOpenAIResponsesAntigravityClaudeEmptyReasoning(modelName string, contentIndex, partIndex, reasoningIndex int, sig antigravityClaudeReasoningSignature) {
+func logDroppedOpenAIResponsesAntigravityClaudeEmptyReasoning(modelName string, contentIndex, partIndex int, sig antigravityClaudeReasoningSignature) {
 	log.WithFields(log.Fields{
 		"component":         "signature_sanitizer",
 		"translator":        "antigravity_openai_responses",
@@ -399,14 +392,13 @@ func logDroppedOpenAIResponsesAntigravityClaudeEmptyReasoning(modelName string, 
 		"model":             modelName,
 		"content_index":     contentIndex,
 		"part_index":        partIndex,
-		"reasoning_index":   reasoningIndex,
 		"has_signature":     sig.HasRawSignature,
 		"signature_length":  sig.RawSignatureLen,
 		"detected_provider": string(sig.DetectedProvider),
 	}).Debug("antigravity responses translator: dropped Claude reasoning block with empty thinking text")
 }
 
-func logNormalizedOpenAIResponsesAntigravityClaudeReasoning(modelName string, contentIndex, partIndex, reasoningIndex int, sig antigravityClaudeReasoningSignature) {
+func logNormalizedOpenAIResponsesAntigravityClaudeReasoning(modelName string, contentIndex, partIndex int, sig antigravityClaudeReasoningSignature) {
 	log.WithFields(log.Fields{
 		"component":         "signature_sanitizer",
 		"translator":        "antigravity_openai_responses",
@@ -416,7 +408,6 @@ func logNormalizedOpenAIResponsesAntigravityClaudeReasoning(modelName string, co
 		"model":             modelName,
 		"content_index":     contentIndex,
 		"part_index":        partIndex,
-		"reasoning_index":   reasoningIndex,
 		"has_signature":     sig.HasRawSignature,
 		"signature_length":  sig.RawSignatureLen,
 		"detected_provider": string(sig.DetectedProvider),

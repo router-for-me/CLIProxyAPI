@@ -165,3 +165,16 @@ func TestDecodeGeminiResponsesCarrierRejectsNestedEnvelope(t *testing.T) {
 		t.Fatalf("nested carrier marked=%v ok=%v, want marked invalid", marked, ok)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_UnknownAliasDoesNotLeakForeignSignature(t *testing.T) {
+	gptSig := validResponsesGPTReasoningSignature()
+	request := []byte(`{"model":"alias-without-provider-name","input":[{"type":"reasoning","encrypted_content":"` + gptSig + `","summary":[{"type":"summary_text","text":"foreign reasoning"}]},{"role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
+	translated, _ := ConvertOpenAIResponsesRequestToGemini("alias-without-provider-name", request, false)
+	thoughtPart := ojson.GetBytesNoCopy(translated, "contents.0.parts.0")
+	if !thoughtPart.Get("thought").Bool() {
+		t.Fatalf("expected thought part for alias model: %s", translated)
+	}
+	if thoughtPart.Get("thoughtSignature").Exists() {
+		t.Fatalf("unknown alias model must not preserve incompatible foreign signature: %s", translated)
+	}
+}

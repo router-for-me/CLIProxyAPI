@@ -965,35 +965,56 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 }
 
 func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider string) ThinkingConfig {
-	prefix := "generationConfig.thinkingConfig"
+	prefixes := []string{
+		"generationConfig.thinkingConfig",
+		"generationConfig.thinking_config",
+		"generation_config.thinking_config",
+		"generation_config.thinkingConfig",
+	}
 	if provider == "antigravity" {
-		prefix = "request.generationConfig.thinkingConfig"
+		prefixes = []string{
+			"request.generationConfig.thinkingConfig",
+			"request.generationConfig.thinking_config",
+			"request.generation_config.thinking_config",
+			"request.generation_config.thinkingConfig",
+		}
 	}
 
-	level := get(prefix + ".thinkingLevel")
-	if !level.Exists() {
-		level = get(prefix + ".thinking_level")
-	}
-	budget := get(prefix + ".thinkingBudget")
-	if !budget.Exists() {
-		budget = get(prefix + ".thinking_budget")
+	var level, budget ojson.Result
+	for _, prefix := range prefixes {
+		if level.Type != ojson.String || strings.TrimSpace(level.String()) == "" {
+			if v := get(prefix + ".thinkingLevel"); v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+				level = v
+			} else if v = get(prefix + ".thinking_level"); v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+				level = v
+			}
+		}
+		if budget.Type != ojson.Number {
+			if v := get(prefix + ".thinkingBudget"); v.Type == ojson.Number {
+				budget = v
+			} else if v = get(prefix + ".thinking_budget"); v.Type == ojson.Number {
+				budget = v
+			}
+		}
 	}
 	return geminiThinkingConfigFromValues(level, budget)
 }
 
 func geminiThinkingConfigFromValues(level, budget ojson.Result) ThinkingConfig {
-	if level.Exists() {
-		value := level.String()
-		switch value {
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	if level.Type == ojson.String {
+		value := strings.TrimSpace(level.String())
+		if value != "" {
+			switch strings.ToLower(value) {
+			case "none":
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			case "auto":
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			default:
+				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+			}
 		}
 	}
-	if budget.Exists() {
+	if budget.Type == ojson.Number {
 		value := int(budget.Int())
 		switch value {
 		case 0:

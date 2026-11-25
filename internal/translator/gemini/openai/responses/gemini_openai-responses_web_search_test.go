@@ -649,6 +649,34 @@ func TestConvertGeminiResponseToOpenAIResponsesStream_LateGroundingMetadataAndCJ
 	}
 }
 
+func TestAllowsResponsesWebSearchToolChoice_Null(t *testing.T) {
+	if !AllowsResponsesWebSearchToolChoice(ojson.Parse(`{"tool_choice": null}`)) {
+		t.Fatalf("expected tool_choice null to allow web search")
+	}
+
+	modelID := "gemini-search-toolchoice-null"
+	registerTestWebSearchModel(t, "client-toolchoice-null", "antigravity", modelID, true)
+
+	req := []byte(`{
+		"model": "gemini-search-toolchoice-null",
+		"input": "latest news",
+		"tools": [{"type": "web_search"}],
+		"tool_choice": null
+	}`)
+
+	out, errConvert := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+	}
+	if !ojson.GetBytesNoCopy(out, "tools.0.googleSearch").Exists() {
+		t.Fatalf("expected googleSearch tool when tool_choice is null, got: %s", out)
+	}
+
+	if !determineWebSearchStreamMode(modelID, modelID, req, out, req) {
+		t.Fatalf("expected determineWebSearchStreamMode to return true when tool_choice is null")
+	}
+}
+
 func TestAllowsResponsesWebSearchToolChoice_AllowedTools(t *testing.T) {
 	// 1. allowed_tools containing web_search should permit search
 	withSearch := ojson.Parse(`{
