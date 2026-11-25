@@ -127,6 +127,26 @@ PackyCode provides special discounts for our software users: register using <a h
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a> | China’s OpenRouter — one API for leading Chinese and global AI models.</strong> Access <strong>DeepSeek, Qwen, Kimi, GLM, GPT, Claude, Gemini, and Grok</strong>, with intelligent routing across suppliers and automatic failover. <strong>Failed requests are free, pricing is public, and every charge can be verified.</strong> Works with coding tools such as Claude Code and Codex, with <strong><a href="https://visioncoder.cn/me/keys">one-click import into CC Switch and WorkBuddy</a></strong>. Teams can purchase centrally, assign subscription packages by seat, and reclaim them for reassignment, with business bank transfers and invoicing supported. <strong>Supplier applications are open: list your model endpoints and earn traffic based on quality. Monthly settlement to business bank accounts, itemized usage records, and customer billing and invoicing handled by VisionCoder.</strong> Join the <a href="https://visioncoder.cn/challenge">VibeCoding Challenge</a> for <strong>CNY 2,350 in top-up credits per round</strong>, including <strong>CNY 1,000 in top-up credits for first place</strong>.</td>
 </tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>One key to call on AI from around the world!<br>10dian-API brings leading AI models and protocols together in one API that works with popular clients. Independent developers, AI enthusiasts, and teams get the same access, including stable connections for high volumes of concurrent requests. Prices are low, billing multipliers are public, and you get the model you choose without substitutions. The service accepts multiple top-up methods and can also pay for popular AI subscriptions on your behalf.<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">Sign up</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 All-in-One AI Models — Register &amp; Get 1,000,000 Free Tokens!</strong>
+<p>🎁 Free Trial Offer: <a href="https://subrouter.ai/register?aff=nP93">Sign up now</a> to immediately receive 1,000,000 FREE tokens for testing!</p>
+<ul>
+<li>All Top Models in One Place: Switch freely between Claude, GPT, Gemini, Grok, and DeepSeek with a single API key.</li>
+<li>Smart Routing &amp; Auto-Failover: Intelligent load balancing automatically switches failed nodes to keep your requests running smoothly.</li>
+<li>100% Transparent Billing: Every single API call displays the exact routing path and real-time cost.</li>
+<li>Balance Never Expires: True pay-as-you-go pricing—your credits stay valid forever with no monthly expiration.</li>
+<li>Flexible Top-Ups: Supports USDT, Visa, WeChat Pay, and Alipay.</li>
+</ul>
+👉 Claim Your 1M Free Tokens: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
+</tr>
 </tbody>
 </table>
 

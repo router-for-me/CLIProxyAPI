@@ -5077,6 +5077,53 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 	}
 }
 
+func TestClaudeAdvisorDeclarationKeepsCallerSystemPlacementStable(t *testing.T) {
+	base := `{
+		"model": "claude-opus-5",
+		"system": [{"type": "text", "text": "caller guidance"}],
+		"tools": [{"type": "advisor_20260301", "name": "advisor"}],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+	withAdvisorResult := `{
+		"model": "claude-opus-5",
+		"system": [{"type": "text", "text": "caller guidance"}],
+		"tools": [{"type": "advisor_20260301", "name": "advisor"}],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{"role": "assistant", "content": [{"type": "server_tool_use", "id": "srvtoolu_adv1", "name": "advisor", "input": {}}]},
+			{"role": "user", "content": [{"type": "advisor_tool_result", "tool_use_id": "srvtoolu_adv1", "content": {"type": "advisor_redacted_result", "encrypted_content": "ciphertext123"}}]}
+		]
+	}`
+
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "before advisor call", payload: base},
+		{name: "after advisor result", payload: withAdvisorResult},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out := checkSystemInstructionsWithMode([]byte(test.payload), false)
+			if got := ojson.GetBytes(out, "messages.#").Int(); got != int64(len(ojson.GetBytes([]byte(test.payload), "messages").Array())) {
+				t.Fatalf("messages count changed with advisor declaration: got %d: %s", got, out)
+			}
+			if got := ojson.GetBytes(out, "system.2.text").String(); got != "caller guidance" {
+				t.Fatalf("system caller block = %q, want top-level caller guidance: %s", got, out)
+			}
+		})
+	}
+
+	t.Run("count tokens", func(t *testing.T) {
+		out := relocateClaudeSystemPromptForCountTokens([]byte(base), false)
+		if got := ojson.GetBytes(out, "messages.#").Int(); got != 1 {
+			t.Fatalf("count_tokens message count = %d, want 1 without system splice: %s", got, out)
+		}
+		if got := ojson.GetBytes(out, "system.0.text").String(); got != "caller guidance" {
+			t.Fatalf("count_tokens caller system = %q, want caller guidance in top-level system: %s", got, out)
+		}
+	})
+}
+
 func TestCheckSystemInstructionsWithMode_AdvisorToolResultPreservesTopLevelSystemAndKeepsMessagesIntact(t *testing.T) {
 	payload := []byte(`{
 		"model": "claude-opus-5",

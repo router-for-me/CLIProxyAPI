@@ -105,6 +105,73 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 	}
 }
 
+func TestFindAllAntigravityCreditsCandidateAuths_ExcludesCredentialWideLockouts(t *testing.T) {
+	const model = "claude-sonnet-4-6"
+	reg := registry.GetGlobalRegistry()
+	future := time.Now().Add(30 * time.Minute)
+	auths := map[string]*Auth{
+		"ag-lockout-healthy": {
+			ID:       "ag-lockout-healthy",
+			Provider: "antigravity",
+			Status:   StatusActive,
+		},
+		"ag-lockout-credential": {
+			ID:                   "ag-lockout-credential",
+			Provider:             "antigravity",
+			Status:               StatusActive,
+			credentialRetryAfter: future,
+		},
+		"ag-lockout-nonauth": {
+			ID:                          "ag-lockout-nonauth",
+			Provider:                    "antigravity",
+			Status:                      StatusActive,
+			nonAuthCredentialRetryAfter: future,
+		},
+		"ag-lockout-signin": {
+			ID:             "ag-lockout-signin",
+			Provider:       "antigravity",
+			Status:         StatusActive,
+			RequiresSignIn: true,
+		},
+		"ag-lockout-expired": {
+			ID:                          "ag-lockout-expired",
+			Provider:                    "antigravity",
+			Status:                      StatusActive,
+			credentialRetryAfter:        time.Now().Add(-time.Minute),
+			nonAuthCredentialRetryAfter: time.Now().Add(-time.Minute),
+		},
+	}
+	for id := range auths {
+		reg.RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+
+	m := &Manager{
+		auths: auths,
+		executors: map[string]ProviderExecutor{
+			"antigravity": schedulerTestExecutor{},
+		},
+	}
+
+	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(context.Background(), model, cliproxyexecutor.Options{})
+	if errCandidates != nil {
+		t.Fatalf("findAllAntigravityCreditsCandidateAuths() error = %v", errCandidates)
+	}
+	got := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		got = append(got, candidate.auth.ID)
+	}
+	want := []string{"ag-lockout-expired", "ag-lockout-healthy"}
+	if len(got) != len(want) {
+		t.Fatalf("candidate ids = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidate ids = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestFindAllAntigravityCreditsCandidateAuths_HomeKVUnavailableReturnsError(t *testing.T) {
 	homekv.SetCurrent(homekv.New(internalconfig.HomeConfig{Enabled: false}))
 	t.Cleanup(homekv.ClearCurrent)

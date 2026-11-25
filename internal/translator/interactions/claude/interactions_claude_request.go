@@ -32,6 +32,7 @@ func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, s
 	}
 	copyClaudeSystemToInteractionsDoc(outDoc, root)
 	copyClaudeGenerationConfigToInteractionsDoc(outDoc, root)
+	copyClaudeOutputFormatToInteractionsDoc(outDoc, root)
 	errDrops := appendClaudeMessagesToInteractionsDoc(outDoc, root.Get("messages"), preserveEmptyThinkingBlocks)
 	copyClaudeToolsToInteractionsDoc(outDoc, root)
 	return outDoc.Bytes(), errDrops
@@ -56,10 +57,14 @@ func copyClaudeSystemToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 }
 
 func copyClaudeGenerationConfigToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
-	copyClaudeJSONFieldDoc(outDoc, root, "max_tokens", "generation_config.max_output_tokens")
+	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(root.Get("max_tokens")); ok {
+		_ = outDoc.SetRaw("generation_config.max_output_tokens", rawMaxTokens)
+	}
 	copyClaudeJSONFieldDoc(outDoc, root, "temperature", "generation_config.temperature")
 	copyClaudeJSONFieldDoc(outDoc, root, "top_p", "generation_config.top_p")
-	copyClaudeJSONFieldDoc(outDoc, root, "stop_sequences", "generation_config.stop_sequences")
+	if sequences := translatorcommon.ClaudeStopSequences(root.Get("stop_sequences")); len(sequences) > 0 {
+		_ = outDoc.Set("generation_config.stop_sequences", sequences)
+	}
 	copyClaudeThinkingToInteractionsDoc(outDoc, root)
 	copyClaudeToolChoiceToInteractionsDoc(outDoc, root.Get("tool_choice"))
 }
@@ -70,6 +75,16 @@ func copyClaudeJSONFieldDoc(outDoc *ojson.Doc, root ojson.Result, from, to strin
 		return
 	}
 	_ = outDoc.SetRaw(to, value.Raw)
+}
+
+func copyClaudeOutputFormatToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
+	schema, ok := translatorcommon.ClaudeOutputJSONSchema(root.Get("output_config.format"))
+	if !ok {
+		return
+	}
+	entryDoc := ojson.NewDocString(`{"type":"text","mime_type":"application/json"}`)
+	_ = entryDoc.SetRaw("schema", schema.Raw)
+	_ = outDoc.SetRawBytes("response_format", entryDoc.Bytes())
 }
 
 func copyClaudeThinkingToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {

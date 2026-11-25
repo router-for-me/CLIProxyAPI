@@ -106,3 +106,42 @@ func TestNewStreamBootstrapErrorIdempotent(t *testing.T) {
 		t.Fatalf("headers.Get(X-Trace-Id) = %q, want %q", got, "trace-1")
 	}
 }
+
+func TestNewStreamBootstrapErrorPreservesAttemptID(t *testing.T) {
+	const attemptID = uint64(42)
+	provider := "issue7953"
+	base := &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream boom", Retryable: true}
+
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{name: "new bootstrap", cause: base},
+		{name: "existing bootstrap", cause: &streamBootstrapError{cause: base, attemptID: attemptID}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			marked := markUpstreamExecutionAttemptWithProviderAndID(tt.cause, provider, attemptID)
+			wrapped := newStreamBootstrapError(marked, http.Header{"X-Trace-Id": []string{"trace-2"}})
+
+			var outer *upstreamExecutionAttemptError
+			if !errors.As(wrapped, &outer) || outer == nil {
+				t.Fatalf("newStreamBootstrapError result %T is not marked as an upstream attempt", wrapped)
+			}
+			if outer.attemptID != attemptID {
+				t.Fatalf("outer attemptID = %d, want %d", outer.attemptID, attemptID)
+			}
+			if outer.provider != provider {
+				t.Fatalf("outer provider = %q, want %q", outer.provider, provider)
+			}
+
+			var bootstrap *streamBootstrapError
+			if !errors.As(wrapped, &bootstrap) || bootstrap == nil {
+				t.Fatalf("newStreamBootstrapError result %T is not a *streamBootstrapError", wrapped)
+			}
+			if bootstrap.attemptID != attemptID {
+				t.Fatalf("bootstrap attemptID = %d, want %d", bootstrap.attemptID, attemptID)
+			}
+		})
+	}
+}

@@ -62,6 +62,27 @@ func TestConvertOpenAIResponseToInteractionsCompletesOnDoneWithoutUsage(t *testi
 	}
 }
 
+func TestConvertOpenAIResponseToInteractionsStreamNullFinishReasonKeepsStepOpen(t *testing.T) {
+	var param any
+	chunks := [][]byte{
+		[]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"content":"hel"},"finish_reason":null}]}`),
+		[]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}`),
+		[]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
+	}
+
+	var out [][]byte
+	for _, chunk := range chunks {
+		out = append(out, ConvertOpenAIResponseToInteractions(context.Background(), "gpt-test", nil, nil, chunk, &param)...)
+	}
+
+	if got := countInteractionsEvents(out, "step.start"); got != 1 {
+		t.Fatalf("step.start count = %d, want 1. Output: %s", got, string(bytes.Join(out, nil)))
+	}
+	if got := countInteractionsEvents(out, "step.stop"); got != 1 {
+		t.Fatalf("step.stop count = %d, want 1. Output: %s", got, string(bytes.Join(out, nil)))
+	}
+}
+
 func TestConvertOpenAIResponseToInteractionsStreamCreatedUsesChunkIdentity(t *testing.T) {
 	var param any
 	raw := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`)

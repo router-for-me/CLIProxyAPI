@@ -236,6 +236,129 @@ func TestAntigravityCompactionAltResponsesCompact(t *testing.T) {
 	}
 }
 
+func TestAntigravityCompactionRejectsIncompleteSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Truncated summary"}],"role":"model"},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"thoughtsTokenCount":10,"totalTokenCount":130,"cachedContentTokenCount":40}}}`))
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{Antigravity: config.AntigravityConfig{}, RequestRetry: 1})
+	auth := &cliproxyauth.Auth{
+		ID:       "antigravity-auth-incomplete-test",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token": "test-token",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "test-proj",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}
+	payload := []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"context"}]}`)
+
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			options := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Alt:            "responses/compact",
+				Stream:         stream,
+			}
+			requestPayload := payload
+			if stream {
+				options.Alt = ""
+				requestPayload = []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"context"},{"type":"compaction_trigger"}]}`)
+				result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "gemini-3.7-flash", Payload: requestPayload}, options)
+				if errExecute == nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							errExecute = chunk.Err
+						}
+					}
+				}
+				if errExecute == nil {
+					t.Fatal("expected incomplete summary to be rejected")
+				}
+				return
+			}
+			if _, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: "gemini-3.7-flash", Payload: requestPayload}, options); errExecute == nil {
+				t.Fatal("expected incomplete summary to be rejected")
+			}
+		})
+	}
+}
+
+func TestAntigravityCompactionPreservesSummaryUsageDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Complete summary"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"thoughtsTokenCount":10,"totalTokenCount":130,"cachedContentTokenCount":40}}}`))
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{Antigravity: config.AntigravityConfig{}, RequestRetry: 1})
+	auth := &cliproxyauth.Auth{
+		ID:       "antigravity-auth-usage-test",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token": "test-token",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "test-proj",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}
+	payload := []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"context"}]}`)
+
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			options := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Alt:            "responses/compact",
+				Stream:         stream,
+			}
+			requestPayload := payload
+			usagePath := "usage"
+			var payloadOut []byte
+			if stream {
+				options.Alt = ""
+				requestPayload = []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"context"},{"type":"compaction_trigger"}]}`)
+				result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "gemini-3.7-flash", Payload: requestPayload}, options)
+				if errExecute != nil {
+					t.Fatalf("ExecuteStream failed: %v", errExecute)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error: %v", chunk.Err)
+					}
+					data := chunk.Payload
+					if marker := bytes.Index(data, []byte("data: ")); marker >= 0 {
+						data = data[marker+len("data: "):]
+					}
+					if ojson.GetBytes(data, "type").String() == "response.completed" {
+						payloadOut = data
+					}
+				}
+				usagePath = "response.usage"
+			} else {
+				resp, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: "gemini-3.7-flash", Payload: requestPayload}, options)
+				if errExecute != nil {
+					t.Fatalf("Execute failed: %v", errExecute)
+				}
+				payloadOut = resp.Payload
+			}
+			if len(payloadOut) == 0 {
+				t.Fatal("completed response payload not found")
+			}
+			if got := ojson.GetBytes(payloadOut, usagePath+".input_tokens_details.cached_tokens").Int(); got != 40 {
+				t.Fatalf("cached_tokens = %d, want 40; payload=%s", got, payloadOut)
+			}
+			if got := ojson.GetBytes(payloadOut, usagePath+".output_tokens_details.reasoning_tokens").Int(); got != 10 {
+				t.Fatalf("reasoning_tokens = %d, want 10; payload=%s", got, payloadOut)
+			}
+		})
+	}
+}
+
 func TestAntigravityCompactionReplayNextTurn(t *testing.T) {
 	var gotContents []ojson.Result
 	var gotBody []byte
