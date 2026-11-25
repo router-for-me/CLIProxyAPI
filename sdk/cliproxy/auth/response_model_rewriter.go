@@ -142,20 +142,13 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	}
 
 	if len(r.pendingBuf) > 0 {
-		combined := make([]byte, 0, len(r.pendingBuf)+1+len(chunk))
+		combined := make([]byte, 0, len(r.pendingBuf)+len(chunk))
 		combined = append(combined, r.pendingBuf...)
-		if combined[len(combined)-1] != '\n' {
-			combined = append(combined, '\n')
-		}
 		combined = append(combined, chunk...)
 		chunk = combined
 		r.pendingBuf = nil
 	}
 	chunk = normalizeGluedSSEEvents(chunk)
-
-	if len(chunk) > maxPendingBufSize {
-		return chunk
-	}
 
 	// Handle raw JSON chunks (Gemini/OpenAI format without SSE "data:" prefix)
 	trimmed := bytes.TrimSpace(chunk)
@@ -173,9 +166,13 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	if lastDoubleNewline >= 0 {
 		afterComplete := chunk[lastDoubleNewline+2:]
 		if len(afterComplete) > 0 && !bytes.Equal(afterComplete, []byte("\n")) {
-			processChunk = chunk[:lastDoubleNewline+2]
-			r.pendingBuf = make([]byte, len(afterComplete))
-			copy(r.pendingBuf, afterComplete)
+			if len(afterComplete) <= maxPendingBufSize {
+				processChunk = chunk[:lastDoubleNewline+2]
+				r.pendingBuf = make([]byte, len(afterComplete))
+				copy(r.pendingBuf, afterComplete)
+			} else {
+				processChunk = chunk
+			}
 		} else {
 			processChunk = chunk
 		}
@@ -184,6 +181,9 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	} else if len(bytes.TrimSpace(chunk)) == 0 {
 		return chunk
 	} else if len(chunk) > 0 {
+		if len(chunk) > maxPendingBufSize {
+			return r.rewriteSSELines(chunk)
+		}
 		r.pendingBuf = make([]byte, len(chunk))
 		copy(r.pendingBuf, chunk)
 		return nil
@@ -213,12 +213,10 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 		if found && len(jsonData) > 0 && jsonData[0] == '{' {
 			if !ojson.ValidBytes(jsonData) {
 				if pendingEvent != nil {
-					r.pendingBuf = append(pendingEvent, '\n')
-					r.pendingBuf = append(r.pendingBuf, line...)
+					result = append(result, pendingEvent)
 					pendingEvent = nil
-				} else {
-					r.pendingBuf = append(r.pendingBuf, line...)
 				}
+				result = append(result, line)
 				continue
 			}
 
