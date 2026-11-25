@@ -1240,3 +1240,122 @@ func TestConvertOpenAIRequestToAntigravityExtraBodyGoogleThinkingConfig(t *testi
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravity_ValidatesToolCallArguments(t *testing.T) {
+	tests := []struct {
+		name         string
+		arguments    string
+		jsonNullArgs bool
+		wantRawArgs  string
+		wantParams   string
+		expectParams bool
+	}{
+		{
+			name:        "valid json object",
+			arguments:   `{"path":"a.txt"}`,
+			wantRawArgs: `{"path":"a.txt"}`,
+		},
+		{
+			name:        "valid json object with whitespace",
+			arguments:   `  {"path":"a.txt"}  `,
+			wantRawArgs: `{"path":"a.txt"}`,
+		},
+		{
+			name:        "empty string defaults to empty object",
+			arguments:   "",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "whitespace defaults to empty object",
+			arguments:   "   ",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "null string defaults to empty object",
+			arguments:   "null",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "padded null string defaults to empty object",
+			arguments:   "  null  ",
+			wantRawArgs: "{}",
+		},
+		{
+			name:         "json null arguments defaults to empty object",
+			jsonNullArgs: true,
+			wantRawArgs:  "{}",
+		},
+		{
+			name:         "valid json array wrapped under params",
+			arguments:    `[1,2]`,
+			wantParams:   `[1,2]`,
+			expectParams: true,
+		},
+		{
+			name:         "valid json string wrapped under params",
+			arguments:    `"hello"`,
+			wantParams:   `"hello"`,
+			expectParams: true,
+		},
+		{
+			name:         "valid json number wrapped under params",
+			arguments:    "123",
+			wantParams:   "123",
+			expectParams: true,
+		},
+		{
+			name:         "valid json boolean wrapped under params",
+			arguments:    "true",
+			wantParams:   "true",
+			expectParams: true,
+		},
+		{
+			name:         "truncated object wrapped under params",
+			arguments:    `{"path":"a.txt"`,
+			wantParams:   `{"path":"a.txt"`,
+			expectParams: true,
+		},
+		{
+			name:         "plain non-json text wrapped under params",
+			arguments:    "not json",
+			wantParams:   "not json",
+			expectParams: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqDoc := ojson.NewDocString(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"},{"role":"user","content":"done"}]}`)
+			if tt.jsonNullArgs {
+				if errSet := reqDoc.SetRaw("messages.1.tool_calls.0.function.arguments", "null"); errSet != nil {
+					t.Fatalf("set null arguments error: %v", errSet)
+				}
+			} else {
+				if errSet := reqDoc.Set("messages.1.tool_calls.0.function.arguments", tt.arguments); errSet != nil {
+					t.Fatalf("set arguments error: %v", errSet)
+				}
+			}
+
+			result, errConvert := ConvertOpenAIRequestToAntigravity("gemini-3-flash", reqDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToAntigravity error: %v", errConvert)
+			}
+			if !ojson.ValidBytes(result) {
+				t.Fatalf("translated request is not valid JSON: %s", result)
+			}
+			args := ojson.GetBytesNoCopy(result, "request.contents.1.parts.0.functionCall.args")
+			if !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, result)
+			}
+			if tt.expectParams {
+				if got := args.Get("params").String(); got != tt.wantParams {
+					t.Fatalf("functionCall.args.params = %q, want %q. Output: %s", got, tt.wantParams, result)
+				}
+				return
+			}
+			if args.Raw != tt.wantRawArgs {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRawArgs, result)
+			}
+		})
+	}
+}

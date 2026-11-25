@@ -396,13 +396,16 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 							continue
 						}
 						functionArgs := tc.Get("function.arguments").String()
-						partDoc := ojson.NewDoc([]byte(`{"functionCall":{"id":"","name":""}}`))
+						trimmedArgs := strings.TrimSpace(functionArgs)
+						partDoc := ojson.NewDocString(`{"functionCall":{"id":"","name":"","args":{}}}`)
 						_ = partDoc.Set("functionCall.id", functionID)
 						_ = partDoc.Set("functionCall.name", functionName)
-						if ojson.Valid(functionArgs) {
-							_ = partDoc.SetRaw("functionCall.args", functionArgs)
-						} else {
-							_ = partDoc.Set("functionCall.args.params", []byte(functionArgs))
+						if trimmedArgs != "" && trimmedArgs != "null" {
+							if ojson.Valid(trimmedArgs) && ojson.Parse(trimmedArgs).IsObject() {
+								_ = partDoc.SetRaw("functionCall.args", trimmedArgs)
+							} else {
+								_ = partDoc.Set("functionCall.args.params", functionArgs)
+							}
 						}
 						_ = partDoc.Set("thoughtSignature", antigravityFunctionThoughtSignature)
 						partItems = append(partItems, partDoc.Bytes())
