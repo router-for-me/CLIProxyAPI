@@ -137,7 +137,8 @@ type Auth struct {
 	AdoptedAt time.Time `json:"-"`
 	// AdoptedGrantHash records the fingerprint of the credential grant when it was adopted into runtime state,
 	// preserved across upstream automatic refresh rotations and reset when the credential grant is externally replaced.
-	AdoptedGrantHash string `json:"-"`
+	AdoptedGrantHash            string `json:"-"`
+	antigravityEnumRegistration string
 	// InferenceVerified reports whether the current credential version completed a real inference response.
 	InferenceVerified bool `json:"-"`
 	// LastInferenceVerifiedAt records when the current credential version last completed an inference response.
@@ -1039,7 +1040,9 @@ func IsCodexClientUserAgent(userAgent string) bool {
 		strings.Contains(ua, "codex-rs") ||
 		strings.Contains(ua, "codex_cli_rs") ||
 		strings.Contains(ua, "codex-tui") ||
-		strings.Contains(ua, "codex_exec")
+		strings.Contains(ua, "codex_exec") ||
+		strings.Contains(ua, "codex-acp") ||
+		strings.Contains(ua, "codex_acp")
 }
 
 func headerValueFromHTTPHeader(headers http.Header, name string) string {

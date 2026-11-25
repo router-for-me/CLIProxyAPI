@@ -7,12 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -28,66 +29,42 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if antigravityInTOSPause(e.cfg, auth) {
 		return cliproxyexecutor.Response{}, newAntigravityTOSPauseStatusErr()
 	}
-	if !antigravityCoolingDisabled(auth, e.cfg) {
-		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
-			return cliproxyexecutor.Response{}, homeKVUnavailableStatusErr(errCooldown)
-		} else if inCooldown {
-			log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", antigravityAuthID(auth), baseModel, remaining)
-			d := remaining
-			return cliproxyexecutor.Response{}, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
-		}
-	}
 
-	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("antigravity")
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
+	prepared, errPrepare := e.prepareAntigravityRequest(ctx, auth, req, opts, baseModel, false, true)
+	if errPrepare != nil {
+		return cliproxyexecutor.Response{}, errPrepare
 	}
-	originalPayloadSource, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, from, originalPayloadSource)
-	if errValidate != nil {
-		return cliproxyexecutor.Response{}, errValidate
-	}
-	req.Payload = originalPayloadSource
-
-	// Prepare payload once (doesn't depend on baseURL). A translation refusal is
-	// observed before the token refresh or any upstream call.
-	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
-	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
-	translatedReq := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq)
-	if translatedReq.Err != nil {
-		return cliproxyexecutor.Response{}, translatedReq.Err
-	}
-	payload := translatedReq.Body
-	originalTranslatedForPayload := append([]byte(nil), payload...)
-
-	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
-	if errToken != nil {
-		return cliproxyexecutor.Response{}, errToken
-	}
-	if updatedAuth != nil {
-		auth = updatedAuth
-	}
+	auth = prepared.auth
 	cliproxyauth.NotifyAccessTokenFingerprint(ctx, auth)
-	if strings.TrimSpace(token) == "" {
+	if strings.TrimSpace(prepared.token) == "" {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
-	doc := ojson.NewDoc(payload)
-	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
+	req.Payload = prepared.originalPayload
+	selection := prepared.model
+	doc := ojson.NewDoc(prepared.translated)
+	if errThinking := helps.ApplyAntigravityRequestThinkingDoc(doc, req, opts, selection); errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
 	e.obfuscateSensitiveWordsDoc(doc)
-	helps.PrepareAntigravityClaudeStructuredOutputDoc(baseModel, doc)
-	sanitizeAntigravityGeminiRequestSignaturesDoc(baseModel, doc)
-	if _, errReplay := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
+	helps.PrepareAntigravityClaudeStructuredOutputDoc(selection.ID, doc)
+	antigravitygemini.NormalizeAntigravityRequestDoc(doc)
+	sanitizeAntigravityGeminiRequestSignaturesDoc(selection.ID, doc)
+	if _, errReplay := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx, selection.ID, req, opts, doc); errReplay != nil {
 		return cliproxyexecutor.Response{}, errReplay
 	}
-	ensureAntigravityGeminiLeadingUserContentDoc(baseModel, doc)
+	ensureAntigravityGeminiLeadingUserContentDoc(selection.ID, doc)
 
-	populateAntigravityCountTokensModelDoc(doc, baseModel)
+	if selection.MaxOutputTokens > 0 {
+		_ = doc.Set("request.model", formatAntigravityCountTokensModel(selection.ID))
+		_, isClaudeModel := antigravitySchemaSanitizationFlags(selection.ID)
+		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
+	} else {
+		populateAntigravityCountTokensModelDoc(doc, baseModel)
+	}
 
 	_ = doc.Delete("project")
 	_ = doc.Delete("model")
@@ -96,7 +73,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	_ = doc.Delete("request.labels")
 	_ = doc.Delete("request.sessionId")
 	_ = doc.Delete("request.stream")
-	sanitizeAntigravityRequestSchemasForModelIfNeededDoc(baseModel, doc)
+	sanitizeAntigravityRequestSchemasForModelIfNeededDoc(selection.ID, doc)
 
 	base := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -116,16 +93,16 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		requestURL.WriteString(url.QueryEscape(opts.Alt))
 	}
 
-	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "request", originalTranslatedForPayload, req, opts))
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizerWithSourceModels(e.cfg, e.Identifier(), selection.ID, to.String(), "request", prepared.originalTranslated, req, opts, baseModel))
 	helps.FinalizePayloadDoc(ctx, doc)
-	payload = doc.Bytes()
+	payload := helps.SerializeAntigravityPayload(doc, false)
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return cliproxyexecutor.Response{}, errReq
 	}
 	// No httpReq.Close: keep the shared Antigravity connection pool usable.
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Authorization", "Bearer "+prepared.token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
@@ -170,30 +147,51 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errRead
 	}
 
-	if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+	statusCode := httpResp.StatusCode
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		if bodyTruncated {
 			errOversize := statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("antigravity count_tokens response exceeded %d bytes", antigravityCountTokensMaxResponseBytes)}
 			helps.RecordAPIResponseError(ctx, e.cfg, errOversize)
 			return cliproxyexecutor.Response{}, errOversize
 		}
-		count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
-		translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
-		return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
+		trimmedBody := bytes.TrimSpace(bodyBytes)
+		if len(trimmedBody) == 0 || trimmedBody[0] != '{' || !ojson.ValidBytes(bodyBytes) {
+			errInvalid := statusErr{code: http.StatusBadGateway, msg: "antigravity count_tokens response is not a valid JSON object"}
+			helps.RecordAPIResponseError(ctx, e.cfg, errInvalid)
+			return cliproxyexecutor.Response{}, errInvalid
+		}
+		if errorResult := ojson.GetBytesNoCopy(trimmedBody, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
+			statusCode = antigravityInBandErrorStatusCode(errorResult)
+		} else {
+			totalTokens := ojson.GetBytesNoCopy(trimmedBody, "totalTokens")
+			if !totalTokens.Exists() || totalTokens.Type != ojson.Number {
+				errMissing := statusErr{code: http.StatusBadGateway, msg: "antigravity count_tokens response missing numeric totalTokens"}
+				helps.RecordAPIResponseError(ctx, e.cfg, errMissing)
+				return cliproxyexecutor.Response{}, errMissing
+			}
+			parsedCount, errParse := strconv.ParseUint(totalTokens.Raw, 10, 63)
+			if errParse != nil {
+				errInvalidCount := statusErr{code: http.StatusBadGateway, msg: "antigravity count_tokens response has invalid totalTokens"}
+				helps.RecordAPIResponseError(ctx, e.cfg, errInvalidCount)
+				return cliproxyexecutor.Response{}, errInvalidCount
+			}
+			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, int64(parsedCount), bodyBytes)
+			return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
+		}
 	}
 
-	if httpResp.StatusCode == http.StatusTooManyRequests {
-		if err429 := e.applyAntigravity429StateWithEvictAll(ctx, auth, baseModel, false, httpResp.Header, bodyBytes, true); err429 != nil {
+	if statusCode == http.StatusTooManyRequests {
+		if err429 := e.applyAntigravity429StateWithEvictAll(ctx, auth, selection.ID, false, httpResp.Header, bodyBytes, true); err429 != nil {
 			return cliproxyexecutor.Response{}, err429
 		}
 	}
-	switch httpResp.StatusCode {
+	switch statusCode {
 	case http.StatusForbidden:
 		e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 	case http.StatusUnauthorized:
 		closeAntigravityAuthIdleTransports(auth)
 	}
-	sErr := newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
-	return cliproxyexecutor.Response{}, sErr
+	return cliproxyexecutor.Response{}, newAntigravityStatusErrWithHeaders(statusCode, httpResp.Header, bodyBytes)
 }
 
 // populateAntigravityCountTokensModelDoc sets request.model when absent or blank
