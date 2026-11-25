@@ -558,3 +558,26 @@ func TestConvertCodexResponseToGemini_InvalidOrTruncatedFunctionCallArguments(t 
 		})
 	}
 }
+
+func TestConvertCodexResponseToGemini_RestoresShortenedNameFromSnakeCaseDeclarations_Issue8098(t *testing.T) {
+	ctx := context.Background()
+	prefix := strings.Repeat("a", 65)
+	tool1 := prefix + "_first"
+	tool2 := prefix + "_second"
+
+	origReqDoc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	_ = origReqDoc.Set("tools.0.function_declarations.0.name", tool1)
+	_ = origReqDoc.Set("tools.0.function_declarations.1.name", tool2)
+	origReq := origReqDoc.Bytes()
+
+	shortMap := buildShortNameMap([]string{tool1, tool2})
+	short2 := shortMap[tool2]
+
+	respDoc := ojson.NewDocString(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"usage":{"input_tokens":1,"output_tokens":2},"output":[{"type":"function_call","call_id":"call_1","name":"","arguments":"{}"}]}}`)
+	_ = respDoc.Set("response.output.0.name", short2)
+
+	out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", origReq, nil, respDoc.Bytes(), nil)
+	if got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.name").String(); got != tool2 {
+		t.Fatalf("functionCall.name = %q, want %q; out=%s", got, tool2, out)
+	}
+}

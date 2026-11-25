@@ -543,11 +543,7 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	var names []string
 	tarr := tools.Array()
 	for i := 0; i < len(tarr); i++ {
-		fns := tarr[i].Get("functionDeclarations")
-		if !fns.IsArray() {
-			continue
-		}
-		for _, fn := range fns.Array() {
+		for _, fn := range geminiToolFunctionDeclarations(tarr[i]) {
 			if v := fn.Get("name"); v.Exists() {
 				names = append(names, v.String())
 			}
