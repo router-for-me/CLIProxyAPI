@@ -258,3 +258,102 @@ func TestAntigravityBaseModelNames_ListsAndRoutesBaseName(t *testing.T) {
 		}
 	}
 }
+
+func TestAntigravityBaseModelNames_BaseOnlyEntryKeepsWebSearchLookup(t *testing.T) {
+	catalog := []*ModelInfo{{
+		ID:                "gemini-9-future-high",
+		Thinking:          &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		SupportsWebSearch: true,
+	}}
+	published := applyOAuthModelAliasEntries(antigravityBaseModelAliases(catalog), catalog)
+	if len(published) != 1 || published[0].ID != "gemini-9-future" {
+		t.Fatalf("expected only the base name to be published, got %+v", published)
+	}
+
+	const authID = "antigravity-base-model-names-web-search"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "antigravity", published)
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	// Requests reach the translator under the catalog ID, which is not published.
+	if got := registry.AntigravityWebSearchModelFor("gemini-9-future-high"); got != "gemini-9-future" {
+		t.Fatalf("web search lookup for the catalog ID = %q, want %q", got, "gemini-9-future")
+	}
+}
+
+func TestRefreshOAuthModelAliasRouting_SerializedWithConfigRuntime(t *testing.T) {
+	const alias = "antigravity-alias-refresh-model"
+	aliasConfig := func(upstream string) *config.Config {
+		return &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"antigravity": {{Name: upstream, Alias: alias}},
+		}}
+	}
+	oldCfg, newCfg := aliasConfig("upstream-old"), aliasConfig("upstream-new")
+
+	ctx := coreauth.WithSkipPersist(t.Context())
+	manager := coreauth.NewManager(nil, nil, nil)
+	var upstreamModels []string
+	manager.RegisterExecutor(antigravityBaseNameRecordingExecutor{models: &upstreamModels})
+	service := &Service{cfg: oldCfg, coreManager: manager}
+	if !service.applyManagerConfig(ctx, configCommit{cfg: oldCfg, sequence: 1}) {
+		t.Fatal("applyManagerConfig failed")
+	}
+
+	auth := &coreauth.Auth{
+		ID:         "antigravity-alias-refresh-auth",
+		Provider:   "antigravity",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "antigravity", []*ModelInfo{{ID: alias}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	upstream := func() string {
+		t.Helper()
+		upstreamModels = nil
+		if _, errExecute := manager.Execute(ctx, []string{"antigravity"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); errExecute != nil {
+			t.Fatalf("execute: %v", errExecute)
+		}
+		if len(upstreamModels) != 1 {
+			t.Fatalf("expected one upstream request, got %v", upstreamModels)
+		}
+		return upstreamModels[0]
+	}
+	if got := upstream(); got != "upstream-old" {
+		t.Fatalf("initial upstream = %q, want upstream-old", got)
+	}
+
+	// A config reload has committed newCfg and is still applying it.
+	service.configRuntimeMu.Lock()
+	service.cfgMu.Lock()
+	service.cfg = newCfg
+	service.cfgMu.Unlock()
+	started, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		service.refreshOAuthModelAliasRouting()
+		close(done)
+	}()
+	<-started
+	select {
+	case <-done:
+		service.configRuntimeMu.Unlock()
+		t.Fatal("alias refresh must wait for config runtime application")
+	default:
+	}
+	if got := upstream(); got != "upstream-old" {
+		service.configRuntimeMu.Unlock()
+		t.Fatalf("upstream while config runtime is applying = %q, want upstream-old", got)
+	}
+	service.configRuntimeMu.Unlock()
+	<-done
+
+	if got := upstream(); got != "upstream-new" {
+		t.Fatalf("upstream after alias refresh = %q, want upstream-new", got)
+	}
+}

@@ -374,12 +374,7 @@ func (s *Service) registerModelRefreshCallback() {
 		if providerSet[antigravityOAuthModelAliasChannel] {
 			// Derived base-name aliases follow the catalog, so rebuild the
 			// routing table before models are re-registered.
-			s.cfgMu.RLock()
-			cfg := s.cfg
-			s.cfgMu.RUnlock()
-			if cfg != nil {
-				s.coreManager.SetOAuthModelAlias(effectiveOAuthModelAlias(cfg))
-			}
+			s.refreshOAuthModelAliasRouting()
 		}
 
 		auths := s.coreManager.List()

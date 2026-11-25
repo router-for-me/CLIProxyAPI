@@ -462,3 +462,29 @@ func TestGetDevinModelsFallback(t *testing.T) {
 		t.Errorf("info.DisplayName = %q, want SWE-2", info.DisplayName)
 	}
 }
+
+func TestAntigravityWebSearchModelForFollowsOAuthAliasSource(t *testing.T) {
+	registryRef := GetGlobalRegistry()
+	registryRef.RegisterClient("test-antigravity-websearch-alias", "antigravity", []*ModelInfo{
+		{ID: "gemini-alias-search", OAuthAlias: "gemini-alias-search", OAuthAliasSource: "gemini-alias-search-high", SupportsWebSearch: true},
+		{ID: "gemini-alias-plain", OAuthAlias: "gemini-alias-plain", OAuthAliasSource: "gemini-alias-plain-high"},
+		{ID: "gemini-alias-fork-high"},
+		{ID: "gemini-alias-fork", OAuthAlias: "gemini-alias-fork", OAuthAliasSource: "gemini-alias-fork-high", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient("test-antigravity-websearch-alias")
+	})
+
+	if got := AntigravityWebSearchModelFor("gemini-alias-search-high"); got != "gemini-alias-search" {
+		t.Fatalf("upstream model published only under an alias = %q, want the alias", got)
+	}
+	if got := AntigravityWebSearchModelFor("gemini-alias-search-high(low)"); got != "gemini-alias-search" {
+		t.Fatalf("suffixed upstream model published only under an alias = %q, want the alias", got)
+	}
+	if got := AntigravityWebSearchModelFor("gemini-alias-plain-high"); got != "" {
+		t.Fatalf("alias without web search support should not match, got %q", got)
+	}
+	if got := AntigravityWebSearchModelFor("gemini-alias-fork-high"); got != "" {
+		t.Fatalf("published model without web search support must win over its alias, got %q", got)
+	}
+}

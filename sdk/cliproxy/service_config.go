@@ -293,6 +293,24 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	return true
 }
 
+// refreshOAuthModelAliasRouting republishes the routing alias table for the
+// committed config after the Antigravity catalog changed. Reading the config
+// and publishing its aliases happen under configRuntimeMu, so a catalog refresh
+// cannot reinstall the aliases of a config that a reload has since replaced.
+func (s *Service) refreshOAuthModelAliasRouting() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	s.configRuntimeMu.Lock()
+	defer s.configRuntimeMu.Unlock()
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg != nil {
+		s.coreManager.SetOAuthModelAlias(effectiveOAuthModelAlias(cfg))
+	}
+}
+
 func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Config) bool {
 	if s == nil || cfg == nil || (ctx != nil && ctx.Err() != nil) {
 		return false

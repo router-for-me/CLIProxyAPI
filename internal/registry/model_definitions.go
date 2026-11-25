@@ -100,12 +100,14 @@ func GetAntigravityModels() []*ModelInfo {
 }
 
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
-// native web search request for modelID.
+// native web search request for modelID. A model published only under an OAuth
+// alias is found through the alias source, and the published alias is returned.
 func AntigravityWebSearchModelFor(modelID string) string {
 	modelID = normalizeAntigravityCapabilityModelID(modelID)
 	if modelID == "" {
 		return ""
 	}
+	aliasModelID := ""
 	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
 		if model == nil {
 			continue
@@ -120,8 +122,15 @@ func AntigravityWebSearchModelFor(modelID string) string {
 			}
 			return ""
 		}
+		if !model.SupportsWebSearch || normalizeAntigravityCapabilityModelID(model.OAuthAliasSource) != modelID {
+			continue
+		}
+		// Registry iteration order is random; keep the result stable.
+		if aliasModelID == "" || currentModelID < aliasModelID {
+			aliasModelID = currentModelID
+		}
 	}
-	return ""
+	return aliasModelID
 }
 
 // GetXAIModels returns the standard xAI Grok model definitions.
