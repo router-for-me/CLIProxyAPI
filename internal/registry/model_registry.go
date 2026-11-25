@@ -1792,8 +1792,9 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 	defer r.mutex.RUnlock()
 
 	type providerModel struct {
-		count int
-		info  *ModelInfo
+		count             int
+		info              *ModelInfo
+		supportsWebSearch bool
 	}
 
 	providerModels := make(map[string]*providerModel)
@@ -1818,16 +1819,19 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 				providerModels[modelID] = entry
 			}
 			entry.count++
-			if entry.info == nil {
-				if clientInfos != nil {
-					if info := clientInfos[modelID]; info != nil {
+			if clientInfos != nil {
+				if info := clientInfos[modelID]; info != nil {
+					if entry.info == nil {
 						entry.info = info
 					}
-				}
-				if entry.info == nil {
-					if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
-						entry.info = reg.Info
+					if info.SupportsWebSearch {
+						entry.supportsWebSearch = true
 					}
+				}
+			}
+			if entry.info == nil {
+				if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
+					entry.info = reg.Info
 				}
 			}
 		}
@@ -1895,12 +1899,17 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+			var cloned *ModelInfo
 			if entry.info != nil {
-				result = append(result, cloneModelInfo(entry.info))
-				continue
+				cloned = cloneModelInfo(entry.info)
+			} else if ok && registration != nil && registration.Info != nil {
+				cloned = cloneModelInfo(registration.Info)
 			}
-			if ok && registration != nil && registration.Info != nil {
-				result = append(result, cloneModelInfo(registration.Info))
+			if cloned != nil {
+				if entry.supportsWebSearch {
+					cloned.SupportsWebSearch = true
+				}
+				result = append(result, cloned)
 			}
 		}
 	}
