@@ -430,7 +430,7 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 			continue
 		}
 		e := cfg.VertexCompatAPIKey[idx]
-		key := strings.TrimSpace(e.APIKey) + "|" + strings.TrimSpace(e.BaseURL) + "\x00" + config.FormatConnectionPoolDedupID(e.ConnectionPool)
+		key := strings.TrimSpace(e.APIKey) + "|" + strings.TrimSpace(e.BaseURL) + "\x00" + strings.TrimSpace(e.ProxyURL) + "\x00" + config.FormatConnectionPoolDedupID(e.ConnectionPool)
 		providerAuthMap["vertex"][key] = resolveAuthIndex(a)
 	}
 
@@ -615,7 +615,8 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 				apiKey := strings.TrimSpace(yamlMapScalar(keyNode, "api-key"))
 				pool := resolveInheritedConnectionPool(keyNode, group)
 				if providerName == "vertex" {
-					vertexKey := apiKey + "|" + groupBase + "\x00" + config.FormatConnectionPoolDedupID(pool)
+					proxyURL := resolveInheritedScalar(keyNode, group, "proxy-url")
+					vertexKey := apiKey + "|" + groupBase + "\x00" + proxyURL + "\x00" + config.FormatConnectionPoolDedupID(pool)
 					if idx, ok := providerAuthMap["vertex"][vertexKey]; ok {
 						setMapScalar(keyNode, "auth_index", idx)
 					}
