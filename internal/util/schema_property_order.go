@@ -2,58 +2,128 @@ package util
 
 import (
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 )
 
-func restorePropertyOrder(original, resolved string) string {
-	orders := make(map[string][]string)
-	ambiguous := make(map[string]bool)
-	walkSchemaProperties(ojson.Parse(original), "", false, func(_ string, properties ojson.Result) {
-		keys := objectKeys(properties)
-		signature := propertySignature(keys)
-		if known, seen := orders[signature]; seen && !slices.Equal(known, keys) {
-			ambiguous[signature] = true
-			return
-		}
-		orders[signature] = keys
-	})
-
-	var paths []string
-	walkSchemaProperties(ojson.Parse(resolved), "", false, func(path string, _ ojson.Result) {
-		paths = append(paths, path)
-	})
-	if len(paths) == 0 {
-		return resolved
-	}
-
-	doc := ojson.NewDocString(resolved)
-	for _, path := range paths {
-		current := doc.Get(path)
-		keys := objectKeys(current)
-		signature := propertySignature(keys)
-		want, known := orders[signature]
-		if !known || ambiguous[signature] || slices.Equal(want, keys) {
-			continue
-		}
-		ordered := ojson.NewDocString("{}")
-		for _, key := range want {
-			escaped := escapeWritePathKey(key)
-			_ = ordered.SetRaw(escaped, current.Get(escaped).Raw)
-		}
-		_ = doc.SetRaw(path, ordered.String())
-	}
-	return doc.String()
+type propertyOrders struct {
+	byNames   map[string][]string
+	ambiguous map[string]bool
 }
 
-func walkSchemaProperties(value ojson.Result, path string, inNameMap bool, visit func(path string, properties ojson.Result)) {
+func restorePropertyOrder(original, resolved string) string {
+	orders := propertyOrders{byNames: make(map[string][]string), ambiguous: make(map[string]bool)}
+	collectPropertyOrders(ojson.Parse(original), false, orders)
+	if len(orders.byNames) == 0 {
+		return resolved
+	}
+	out, changed := reorderSchemaValue(ojson.Parse(resolved), false, false, orders)
+	if !changed {
+		return resolved
+	}
+	return out
+}
+
+func collectPropertyOrders(value ojson.Result, inNameMap bool, orders propertyOrders) {
+	forEachSchemaChild(value, inNameMap, func(name string, child ojson.Result, childInNameMap bool) {
+		if name == "properties" && !inNameMap && child.IsObject() {
+			orders.record(objectKeys(child))
+		}
+		collectPropertyOrders(child, childInNameMap, orders)
+	})
+}
+
+func (o propertyOrders) record(keys []string) {
+	names := propertySignature(keys)
+	if known, seen := o.byNames[names]; seen && !slices.Equal(known, keys) {
+		o.ambiguous[names] = true
+		return
+	}
+	o.byNames[names] = keys
+}
+
+func (o propertyOrders) lookup(keys []string) ([]string, bool) {
+	names := propertySignature(keys)
+	want, known := o.byNames[names]
+	if !known || o.ambiguous[names] {
+		return nil, false
+	}
+	return want, true
+}
+
+func reorderSchemaValue(value ojson.Result, inNameMap, isProperties bool, orders propertyOrders) (string, bool) {
 	if value.IsArray() {
-		index := 0
+		return reorderSchemaArray(value, orders)
+	}
+	if !value.IsObject() {
+		return value.Raw, false
+	}
+
+	keys := objectKeys(value)
+	members := make(map[string]string, len(keys))
+	changed := false
+	value.ForEach(func(key, child ojson.Result) bool {
+		name := key.String()
+		members[name] = child.Raw
+		if !inNameMap && isLiteralValueKeyword(name) {
+			return true
+		}
+		_, childInNameMap := schemaNameMapKeywords[name]
+		raw, childChanged := reorderSchemaValue(child, !inNameMap && childInNameMap, !inNameMap && name == "properties", orders)
+		if childChanged {
+			members[name] = raw
+			changed = true
+		}
+		return true
+	})
+
+	order := keys
+	if isProperties {
+		if want, known := orders.lookup(keys); known && !slices.Equal(want, keys) {
+			order = want
+			changed = true
+		}
+	}
+	if !changed {
+		return value.Raw, false
+	}
+
+	doc := ojson.NewDocString("{}")
+	for _, name := range order {
+		if err := doc.SetRaw(objectKeyWritePath(name), members[name]); err != nil {
+			return value.Raw, false
+		}
+	}
+	return doc.String(), true
+}
+
+func reorderSchemaArray(value ojson.Result, orders propertyOrders) (string, bool) {
+	var items []string
+	changed := false
+	value.ForEach(func(_, item ojson.Result) bool {
+		raw, itemChanged := reorderSchemaValue(item, false, false, orders)
+		items = append(items, raw)
+		changed = changed || itemChanged
+		return true
+	})
+	if !changed {
+		return value.Raw, false
+	}
+
+	doc := ojson.NewDocString("[]")
+	for _, raw := range items {
+		if err := doc.SetRaw("-1", raw); err != nil {
+			return value.Raw, false
+		}
+	}
+	return doc.String(), true
+}
+
+func forEachSchemaChild(value ojson.Result, inNameMap bool, visit func(name string, child ojson.Result, childInNameMap bool)) {
+	if value.IsArray() {
 		value.ForEach(func(_, item ojson.Result) bool {
-			walkSchemaProperties(item, joinPath(path, strconv.Itoa(index)), false, visit)
-			index++
+			visit("", item, false)
 			return true
 		})
 		return
@@ -63,21 +133,24 @@ func walkSchemaProperties(value ojson.Result, path string, inNameMap bool, visit
 	}
 	value.ForEach(func(key, child ojson.Result) bool {
 		name := key.String()
-		childPath := joinPath(path, escapeWritePathKey(name))
 		if inNameMap {
-			walkSchemaProperties(child, childPath, false, visit)
+			visit(name, child, false)
 			return true
 		}
 		if isLiteralValueKeyword(name) {
 			return true
 		}
-		if name == "properties" && child.IsObject() {
-			visit(childPath, child)
-		}
-		_, childIsNameMap := schemaNameMapKeywords[name]
-		walkSchemaProperties(child, childPath, childIsNameMap, visit)
+		_, childInNameMap := schemaNameMapKeywords[name]
+		visit(name, child, childInNameMap)
 		return true
 	})
+}
+
+func objectKeyWritePath(key string) string {
+	if key == "" {
+		return ":"
+	}
+	return strings.ReplaceAll(ojson.Escape(key), ":", `\:`)
 }
 
 func objectKeys(object ojson.Result) []string {
@@ -93,8 +166,4 @@ func propertySignature(keys []string) string {
 	sorted := slices.Clone(keys)
 	slices.Sort(sorted)
 	return strings.Join(sorted, "\x00")
-}
-
-func escapeWritePathKey(key string) string {
-	return strings.ReplaceAll(ojson.Escape(key), ":", `\:`)
 }

@@ -421,6 +421,11 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 			path:  "properties",
 			want:  []string{"z", "@this", "#", "a|b", "[x]", "{y}", "!w", `q"r`, `b\c`, "a"},
 		},
+		"empty property name": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","required":[""],"properties":{"z":{"$ref":"#/$defs/P"},"":{"type":"integer"}}}`,
+			path:  "properties",
+			want:  []string{"z", ""},
+		},
 		"nested under leading colon property name": {
 			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{":id":{"type":"object","properties":{"z":{"$ref":"#/$defs/P"},"a":{"type":"string"}}}}}`,
 			path:  `properties.\:id.properties`,
@@ -447,6 +452,26 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 				t.Errorf("property order = %v, want %v: %s", keys, tc.want, got)
 			}
 		})
+	}
+}
+
+func TestInlineLocalRefsKeepsPropertyOrderUnderEmptyName(t *testing.T) {
+	input := `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"":{"type":"object","properties":{"z":{"$ref":"#/$defs/P"},"a":{"type":"string"}}}}}`
+
+	got := InlineLocalRefs(input)
+	var keys []string
+	ojson.Get(got, "properties").ForEach(func(name, value ojson.Result) bool {
+		if name.String() != "" {
+			return true
+		}
+		value.Get("properties").ForEach(func(key, _ ojson.Result) bool {
+			keys = append(keys, key.String())
+			return true
+		})
+		return false
+	})
+	if strings.Join(keys, ",") != "z,a" {
+		t.Errorf("property order = %v, want [z a]: %s", keys, got)
 	}
 }
 
