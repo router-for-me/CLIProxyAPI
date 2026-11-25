@@ -882,11 +882,10 @@ func buildOpenAIResponsesFunctionCallPart(item ojson.Result, signature string, f
 			_ = fcDoc.Set("functionCall.args.input", "")
 		}
 	} else {
-		arguments := item.Get("arguments").String()
+		arguments := strings.TrimSpace(item.Get("arguments").String())
 		if arguments != "" {
-			argsResult := ojson.Parse(arguments)
-			if argsResult.IsObject() || argsResult.IsArray() {
-				_ = fcDoc.SetRaw("functionCall.args", argsResult.Raw)
+			if ojson.Valid(arguments) && ojson.Parse(arguments).IsObject() {
+				_ = fcDoc.SetRaw("functionCall.args", arguments)
 			} else {
 				_ = fcDoc.Set("functionCall.args.arguments", arguments)
 			}
