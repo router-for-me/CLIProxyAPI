@@ -24,6 +24,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -582,6 +583,118 @@ func TestHomePluginDispatchRegistrationPropagatesIdentifierFailure(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+func TestHomeDispatchReportsAntigravityProjectDiscoveryFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name, operation string
+		status          int
+		delegated       bool
+		refresh         bool
+		wantRecord      bool
+	}{
+		{name: "execute-401", operation: "execute", status: http.StatusUnauthorized, delegated: true, wantRecord: true},
+		{name: "stream-429-after-refresh", operation: "stream", status: http.StatusTooManyRequests, delegated: true, refresh: true, wantRecord: true},
+		{name: "count-401-after-refresh", operation: "count", status: http.StatusUnauthorized, delegated: true, refresh: true, wantRecord: true},
+		{name: "native-429", operation: "execute", status: http.StatusTooManyRequests, wantRecord: true},
+		{name: "other-status", operation: "execute", status: http.StatusServiceUnavailable, delegated: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			manager.RegisterExecutor(runtimeexecutor.NewAntigravityExecutor(cfg))
+			manager.SetRetryConfig(0, 0, 1)
+			pluginID, routeModel := "", homePluginModel
+			if tt.delegated {
+				pluginID, routeModel = homePluginID, homePluginAlias
+				plugin := &fakeExecutor{identifier: "plugin-native-provider"}
+				manager.SetHomePluginExecutorResolver(newHostWithRecords(homeExecutorRecord(plugin, "antigravity")))
+			}
+			now := time.Now()
+			selected := homeExecutorTestAuth("selected-token", "", now.Add(time.Hour))
+			effective := selected
+			var refreshCalls atomic.Int32
+			if tt.refresh {
+				selected = homeExecutorTestAuth("selected-token", "", now.Add(time.Minute))
+				effective = homeExecutorTestAuth("fresh-token", "", now.Add(time.Hour))
+				reply, errMarshal := json.Marshal(map[string]any{"auth": effective, "auth_index": homePluginIndex})
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				newHomeExecutorTestClient(t, func(command, argument string) []byte {
+					if command != "GET" || ojson.Get(argument, "type").String() != "refresh" {
+						t.Errorf("unexpected Home request: %s %s", command, argument)
+						return nil
+					}
+					refreshCalls.Add(1)
+					return reply
+				})
+			}
+			manager.PublishHomeDispatch(&homeExecutorTestDispatcher{payload: homeExecutorDispatchJSON(t, selected, pluginID)}, executionregistry.New(), 1)
+			capture := newTestUsageCapturePlugin("")
+			registerTestUsagePlugin(t, t.Name(), capture)
+			const body = `{"error":{"message":"project discovery rejected"}}`
+			var projectCalls atomic.Int32
+			transport := homeExecutorTestTransport(func(req *http.Request) (*http.Response, error) {
+				if !strings.HasSuffix(req.URL.Path, ":loadCodeAssist") {
+					return nil, fmt.Errorf("unexpected Antigravity request %s", req.URL.Path)
+				}
+				projectCalls.Add(1)
+				if req.Header.Get("Authorization") != "Bearer "+effective.Metadata["access_token"].(string) {
+					t.Error("project discovery did not use the expected token")
+				}
+				return &http.Response{StatusCode: tt.status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+			req := coreexecutor.Request{Model: routeModel, Payload: []byte(`{}`)}
+			opts := coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Stream: tt.operation == "stream"}
+			var errExecute error
+			switch tt.operation {
+			case "execute":
+				_, errExecute = manager.Execute(ctx, []string{"home"}, req, opts)
+			case "stream":
+				_, errExecute = manager.ExecuteStream(ctx, []string{"home"}, req, opts)
+			case "count":
+				_, errExecute = manager.ExecuteCount(ctx, []string{"home"}, req, opts)
+			}
+			var statusErr interface{ StatusCode() int }
+			if !errors.As(errExecute, &statusErr) || statusErr.StatusCode() != tt.status || projectCalls.Load() != 1 {
+				t.Fatalf("project calls = %d, execution error = %v, want one project call and status %d", projectCalls.Load(), errExecute, tt.status)
+			}
+			if calls := refreshCalls.Load(); (tt.refresh && calls != 1) || (!tt.refresh && calls != 0) {
+				t.Fatalf("refresh calls = %d, refresh expected = %v", calls, tt.refresh)
+			}
+			// Publication is FIFO; the barrier lets the test detect duplicates without sleeping.
+			barrier := t.Name()
+			coreusage.PublishRecord(ctx, coreusage.Record{Provider: barrier})
+			var records []coreusage.Record
+			for {
+				record := capture.waitRecord(t, 5*time.Second)
+				if record.Provider == barrier {
+					break
+				}
+				if record.AuthID == homePluginAuth {
+					records = append(records, record)
+				}
+			}
+			if !tt.wantRecord {
+				if len(records) != 0 {
+					t.Fatalf("got %d unexpected failure records", len(records))
+				}
+				return
+			}
+			if len(records) != 1 {
+				t.Fatalf("failure records = %d, want 1", len(records))
+			}
+			record := records[0]
+			if !record.Failed || record.Fail.StatusCode != tt.status || record.Fail.Body != body || record.Provider != "antigravity" ||
+				record.AuthIndex != homePluginIndex || record.AccessTokenSHA256 != coreauth.AccessTokenSHA256(&effective) ||
+				record.Model != homePluginModel || record.Alias != routeModel || record.Generate == nil || *record.Generate {
+				t.Errorf("incorrect project-discovery failure record: %+v", record)
+			}
+		})
 	}
 }
 

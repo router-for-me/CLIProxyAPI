@@ -104,6 +104,10 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 
 	projectID, errProject := e.fetchAntigravityProjectID(ctx, updated, token)
 	if errProject != nil {
+		var upstreamErr *antigravity.HTTPStatusError
+		if errors.As(errProject, &upstreamErr) {
+			cliproxyauth.ReportHomeAuthPreparationFailure(ctx, updated, upstreamErr.StatusCode(), upstreamErr.ResponseBody())
+		}
 		if ctx != nil && ctx.Err() != nil && antigravityStatusCodeFromError(errProject) == 0 {
 			return nil, errProject
 		}

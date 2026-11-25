@@ -2068,7 +2068,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var preparedAuth *Auth
 		var errPrepare error
 		if selection != nil {
-			preparedAuth, errPrepare = m.prepareHomeRequestAuth(execCtx, selection)
+			preparedAuth, errPrepare = m.prepareHomeRequestAuth(execCtx, selection, models[0])
 		} else {
 			preparedAuth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
@@ -2836,10 +2836,14 @@ func mergeHomePreparedSnapshot(base, current, prepared *Auth) *Auth {
 }
 
 // prepareHomeRequestAuth prepares a dispatch auth without reading or updating local auth state.
-func (m *Manager) prepareHomeRequestAuth(ctx context.Context, selection *HomeDispatchSelection) (*Auth, error) {
+func (m *Manager) prepareHomeRequestAuth(ctx context.Context, selection *HomeDispatchSelection, upstreamModel string) (*Auth, error) {
 	if selection == nil {
 		return nil, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, homeAuthPreparationModelKey{}, canonicalModelKey(upstreamModel))
 	auth := selection.CloneAuth()
 	credentialExecutor := selection.Executor
 	if selection.ExecutorPlugin != "" {

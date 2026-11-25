@@ -273,7 +273,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			roundTiming.Observe(noModelsErr)
 			continue
 		}
-		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection)
+		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection, models[0])
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
