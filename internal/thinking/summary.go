@@ -101,6 +101,10 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 			"request.generationConfig.thinkingConfig.include_thoughts",
 			"request.generationConfig.thinking_config.includeThoughts",
 			"request.generationConfig.thinking_config.include_thoughts",
+			"request.generation_config.thinkingConfig.includeThoughts",
+			"request.generation_config.thinkingConfig.include_thoughts",
+			"request.generation_config.thinking_config.includeThoughts",
+			"request.generation_config.thinking_config.include_thoughts",
 		}); ok {
 			return config
 		}
@@ -358,9 +362,25 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 			"request.generationConfig.thinkingConfig.include_thoughts",
 			"request.generationConfig.thinking_config.includeThoughts",
 			"request.generationConfig.thinking_config.include_thoughts",
+			"request.generation_config.thinkingConfig.includeThoughts",
+			"request.generation_config.thinkingConfig.include_thoughts",
+			"request.generation_config.thinking_config.includeThoughts",
+			"request.generation_config.thinking_config.include_thoughts",
 		} {
 			if doc.Get(path).Exists() && doc.Delete(path) == nil {
 				modified = true
+			}
+		}
+		for _, container := range []string{
+			"request.generationConfig.thinking_config",
+			"request.generation_config.thinkingConfig",
+			"request.generation_config.thinking_config",
+			"request.generation_config",
+		} {
+			if obj := doc.Get(container); obj.IsObject() && len(obj.Map()) == 0 {
+				if doc.Delete(container) == nil {
+					modified = true
+				}
 			}
 		}
 	case "interactions":
@@ -377,9 +397,30 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 			"generation_config.thinkingSummaries",
 			"generationConfig.thinking_summaries",
 			"generationConfig.thinkingSummaries",
+			"generation_config.thinking_config.include_thoughts",
+			"generation_config.thinking_config.includeThoughts",
+			"generation_config.thinkingConfig.include_thoughts",
+			"generation_config.thinkingConfig.includeThoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
+			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinkingConfig.includeThoughts",
 		} {
 			if doc.Get(alias).Exists() && doc.Delete(alias) == nil {
 				modified = true
+			}
+		}
+		for _, container := range []string{
+			"generation_config.thinking_config",
+			"generation_config.thinkingConfig",
+			"generationConfig.thinking_config",
+			"generationConfig.thinkingConfig",
+			"generationConfig",
+		} {
+			if obj := doc.Get(container); obj.IsObject() && len(obj.Map()) == 0 {
+				if doc.Delete(container) == nil {
+					modified = true
+				}
 			}
 		}
 	case "openai-response", "codex":
