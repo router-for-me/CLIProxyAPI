@@ -432,6 +432,82 @@ func TestConvertAntigravityResponseToGeminiStream_KeepsStrippedChunkCarryingReal
 	}
 }
 
+func TestConvertAntigravityResponseToGeminiStream_KeepsChunksWithMetadata(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "")
+	for _, tt := range []struct {
+		name string
+		body string
+		kept string
+	}{
+		{
+			name: "candidate safetyRatings",
+			body: `{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]},"safetyRatings":[{"category":"HARM_CATEGORY_HATE_SPEECH","probability":"NEGLIGIBLE"}]}]}`,
+			kept: "candidates.0.safetyRatings.0.category",
+		},
+		{
+			name: "candidate citationMetadata",
+			body: `{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]},"citationMetadata":{"citationSources":[{"uri":"https://example.com"}]}}]}`,
+			kept: "candidates.0.citationMetadata.citationSources.0.uri",
+		},
+		{
+			name: "response promptFeedback",
+			body: `{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]}}],"promptFeedback":{"blockReason":"OTHER"}}`,
+			kept: "promptFeedback.blockReason",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			got := ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, []byte(`data: {"response":`+tt.body+`}`), &param)
+			if len(got) != 1 {
+				t.Fatalf("chunk with metadata must be delivered, got %d chunks", len(got))
+			}
+			if parts := ojson.GetBytesNoCopy(got[0], "candidates.0.content.parts").Raw; parts != `[]` {
+				t.Fatalf("parts = %s, want the filtered empty list", parts)
+			}
+			if !ojson.GetBytesNoCopy(got[0], tt.kept).Exists() {
+				t.Fatalf("%s lost: %s", tt.kept, got[0])
+			}
+		})
+	}
+}
+
+func TestGeminiStreamJSONArrayKeepsItemsWithMetadata(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "json")
+	for _, tt := range []struct {
+		name string
+		item string
+		kept string
+	}{
+		{
+			name: "candidate safetyRatings",
+			item: `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]},"safetyRatings":[{"category":"HARM_CATEGORY_HATE_SPEECH"}]}]}}`,
+			kept: "candidates.0.safetyRatings.0.category",
+		},
+		{
+			name: "response promptFeedback",
+			item: `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}}],"promptFeedback":{"blockReason":"OTHER"}}}`,
+			kept: "promptFeedback.blockReason",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte(`[`+tt.item+`]`), nil)
+			if len(got) != 1 {
+				t.Fatalf("item with metadata must be delivered, got %d chunks", len(got))
+			}
+			items := ojson.ParseBytes(got[0]).Array()
+			if len(items) != 1 {
+				t.Fatalf("expected the metadata item, got %s", got[0])
+			}
+			if parts := items[0].Get("candidates.0.content.parts").Raw; parts != `[]` {
+				t.Fatalf("parts = %s, want the filtered empty list", parts)
+			}
+			if !items[0].Get(tt.kept).Exists() {
+				t.Fatalf("%s lost: %s", tt.kept, got[0])
+			}
+		})
+	}
+}
+
 func TestGeminiStreamJSONArrayKeepsItemsCarryingRealUsage(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "alt", "json")
 	withUsage := `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}}`

@@ -251,15 +251,23 @@ var thoughtFieldMarker = `"thought"`
 // read the response as empty (its search_web summary comes back blank). Parts with a
 // thoughtSignature, a function call or any other field are kept.
 //
-// The second result reports that nothing is left to deliver (no parts in any candidate,
-// no finishReason, no grounding metadata), so a streaming caller can skip the chunk or
-// array item entirely.
+// The second result reports that nothing is left to deliver, so a streaming caller can
+// skip the chunk or array item entirely: no candidate keeps a part and every candidate
+// and the response itself carry envelope fields only (see isEnvelopeCandidate and
+// isEnvelopeResponse). Any other field keeps the chunk, so candidate or response
+// metadata such as safetyRatings, citationMetadata or promptFeedback is never lost.
 func stripEmptyThoughtParts(doc *ojson.Doc, prefix string) (changed, nothingLeft bool) {
 	candidates := doc.Get(prefix + "candidates")
 	if !candidates.IsArray() || !strings.Contains(candidates.Raw, thoughtFieldMarker) {
 		return false, false
 	}
-	nothingLeft = true
+	var response ojson.Result
+	if prefix == "" {
+		response = ojson.ParseBytes(doc.Bytes()) // the doc root has no path
+	} else {
+		response = doc.Get(strings.TrimSuffix(prefix, "."))
+	}
+	nothingLeft = isEnvelopeResponse(response)
 	for candidateIndex, candidate := range candidates.Array() {
 		parts := candidate.Get("content.parts")
 		kept := make([]string, 0, len(parts.Array()))
@@ -275,11 +283,41 @@ func stripEmptyThoughtParts(doc *ojson.Doc, prefix string) (changed, nothingLeft
 			changed = true
 			_ = doc.SetRaw(fmt.Sprintf("%scandidates.%d.content.parts", prefix, candidateIndex), "["+strings.Join(kept, ",")+"]")
 		}
-		if len(kept) > 0 || candidate.Get("finishReason").String() != "" || candidate.Get("groundingMetadata").Exists() {
+		if len(kept) > 0 || !isEnvelopeCandidate(candidate) {
 			nothingLeft = false
 		}
 	}
 	return changed, nothingLeft
+}
+
+// isEnvelopeCandidate reports whether a candidate holds only the envelope around its
+// parts, so dropping empty thought parts from it loses no metadata.
+func isEnvelopeCandidate(candidate ojson.Result) bool {
+	for key := range candidate.Map() {
+		if key != "content" && key != "index" {
+			return false
+		}
+	}
+	for key := range candidate.Get("content").Map() {
+		if key != "role" && key != "parts" {
+			return false
+		}
+	}
+	return true
+}
+
+// isEnvelopeResponse reports whether a response holds only the envelope around its
+// candidates. Usage keys are allowed because the caller keeps chunks that carry real
+// upstream usage on its own.
+func isEnvelopeResponse(response ojson.Result) bool {
+	for key := range response.Map() {
+		switch key {
+		case "candidates", "modelVersion", "responseId", "createTime", "usageMetadata", "cpaUsageMetadata":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // isEmptyThoughtPart matches only `thought` as a JSON true and `text` absent or an empty
