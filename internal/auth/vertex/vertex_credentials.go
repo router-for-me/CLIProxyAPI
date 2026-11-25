@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -66,7 +67,7 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: merge metadata failed: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("vertex credential: create file failed: %w", err)
 	}
@@ -75,6 +76,11 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 			log.Errorf("vertex credential: failed to close file: %v", errClose)
 		}
 	}()
+	if runtime.GOOS != "windows" {
+		if errChmod := f.Chmod(0o600); errChmod != nil {
+			return fmt.Errorf("vertex credential: chmod file failed: %w", errChmod)
+		}
+	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err = enc.Encode(data); err != nil {
