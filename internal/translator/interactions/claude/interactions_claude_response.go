@@ -157,7 +157,19 @@ func interactionsStepStartToClaude(modelName string, root ojson.Result, st *inte
 		st.ToolNames[index] = strings.Clone(step.Get("name").String())
 		st.ToolIDs[index] = strings.Clone(interactionsToolID(step))
 		st.ToolSignatures[index] = strings.Clone(interactionsSignature(step))
-		return appendClaudeToolBlockStart(out, index, st)
+		out = appendClaudeToolBlockStart(out, index, st)
+		args := firstExisting(step, "arguments", "args")
+		if !args.Exists() {
+			return out
+		}
+		arguments := args.Raw
+		if args.Type == ojson.String {
+			arguments = args.String()
+		}
+		if strings.TrimSpace(arguments) == "" || (args.IsObject() && len(args.Map()) == 0) {
+			return out
+		}
+		return appendClaudeContentDelta(out, "input_json_delta", "partial_json", arguments, st)
 	case "thought":
 		return appendClaudeContentBlockStart(out, "thinking", st)
 	default:

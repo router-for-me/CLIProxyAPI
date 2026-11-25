@@ -80,10 +80,10 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "swe-2-medium",
 		},
 		{
-			name:          "swe-2 with xhigh maps to max",
+			name:          "swe-2 with xhigh maps to high on a tie",
 			rawModel:      "swe-2",
 			thinkingLevel: "xhigh",
-			want:          "swe-2-max",
+			want:          "swe-2-high",
 		},
 		{
 			name:          "swe-2 request max",
@@ -98,16 +98,22 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "swe-2-max",
 		},
 		{
+			name:          "swe-2 numeric suffix overrides body effort and prefers the lower level on ties",
+			rawModel:      "swe-2(32768)",
+			thinkingLevel: "max",
+			want:          "swe-2-high",
+		},
+		{
 			name:         "fable-5-1 budget tokens maps to max",
 			rawModel:     "claude-fable-5-1",
 			budgetTokens: 64000,
 			want:         "claude-fable-5-1-max",
 		},
 		{
-			name:         "fable-5-1 budget tokens maps to low",
+			name:         "fable-5-1 budget tokens maps to medium",
 			rawModel:     "claude-fable-5-1",
 			budgetTokens: 2048,
-			want:         "claude-fable-5-1-low",
+			want:         "claude-fable-5-1-medium",
 		},
 		{
 			name:          "fable-5-1 with xhigh",
@@ -122,10 +128,10 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "gpt-6-astra-high",
 		},
 		{
-			name:          "glm-5-3 clamp medium to high",
+			name:          "glm-5-3 clamps medium to low on a tie",
 			rawModel:      "glm-5-3",
 			thinkingLevel: "medium",
-			want:          "glm-5-3-high",
+			want:          "glm-5-3-low",
 		},
 		{
 			name:          "glm-5-3 adaptive body effort chooses the lower tied level",

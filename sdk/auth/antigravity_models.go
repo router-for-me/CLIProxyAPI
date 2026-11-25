@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/antigravitycatalog"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -45,17 +47,30 @@ const (
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs         map[string]struct{}
-	UpdatedAt        time.Time
-	ExpiresAt        time.Time
-	RouteFingerprint string
+	ModelIDs map[string]struct{}
+	// ModelEnums maps upstream model IDs to their advertised model enum strings.
+	ModelEnums map[string]string
+	// ThinkingGroups maps catalog group IDs and declared variant suffixes to output token limits.
+	ThinkingGroups map[string]map[string]int
+	// ThinkingWebSearch contains only grouped upstream IDs that advertise web search.
+	ThinkingWebSearch map[string]bool
+	UpdatedAt         time.Time
+	ExpiresAt         time.Time
+	RouteFingerprint  string
 }
 
 // Clone returns a deep copy of the capability hints.
 func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints {
+	groups := maps.Clone(h.ThinkingGroups)
+	for group, levels := range groups {
+		groups[group] = maps.Clone(levels)
+	}
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
+		ModelEnums:        maps.Clone(h.ModelEnums),
+		ThinkingGroups:    groups,
+		ThinkingWebSearch: maps.Clone(h.ThinkingWebSearch),
 		UpdatedAt:         h.UpdatedAt,
 		ExpiresAt:         h.ExpiresAt,
 		RouteFingerprint:  h.RouteFingerprint,
@@ -239,15 +254,16 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 
 	webSearchResult := top.Get("webSearchModelIds")
 	webSearchModels := make(map[string]struct{})
+	var webSearchItems []ojson.Result
 	if webSearchResult.Exists() && webSearchResult.Type != ojson.Null {
 		if !webSearchResult.IsArray() {
 			return AntigravityModelCapabilityHints{}, false
 		}
-		array := webSearchResult.Array()
-		if len(array) > antigravityMaxCatalogModels {
+		webSearchItems = webSearchResult.Array()
+		if len(webSearchItems) > antigravityMaxCatalogModels {
 			return AntigravityModelCapabilityHints{}, false
 		}
-		for _, item := range array {
+		for _, item := range webSearchItems {
 			if item.Type != ojson.String {
 				return AntigravityModelCapabilityHints{}, false
 			}
@@ -259,6 +275,8 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 
 	modelsResult := top.Get("models")
 	var modelIDs map[string]struct{}
+	var modelEnums map[string]string
+	var thinkingGroups map[string]map[string]int
 	if modelsResult.Exists() && modelsResult.Type != ojson.Null {
 		if !modelsResult.IsObject() {
 			return AntigravityModelCapabilityHints{}, false
@@ -268,17 +286,105 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 			return AntigravityModelCapabilityHints{}, false
 		}
 		modelIDs = make(map[string]struct{}, len(modelMap))
-		for id := range modelMap {
+		modelEnums = make(map[string]string)
+		for id, entry := range modelMap {
 			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
 				modelIDs[normalized] = struct{}{}
 			}
+			if id == "" || len(id) > antigravityMaxModelIDBytes {
+				continue
+			}
+			value := entry.Get("model")
+			if value.Type == ojson.String && len(value.Str) <= antigravityMaxModelIDBytes && strings.TrimSpace(value.Str) != "" {
+				modelEnums[strings.Clone(id)] = strings.Clone(value.Str)
+			}
 		}
+		thinkingGroups = parseAntigravityThinkingGroups(top.Get("groupedModels"), modelMap)
 	}
 
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: webSearchModels,
 		ModelIDs:          modelIDs,
+		ModelEnums:        modelEnums,
+		ThinkingGroups:    thinkingGroups,
+		ThinkingWebSearch: antigravityThinkingWebSearch(thinkingGroups, webSearchItems),
 	}, true
+}
+
+func antigravityThinkingWebSearch(groups map[string]map[string]int, items []ojson.Result) map[string]bool {
+	if len(groups) == 0 || len(items) == 0 {
+		return nil
+	}
+	// Grouped variants use exact upstream IDs, unlike registration hints.
+	declared := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		declared[item.Str] = struct{}{}
+	}
+	var supported map[string]bool
+	for group, levels := range groups {
+		for level := range levels {
+			id := group + "-" + level
+			if _, ok := declared[id]; ok {
+				if supported == nil {
+					supported = make(map[string]bool)
+				}
+				supported[id] = true
+			}
+		}
+	}
+	return supported
+}
+
+func parseAntigravityThinkingGroups(groupedModels ojson.Result, models map[string]ojson.Result) map[string]map[string]int {
+	if !groupedModels.IsObject() || len(models) == 0 {
+		return nil
+	}
+	var groups map[string]map[string]int
+	groupedModels.ForEach(func(key, entry ojson.Result) bool {
+		group := key.Str
+		if group == "" || len(group) >= antigravityMaxModelIDBytes || !entry.IsObject() {
+			return true
+		}
+		declared := entry.Get("supportedThinkingLevels")
+		if !declared.IsArray() {
+			return true
+		}
+		var levels map[string]int
+		declared.ForEach(func(_, item ojson.Result) bool {
+			if !item.IsObject() {
+				return true
+			}
+			suffix := item.Get("thinkingSuffix")
+			if suffix.Type != ojson.String || len(group)+1+len(suffix.Str) > antigravityMaxModelIDBytes || !antigravitycatalog.ValidThinkingSuffix(suffix.Str) {
+				return true
+			}
+			level := strings.ToLower(suffix.Str)
+			member := models[group+"-"+level]
+			if !member.IsObject() {
+				return true
+			}
+			// Zero records a declared member that is not eligible as a switch target.
+			limit := 0
+			if value := member.Get("maxOutputTokens"); value.Type == ojson.Number {
+				if n, errLimit := strconv.Atoi(value.Raw); errLimit == nil && n > 0 {
+					limit = n
+				}
+			}
+			if levels == nil {
+				levels = make(map[string]int)
+			}
+			levels[strings.Clone(level)] = limit
+			return true
+		})
+		if len(levels) > 0 {
+			if groups == nil {
+				groups = make(map[string]map[string]int)
+			}
+			groups[strings.Clone(group)] = levels
+		}
+		return true
+	})
+	return groups
 }
 
 // BuildPersistedAntigravityCapabilityHints serializes capability hints for storage in auth metadata.

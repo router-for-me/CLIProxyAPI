@@ -422,6 +422,36 @@ func TestRedactProxyURL(t *testing.T) {
 			want:  "socks5://proxy.example.com:1080",
 		},
 		{
+			name:  "empty",
+			input: "   ",
+			want:  "",
+		},
+		{
+			name:  "direct mode",
+			input: "direct",
+			want:  "direct",
+		},
+		{
+			name:  "none mode",
+			input: "none",
+			want:  "none",
+		},
+		{
+			name:  "direct mode trimmed case preserved",
+			input: " DIRECT ",
+			want:  "DIRECT",
+		},
+		{
+			name:  "none mode trimmed case preserved",
+			input: " None ",
+			want:  "None",
+		},
+		{
+			name:  "direct prefix with suffix remains invalid",
+			input: "direct/secret",
+			want:  "<invalid proxy URL>",
+		},
+		{
 			name:  "invalid",
 			input: "bad-value",
 			want:  "<invalid proxy URL>",

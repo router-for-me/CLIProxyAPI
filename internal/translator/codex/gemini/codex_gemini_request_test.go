@@ -614,3 +614,42 @@ func TestConvertGeminiRequestToCodex_FunctionResponsePartsMedia(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertGeminiRequestToCodex_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search",
+				"parameters": {
+					"type": 6,
+					"properties": {
+						"query": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}}
+					}
+				}
+			}]
+		}]
+	}`)
+
+	out, err := ConvertGeminiRequestToCodex("gpt-5.1-codex", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToCodex returned error: %v", err)
+	}
+
+	schema := ojson.GetBytesNoCopy(out, "tools.0.parameters")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.query.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+	} {
+		got := schema.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("tools.0.parameters.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+}

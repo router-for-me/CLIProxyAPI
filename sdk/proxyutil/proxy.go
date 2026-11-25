@@ -48,7 +48,7 @@ func Parse(raw string) (Setting, error) {
 		return setting, nil
 	}
 
-	if strings.EqualFold(trimmed, "direct") || strings.EqualFold(trimmed, "none") {
+	if isDirectMode(trimmed) {
 		setting.Mode = ModeDirect
 		return setting, nil
 	}
@@ -366,11 +366,19 @@ func proxyAuthorization(user *url.Userinfo) string {
 	return "Basic " + encoded
 }
 
-// Redact returns a log-safe proxy URL with credentials and path-like data removed.
+func isDirectMode(trimmed string) bool {
+	return strings.EqualFold(trimmed, "direct") || strings.EqualFold(trimmed, "none")
+}
+
+// Redact returns a log-safe proxy setting, preserving direct-mode keywords and
+// removing credentials and path-like data from proxy URLs.
 func Redact(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ""
+	}
+	if isDirectMode(trimmed) {
+		return trimmed
 	}
 
 	parsedURL, errParse := url.Parse(trimmed)

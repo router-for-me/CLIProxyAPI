@@ -59,7 +59,7 @@ func newStreamBootstrapError(err error, headers http.Header) error {
 			existing.headers = cloneHTTPHeader(headers)
 		}
 		if upstreamAttempt {
-			return markUpstreamExecutionAttemptWithProvider(existing, provider)
+			return markUpstreamExecutionAttemptWithProviderAndID(existing, provider, attemptID)
 		}
 		return existing
 	}
@@ -69,7 +69,7 @@ func newStreamBootstrapError(err error, headers http.Header) error {
 		attemptID: attemptID,
 	}
 	if upstreamAttempt {
-		return markUpstreamExecutionAttemptWithProvider(bootstrapErr, provider)
+		return markUpstreamExecutionAttemptWithProviderAndID(bootstrapErr, provider, attemptID)
 	}
 	return bootstrapErr
 }
