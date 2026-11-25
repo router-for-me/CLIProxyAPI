@@ -87,7 +87,7 @@ type ClaudeResetReport struct {
 	// ClaimUnknown is a claim that was sent but whose answer could not be read: the grant may be spent.
 	ClaimUnknown bool
 	Claim        ClaudeResetClaim
-	After        *ClaudeResetUsage // read again after a claim Anthropic answered
+	After        *ClaudeResetUsage // read again after a claim that was sent
 }
 
 // ParseClaudeResetUsage reads a usage response fetched with cedar_ember=1 for a reset: the week's and
@@ -325,8 +325,11 @@ func claimClaudeReset(ctx context.Context, auth *coreauth.Auth, do ClaudeQuotaRe
 	case status == http.StatusTooManyRequests:
 		// Refused before it was looked at: nothing was spent.
 		return ClaudeResetClaim{Result: "rate_limited"}, true, nil
-	case status < http.StatusOK || status >= http.StatusMultipleChoices:
+	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+		// Refused (a lapsed login, no such grant): almost certainly nothing was spent, but say what is known.
 		// Never echo the body: it can name the account.
+		return ClaudeResetClaim{}, true, fmt.Errorf("claim the reset: Anthropic refused it (HTTP status %d)", status)
+	case status < http.StatusOK || status >= http.StatusMultipleChoices:
 		return ClaudeResetClaim{}, true, fmt.Errorf("claim the reset: HTTP status %d", status)
 	}
 	var answer struct {

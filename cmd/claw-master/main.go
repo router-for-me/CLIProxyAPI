@@ -380,17 +380,7 @@ func run(args []string) (int, error) {
 	}
 	if command == "reset" {
 		report, err := clawmaster.ResetClaudeLimit(ctx, profile, resetKind, claimReset)
-		if err != nil && !report.ClaimUnknown {
-			return 1, err
-		}
-		fmt.Fprint(os.Stdout, formatResetReport(report, claimReset, time.Now()))
-		if err != nil {
-			return 1, err
-		}
-		if err := resetOutcome(report, claimReset); err != nil {
-			return 1, err
-		}
-		return 0, nil
+		return finishReset(os.Stdout, report, err, claimReset, time.Now())
 	}
 	if command == "probe" {
 		result, err := clawmaster.Probe(ctx, profile, model)

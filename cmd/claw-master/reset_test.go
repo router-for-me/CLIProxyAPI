@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -93,5 +95,27 @@ func TestResetTakesOnlyItsFlags(t *testing.T) {
 	}
 	if code, err := run([]string{"reset", "a", "--bogus"}); code != 2 || err == nil {
 		t.Fatalf("code %d err %v", code, err)
+	}
+}
+
+// A claim whose answer was lost prints the report, saying the reset may be spent, and fails with the cause;
+// a failure before any claim left prints nothing.
+func TestALostClaimIsPrintedThenFails(t *testing.T) {
+	now := time.Date(2026, 11, 25, 6, 0, 0, 0, time.UTC)
+	grant := &clawmaster.ClaudeResetGrant{Clears: []string{"seven_day_overage_included"}, ResetsLeft: 1, UsableNow: true}
+	lost := errors.New("the claim was sent but its answer could not be read")
+	var out bytes.Buffer
+	code, err := finishReset(&out, clawmaster.ClaudeResetReport{Kind: "fable", Before: clawmaster.ClaudeResetUsage{Eligible: true}, Grant: grant, ClaimUnknown: true}, lost, true, now)
+	if code != 1 || err != lost || !strings.Contains(out.String(), "the reset may be spent") {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+	out.Reset()
+	early := errors.New("cannot load the profile's login")
+	if code, err := finishReset(&out, clawmaster.ClaudeResetReport{}, early, true, now); code != 1 || err != early || out.Len() != 0 {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+	out.Reset()
+	if code, err := finishReset(&out, clawmaster.ClaudeResetReport{Kind: "fable", Before: clawmaster.ClaudeResetUsage{Eligible: true}, Grant: grant, Claimed: true, Claim: clawmaster.ClaudeResetClaim{Result: "reset"}}, nil, true, now); code != 0 || err != nil || !strings.Contains(out.String(), "Anthropic answered: reset") {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
 	}
 }

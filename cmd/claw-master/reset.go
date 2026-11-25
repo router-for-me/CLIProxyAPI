@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -117,6 +118,22 @@ func describeClears(clears []string) string {
 		}
 	}
 	return strings.Join(names, " and ")
+}
+
+// finishReset prints what a reset command found and gives its exit: a failure before any claim left prints
+// nothing more than the error; a claim whose answer was lost prints the report, then fails.
+func finishReset(w io.Writer, r clawmaster.ClaudeResetReport, err error, claim bool, now time.Time) (int, error) {
+	if err != nil && !r.ClaimUnknown {
+		return 1, err
+	}
+	fmt.Fprint(w, formatResetReport(r, claim, now))
+	if err != nil {
+		return 1, err
+	}
+	if err := resetOutcome(r, claim); err != nil {
+		return 1, err
+	}
+	return 0, nil
 }
 
 // resetOutcome is the command's verdict: with --claim it fails unless Anthropic answered that it reset.
