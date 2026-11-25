@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -578,6 +579,7 @@ type executorAdapter struct {
 	version           string
 	provider          string
 	homeAuthProvider  string
+	homePlugin        *loadedPlugin
 	usageExecutorType string
 	executor          pluginapi.ProviderExecutor
 	inputFormats      []sdktranslator.Format
@@ -605,25 +607,32 @@ func (a *executorAdapter) UsageExecutorType() string {
 }
 
 func (a *executorAdapter) executionAvailabilityError(auth *coreauth.Auth) error {
-	if a != nil && a.executor != nil && !a.host.isPluginFused(a.pluginID) && a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
-		if a.homeAuthProvider == "" {
+	if a != nil && a.homeAuthProvider != "" {
+		if a.executor != nil && strings.EqualFold(strings.TrimSpace(authProvider(auth)), a.homeAuthProvider) &&
+			a.host.homeExecutorAvailable(a.pluginID, a.homePlugin, a.homeAuthProvider) {
 			return nil
 		}
-		snapshot := a.host.Snapshot()
-		if snapshot.enabled && strings.EqualFold(strings.TrimSpace(authProvider(auth)), a.homeAuthProvider) {
-			// Reconfiguration can change a capability without changing the binary identity.
-			for _, record := range snapshot.records {
-				if record.id == a.pluginID && record.path == a.path && record.version == a.version &&
-					record.plugin.Capabilities.Executor != nil && supportsExecutorAuthProvider(record.plugin.Capabilities, a.homeAuthProvider) {
-					return nil
-				}
-			}
-		}
-	}
-	if a != nil && a.homeAuthProvider != "" {
 		return a.homeExecutorUnavailableError()
 	}
+	if a != nil && a.executor != nil && !a.host.isPluginFused(a.pluginID) && a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
+		return nil
+	}
 	return fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+}
+
+func (a *executorAdapter) homeExecutorLifecycleError(err error) error {
+	if err == nil || a.homeAuthProvider == "" {
+		return nil
+	}
+	if localErr, ok := errors.AsType[*coreauth.Error](err); ok && localErr != nil && localErr.Code == coreauth.ErrorCodeHomeExecutorPluginUnavailable {
+		return err
+	}
+	// Unload or quiesce can race with the last availability check before RPC.
+	var pluginErr rpcError
+	if errors.Is(err, errPluginClientClosed) || (errors.As(err, &pluginErr) && pluginErr.Code == "plugin_quiesced") {
+		return coreauth.WithCause(a.homeExecutorUnavailableError(), err)
+	}
+	return nil
 }
 
 func (a *executorAdapter) homeExecutorUnavailableError() *coreauth.Error {
@@ -1069,6 +1078,10 @@ func (a *executorAdapter) executeWithAttribution(ctx context.Context, auth *core
 			}
 			return
 		}
+		if errLifecycle := a.homeExecutorLifecycleError(err); errLifecycle != nil {
+			err = errLifecycle
+			return
+		}
 		if err != nil && reporter != nil {
 			reporter.PublishFailure(ctx, err)
 		}
@@ -1084,7 +1097,13 @@ func (a *executorAdapter) executeWithAttribution(ctx context.Context, auth *core
 		reporter.StartResponseTTFT()
 	}
 
-	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts))
+	pluginReq := buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts)
+	if a.homeAuthProvider != "" {
+		if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+			return coreexecutor.Response{}, nil, errAvailable
+		}
+	}
+	pluginResp, errExecute := a.executor.Execute(ctx, pluginReq)
 	if errExecute != nil {
 		return coreexecutor.Response{}, nil, errExecute
 	}
@@ -1131,6 +1150,10 @@ func (a *executorAdapter) executeStreamWithAttribution(ctx context.Context, auth
 			}
 			return
 		}
+		if errLifecycle := a.homeExecutorLifecycleError(err); errLifecycle != nil {
+			err = errLifecycle
+			return
+		}
 		if err != nil && reporter != nil {
 			reporter.PublishFailure(ctx, err)
 		}
@@ -1146,7 +1169,13 @@ func (a *executorAdapter) executeStreamWithAttribution(ctx context.Context, auth
 		reporter.StartResponseTTFT()
 	}
 
-	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts))
+	pluginReq := buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts)
+	if a.homeAuthProvider != "" {
+		if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+			return nil, nil, errAvailable
+		}
+	}
+	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, pluginReq)
 	if errExecuteStream != nil {
 		return nil, nil, errExecuteStream
 	}
@@ -1379,8 +1408,17 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
-	pluginResp, errCountTokens := a.executor.CountTokens(ctx, buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts))
+	pluginReq := buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts)
+	if a.homeAuthProvider != "" {
+		if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+			return coreexecutor.Response{}, errAvailable
+		}
+	}
+	pluginResp, errCountTokens := a.executor.CountTokens(ctx, pluginReq)
 	if errCountTokens != nil {
+		if errLifecycle := a.homeExecutorLifecycleError(errCountTokens); errLifecycle != nil {
+			return coreexecutor.Response{}, errLifecycle
+		}
 		if a.homeAuthProvider != "" {
 			switch clienterror.HTTPStatusFromError(errCountTokens) {
 			case http.StatusUnauthorized, http.StatusTooManyRequests:

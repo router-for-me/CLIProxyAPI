@@ -200,9 +200,36 @@ func (h *Host) executorAdapterForRecord(record capabilityRecord, authProvider st
 		if len(adapter.inputFormats) == 0 || len(adapter.outputFormats) == 0 {
 			return nil, fmt.Errorf("plugin executor %q has incomplete protocol declarations", record.id)
 		}
+		if !h.homeExecutorAvailable(record.id, record.loaded, authProvider) {
+			return nil, fmt.Errorf("plugin executor %q is not ready for Home dispatch", record.id)
+		}
 		adapter.homeAuthProvider = authProvider
+		adapter.homePlugin = record.loaded
 	}
 	return adapter, nil
+}
+
+func (h *Host) homeExecutorAvailable(id string, loaded *loadedPlugin, authProvider string) bool {
+	if h == nil || loaded == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	snapshot := h.Snapshot()
+	if !snapshot.enabled || h.loaded[id] != loaded || loaded.homeSuspended {
+		return false
+	}
+	if _, fused := h.fused[id]; fused {
+		return false
+	}
+	// Reconfiguration can change allowed providers without replacing the instance.
+	for _, record := range snapshot.records {
+		if record.id == id && record.loaded == loaded {
+			caps := record.plugin.Capabilities
+			return caps.Executor != nil && supportsExecutorAuthProvider(caps, authProvider)
+		}
+	}
+	return false
 }
 
 func supportsExecutorAuthProvider(caps pluginapi.Capabilities, provider string) bool {
