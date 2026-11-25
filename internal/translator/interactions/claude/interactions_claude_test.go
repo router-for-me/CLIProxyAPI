@@ -800,3 +800,118 @@ func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfig
 		}
 	}
 }
+
+func TestConvertClaudeRequestToInteractions_PreservesThinkingAndToolUseSignatures(t *testing.T) {
+	raw := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [
+			{"role": "user", "content": "check weather"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "plan step", "signature": " sig_thought_1 "},
+					{"type": "thinking", "thinking": "", "signature": "sig_only_2"},
+					{"type": "thinking", "thinking": "no sig plan", "signature": "   "},
+					{"type": "thinking", "thinking": "", "signature": "   "},
+					{"type": "thinking", "thinking": "", "signature": 123},
+					{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}, "signature": " sig_tool_1 "},
+					{"type": "tool_use", "id": "toolu_2", "name": "get_time", "input": {"tz": "UTC"}, "signature": "   "},
+					{"type": "tool_use", "id": "toolu_3", "name": "get_locale", "input": {}, "signature": 456}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"},
+					{"type": "tool_result", "tool_use_id": "toolu_2", "content": "12:00"},
+					{"type": "tool_result", "tool_use_id": "toolu_3", "content": "fr-FR"}
+				]
+			}
+		]
+	}`)
+
+	out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+	}
+
+	// Expected input steps:
+	// 0: user_input
+	// 1: thought (text + signature)
+	// 2: thought (signature-only, no content)
+	// 3: thought (text only, whitespace signature omitted)
+	// (empty thinking + whitespace/non-string signature dropped)
+	// 4: function_call toolu_1 (with signature)
+	// 5: function_call toolu_2 (whitespace signature omitted)
+	// 6: function_call toolu_3 (non-string signature omitted)
+	// 7..9: function_result toolu_1..toolu_3
+	if got := ojson.GetBytesNoCopy(out, "input.#").Int(); got != 10 {
+		t.Fatalf("input.# = %d, want 10; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.type").String(); got != "thought" {
+		t.Fatalf("input.1.type = %q, want thought; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.content.0.text").String(); got != "plan step" {
+		t.Fatalf("input.1.content.0.text = %q, want plan step; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.signature").String(); got != "sig_thought_1" {
+		t.Fatalf("input.1.signature = %q, want sig_thought_1; out=%s", got, out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.2.type").String(); got != "thought" {
+		t.Fatalf("input.2.type = %q, want thought; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.2.signature").String(); got != "sig_only_2" {
+		t.Fatalf("input.2.signature = %q, want sig_only_2; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.2.content").Exists() {
+		t.Fatalf("signature-only thought should omit empty content in default mode; out=%s", out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.3.type").String(); got != "thought" {
+		t.Fatalf("input.3.type = %q, want thought; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.3.content.0.text").String(); got != "no sig plan" {
+		t.Fatalf("input.3.content.0.text = %q, want no sig plan; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.3.signature").Exists() {
+		t.Fatalf("whitespace signature should be omitted on thought; out=%s", out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.4.type").String(); got != "function_call" {
+		t.Fatalf("input.4.type = %q, want function_call; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.4.signature").String(); got != "sig_tool_1" {
+		t.Fatalf("input.4.signature = %q, want sig_tool_1; out=%s", got, out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.5.type").String(); got != "function_call" {
+		t.Fatalf("input.5.type = %q, want function_call; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.5.signature").Exists() {
+		t.Fatalf("whitespace signature should be omitted on function_call; out=%s", out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.6.type").String(); got != "function_call" {
+		t.Fatalf("input.6.type = %q, want function_call; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.6.signature").Exists() {
+		t.Fatalf("non-string signature should be omitted on function_call; out=%s", out)
+	}
+
+	// Compat mode preserves empty content alongside signature on signature-only thinking blocks.
+	sigOnlyPayload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig_compat"}]}]}`)
+	compatOut, errCompat := ConvertClaudeRequestToInteractionsWithCompat("gemini-3.1-flash-lite", sigOnlyPayload, false)
+	if errCompat != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractionsWithCompat() error = %v", errCompat)
+	}
+	if got := ojson.GetBytesNoCopy(compatOut, "input.0.type").String(); got != "thought" {
+		t.Fatalf("compat input.0.type = %q, want thought; out=%s", got, compatOut)
+	}
+	if got := ojson.GetBytesNoCopy(compatOut, "input.0.signature").String(); got != "sig_compat" {
+		t.Fatalf("compat input.0.signature = %q, want sig_compat; out=%s", got, compatOut)
+	}
+	if !ojson.GetBytesNoCopy(compatOut, "input.0.content").IsArray() || ojson.GetBytesNoCopy(compatOut, "input.0.content.0.type").String() != "text" || ojson.GetBytesNoCopy(compatOut, "input.0.content.0.text").String() != "" {
+		t.Fatalf("compat signature-only thought missing empty content text; out=%s", compatOut)
+	}
+}

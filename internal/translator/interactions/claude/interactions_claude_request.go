@@ -239,10 +239,19 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 		case "thinking":
 			flushContent()
 			text := part.Get("thinking").String()
-			if text != "" || preserveEmptyThinkingBlocks {
-				step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
-				step, _ = ojson.SetBytes(step, "content.0.text", text)
-				*items = append(*items, step)
+			signature := claudeSignature(part)
+			if text != "" || signature != "" || preserveEmptyThinkingBlocks {
+				var stepDoc *ojson.Doc
+				if text != "" || preserveEmptyThinkingBlocks {
+					stepDoc = ojson.NewDocString(`{"type":"thought","content":[{"type":"text","text":""}]}`)
+					_ = stepDoc.Set("content.0.text", text)
+				} else {
+					stepDoc = ojson.NewDocString(`{"type":"thought"}`)
+				}
+				if signature != "" {
+					_ = stepDoc.Set("signature", signature)
+				}
+				*items = append(*items, stepDoc.Bytes())
 				sendable++
 			}
 		case "image", "document", "container_upload":
@@ -362,11 +371,22 @@ func claudeToolUseToInteractions(part ojson.Result) []byte {
 	if id := part.Get("id").String(); id != "" {
 		_ = stepDoc.Set("id", id)
 	}
+	if signature := claudeSignature(part); signature != "" {
+		_ = stepDoc.Set("signature", signature)
+	}
 	input := part.Get("input")
 	if input.Exists() && input.IsObject() {
 		_ = stepDoc.SetRaw("arguments", input.Raw)
 	}
 	return stepDoc.Bytes()
+}
+
+func claudeSignature(part ojson.Result) string {
+	sig := part.Get("signature")
+	if sig.Type != ojson.String {
+		return ""
+	}
+	return strings.TrimSpace(sig.String())
 }
 
 func claudeToolResultToInteractions(part ojson.Result, toolNamesByID map[string]string) []byte {
