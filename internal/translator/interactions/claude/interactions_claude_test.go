@@ -803,6 +803,148 @@ func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfig
 	}
 }
 
+func TestConvertClaudeRequestToInteractions_ToolChoiceNone(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		toolChoice string
+	}{
+		{name: "string_none", toolChoice: `"none"`},
+		{name: "object_none", toolChoice: `{"type":"none"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"model":"gemini-3.5-flash","tool_choice":` + tc.toolChoice + `,"messages":[{"role":"user","content":"hi"}]}`)
+			out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "generation_config.tool_choice").String(); got != "none" {
+				t.Fatalf("generation_config.tool_choice = %q, want none; out=%s", got, out)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToInteractions_SamplingNullAndTopK(t *testing.T) {
+	t.Run("forwards_valid_top_k_and_sampling_numbers", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","temperature":0.7,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.temperature").Raw; got != "0.7" {
+			t.Fatalf("temperature = %q, want 0.7; out=%s", got, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.top_p").Raw; got != "0.9" {
+			t.Fatalf("top_p = %q, want 0.9; out=%s", got, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.top_k").Raw; got != "40" {
+			t.Fatalf("top_k = %q, want 40; out=%s", got, out)
+		}
+	})
+
+	t.Run("skips_null_and_non_number_sampling_fields", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			raw  string
+		}{
+			{
+				name: "null_fields",
+				raw:  `{"model":"gemini-3.5-flash","temperature":null,"top_p":null,"top_k":null,"max_tokens":null,"stop_sequences":null,"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name: "non_number_fields",
+				raw:  `{"model":"gemini-3.5-flash","temperature":"0.7","top_p":true,"top_k":{},"max_tokens":"100","stop_sequences":123,"messages":[{"role":"user","content":"hi"}]}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", []byte(tc.raw), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+				}
+				for _, path := range []string{
+					"generation_config.temperature",
+					"generation_config.top_p",
+					"generation_config.top_k",
+					"generation_config.max_output_tokens",
+					"generation_config.stop_sequences",
+				} {
+					if ojson.GetBytesNoCopy(out, path).Exists() {
+						t.Fatalf("%s should be omitted for %s; out=%s", path, tc.name, out)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestConvertClaudeRequestToInteractions_ThinkingNullBudgetBlankEffortAndOverride(t *testing.T) {
+	t.Run("non_number_budget_tokens_falls_back_to_high_without_writing_budget", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			budget string
+		}{
+			{name: "null", budget: "null"},
+			{name: "string", budget: `"4096"`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"enabled","budget_tokens":` + tc.budget + `},"messages":[{"role":"user","content":"hi"}]}`)
+				out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+				}
+				if ojson.GetBytesNoCopy(out, "generation_config.thinking_config.thinking_budget").Exists() {
+					t.Fatalf("thinking_budget should be omitted when budget_tokens is %s; out=%s", tc.name, out)
+				}
+				if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "high" {
+					t.Fatalf("thinking_level = %q, want high; out=%s", got, out)
+				}
+			})
+		}
+	})
+
+	t.Run("blank_effort_preserves_disabled_thinking_level", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"disabled"},"output_config":{"effort":""},"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "none" {
+			t.Fatalf("thinking_level = %q, want none; out=%s", got, out)
+		}
+	})
+
+	t.Run("blank_effort_does_not_write_empty_thinking_level_or_clear_budget", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"enabled","budget_tokens":2048},"output_config":{"effort":"   "},"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.thinking_level").Exists() {
+			t.Fatalf("thinking_level should be omitted for blank effort; out=%s", out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_config.thinking_budget").Raw; got != "2048" {
+			t.Fatalf("thinking_budget = %q, want 2048; out=%s", got, out)
+		}
+	})
+
+	t.Run("non_empty_effort_clears_thinking_budget_and_empty_thinking_config", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"enabled","budget_tokens":4096},"output_config":{"effort":" Low "},"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "low" {
+			t.Fatalf("thinking_level = %q, want low; out=%s", got, out)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.thinking_config.thinking_budget").Exists() {
+			t.Fatalf("thinking_budget should be cleared when effort sets thinking_level; out=%s", out)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.thinking_config").Exists() {
+			t.Fatalf("empty thinking_config should be removed after clearing thinking_budget; out=%s", out)
+		}
+	})
+}
+
 func TestConvertClaudeRequestToInteractions_PreservesThinkingAndToolUseSignatures(t *testing.T) {
 	raw := []byte(`{
 		"model": "gemini-3.1-flash-lite",
