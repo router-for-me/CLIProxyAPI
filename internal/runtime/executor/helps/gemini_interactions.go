@@ -64,6 +64,9 @@ func SanitizeGeminiInteractionsUnsupportedInputIDsDoc(doc *ojson.Doc, allowVerte
 			dropped[idx] = true
 			continue
 		}
+		if strings.TrimSpace(item.Get("type").String()) == "thought" {
+			continue
+		}
 		content := item.Get("content")
 		if content.IsArray() {
 			contentPath := stepPath + ".content"
