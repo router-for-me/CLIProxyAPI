@@ -58,12 +58,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 	ensureAntigravityGeminiLeadingUserContentDoc(selection.ID, doc)
 
+	applyAntigravityCountTokensModelDoc(doc, baseModel, selection.ID, selection.MaxOutputTokens)
 	if selection.MaxOutputTokens > 0 {
-		_ = doc.Set("request.model", formatAntigravityCountTokensModel(selection.ID))
 		_, isClaudeModel := antigravitySchemaSanitizationFlags(selection.ID)
 		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
-	} else {
-		populateAntigravityCountTokensModelDoc(doc, baseModel)
 	}
 
 	_ = doc.Delete("project")
@@ -192,6 +190,23 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		closeAntigravityAuthIdleTransports(auth)
 	}
 	return cliproxyexecutor.Response{}, newAntigravityStatusErrWithHeaders(statusCode, httpResp.Header, bodyBytes)
+}
+
+// applyAntigravityCountTokensModelDoc sets request.model to the resolved
+// selection model whenever model selection remaps baseModel or provides a
+// positive output-token cap, and otherwise falls back to
+// populateAntigravityCountTokensModelDoc.
+func applyAntigravityCountTokensModelDoc(doc *ojson.Doc, baseModel, selectedModel string, maxOutputTokens int) {
+	if doc == nil {
+		return
+	}
+	if maxOutputTokens > 0 || (strings.TrimSpace(selectedModel) != "" && selectedModel != baseModel) {
+		if formatted := formatAntigravityCountTokensModel(selectedModel); formatted != "" {
+			_ = doc.Set("request.model", formatted)
+			return
+		}
+	}
+	populateAntigravityCountTokensModelDoc(doc, baseModel)
 }
 
 // populateAntigravityCountTokensModelDoc sets request.model when absent or blank
