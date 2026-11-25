@@ -70,16 +70,14 @@ func antigravitySupportsNativeOpenAIWebSearch(model string, modelInfo *registry.
 	if model == "" {
 		return false
 	}
-	for _, localInfo := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
-		if localInfo == nil || !strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(localInfo.ID)).ModelName), model) {
-			continue
-		}
-		if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
-			return false
-		}
-		return localInfo.SupportsWebSearch || modelInfo != nil && modelInfo.SupportsWebSearch
+	localInfo := registry.AntigravityModelInfoFor(model)
+	if localInfo == nil {
+		return modelInfo != nil && modelInfo.SupportsWebSearch
 	}
-	return modelInfo != nil && modelInfo.SupportsWebSearch
+	if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
+		return false
+	}
+	return localInfo.SupportsWebSearch || modelInfo != nil && modelInfo.SupportsWebSearch
 }
 
 func selectAntigravityOpenAIWebSearchTool(payload []byte) (ojson.Result, bool) {

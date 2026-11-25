@@ -99,38 +99,45 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
-// AntigravityWebSearchModelFor returns the Antigravity model that should run a
-// native web search request for modelID. A model published only under an OAuth
-// alias is found through the alias source, and the published alias is returned.
-func AntigravityWebSearchModelFor(modelID string) string {
+// AntigravityModelInfoFor returns the available Antigravity model that carries
+// the capabilities of modelID. A model published only under OAuth aliases is
+// found through the alias source, because requests reach translation under the
+// upstream ID. It returns nil when modelID is not available.
+func AntigravityModelInfoFor(modelID string) *ModelInfo {
 	modelID = normalizeAntigravityCapabilityModelID(modelID)
 	if modelID == "" {
-		return ""
+		return nil
 	}
-	aliasModelID := ""
+	var aliased *ModelInfo
 	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
 		if model == nil {
 			continue
 		}
-		currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
-		if currentModelID == "" {
+		if normalizeAntigravityCapabilityModelID(model.ID) == modelID {
+			return model
+		}
+		if normalizeAntigravityCapabilityModelID(model.OAuthAliasSource) != modelID {
 			continue
 		}
-		if currentModelID == modelID {
-			if model.SupportsWebSearch {
-				return currentModelID
-			}
-			return ""
-		}
-		if !model.SupportsWebSearch || normalizeAntigravityCapabilityModelID(model.OAuthAliasSource) != modelID {
-			continue
-		}
-		// Registry iteration order is random; keep the result stable.
-		if aliasModelID == "" || currentModelID < aliasModelID {
-			aliasModelID = currentModelID
+		// Registry iteration order is random; prefer a search-capable alias and
+		// break ties by ID so the result is stable.
+		if aliased == nil || (model.SupportsWebSearch && !aliased.SupportsWebSearch) ||
+			(model.SupportsWebSearch == aliased.SupportsWebSearch && model.ID < aliased.ID) {
+			aliased = model
 		}
 	}
-	return aliasModelID
+	return aliased
+}
+
+// AntigravityWebSearchModelFor returns the Antigravity model that should run a
+// native web search request for modelID. For a model published only under an
+// OAuth alias, the published alias is returned.
+func AntigravityWebSearchModelFor(modelID string) string {
+	model := AntigravityModelInfoFor(modelID)
+	if model == nil || !model.SupportsWebSearch {
+		return ""
+	}
+	return normalizeAntigravityCapabilityModelID(model.ID)
 }
 
 // GetXAIModels returns the standard xAI Grok model definitions.

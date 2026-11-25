@@ -28,20 +28,14 @@ func antigravitySupportsNativeResponsesWebSearch(model string, modelInfo *regist
 		return false
 	}
 	// Read the catalog veto and probe result from the same Antigravity record.
-	for _, localInfo := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
-		if localInfo == nil {
-			continue
-		}
-		localModel := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(localInfo.ID)).ModelName)
-		if !strings.EqualFold(localModel, model) {
-			continue
-		}
-		if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
-			return false
-		}
-		return localInfo.SupportsWebSearch
+	localInfo := registry.AntigravityModelInfoFor(model)
+	if localInfo == nil {
+		return false
 	}
-	return false
+	if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
+		return false
+	}
+	return localInfo.SupportsWebSearch
 }
 
 func shouldBuildAntigravityResponsesWebSearchRequest(model string, payload []byte, modelInfo *registry.ModelInfo) bool {

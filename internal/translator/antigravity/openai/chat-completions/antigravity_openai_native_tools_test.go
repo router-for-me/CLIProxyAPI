@@ -389,3 +389,28 @@ func TestOpenAIToAntigravityMixedToolsAllowedToolsOnlySearchUsesDedicatedEnvelop
 		t.Fatalf("disallowed functionDeclarations survived search envelope: %s", envelope.Body)
 	}
 }
+
+func TestOpenAIToAntigravitySearchOnlyUsesCapabilityFromOAuthAliasSource(t *testing.T) {
+	// The request reaches translation under the upstream ID, which is published only under its alias.
+	const upstream, alias = "oauth-alias-search-upstream-high", "oauth-alias-search-upstream"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("oauth-alias-search-client", "antigravity", []*registry.ModelInfo{{ID: alias, OAuthAlias: alias, OAuthAliasSource: upstream, SupportsWebSearch: true}})
+	t.Cleanup(func() { reg.UnregisterClient("oauth-alias-search-client") })
+	input := []byte(`{
+        "model":"` + alias + `",
+        "messages":[{"role":"user","content":"latest Go release"}],
+        "tools":[{"google_search":{}}]
+    }`)
+
+	envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format: sdktranslator.FormatOpenAI,
+		Model:  upstream,
+		Body:   input,
+	})
+	if envelope.Err != nil {
+		t.Fatalf("convert error: %v", envelope.Err)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, envelope.Body)
+	}
+}

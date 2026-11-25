@@ -357,3 +357,48 @@ func TestRefreshOAuthModelAliasRouting_SerializedWithConfigRuntime(t *testing.T)
 		t.Fatalf("upstream after alias refresh = %q, want upstream-new", got)
 	}
 }
+
+func TestOAuthModelAliasesForAuth_ListsOnlyRoutableBaseNames(t *testing.T) {
+	derived := antigravityBaseModelAliases(registry.GetAntigravityModels())
+	if len(derived) < 2 {
+		t.Skip("embedded Antigravity catalog has fewer than two level-suffixed Gemini models")
+	}
+	shadowed, renamed := derived[0], derived[1]
+
+	// The per-auth "favorite" replaces the global one, which claimed shadowed.Name.
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"antigravity": {{Name: shadowed.Name, Alias: "favorite"}},
+	}}
+	auth := &coreauth.Auth{ID: "antigravity-per-auth-alias", Provider: "antigravity", Attributes: map[string]string{"auth_kind": "oauth"}}
+	perAuth := []config.OAuthModelAlias{
+		{Name: "another-upstream-model", Alias: "favorite"},
+		{Name: renamed.Name, Alias: "my-renamed-model"},
+	}
+	coreauth.SetOAuthModelAliasesAttribute(auth, perAuth)
+
+	routing := make(map[string]string)
+	for _, entry := range effectiveOAuthModelAlias(cfg)["antigravity"] {
+		routing[strings.ToLower(entry.Alias)] = entry.Name
+	}
+	// Execution resolves per-auth aliases before the routing table.
+	for _, entry := range perAuth {
+		routing[strings.ToLower(entry.Alias)] = entry.Name
+	}
+
+	listed := make(map[string]string)
+	for _, entry := range oauthModelAliasesForAuth(cfg, "antigravity", auth.Attributes) {
+		listed[entry.Alias] = entry.Name
+		if upstream, exists := routing[strings.ToLower(entry.Alias)]; !exists || upstream != entry.Name {
+			t.Fatalf("listed alias %q -> %q is not routable: execution resolves it to %q", entry.Alias, entry.Name, upstream)
+		}
+	}
+	if _, exists := listed[shadowed.Alias]; exists {
+		t.Fatalf("base name %q must stay suppressed by the global alias for %q", shadowed.Alias, shadowed.Name)
+	}
+	if _, exists := listed[renamed.Alias]; exists {
+		t.Fatalf("base name %q must yield to the per-auth alias for %q", renamed.Alias, renamed.Name)
+	}
+	if listed["favorite"] != "another-upstream-model" || listed["my-renamed-model"] != renamed.Name {
+		t.Fatalf("per-auth aliases must be listed, got %+v", listed)
+	}
+}

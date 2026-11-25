@@ -1235,7 +1235,10 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string) []config.OAuthModelAlias {
 	aliases := configuredOAuthModelAliasesForAuth(cfg, channel, attributes)
 	if cfg != nil && channel == antigravityOAuthModelAliasChannel {
-		return withAntigravityBaseModelAliases(aliases)
+		// Routing derives base names from the global aliases alone. A global
+		// entry shadowed by a per-auth alias must still suppress its base name
+		// here, or the auth would list a base name that routing cannot resolve.
+		return withAntigravityBaseModelAliases(aliases, cfg.OAuthModelAlias[channel])
 	}
 	return aliases
 }

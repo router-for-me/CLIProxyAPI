@@ -487,4 +487,14 @@ func TestAntigravityWebSearchModelForFollowsOAuthAliasSource(t *testing.T) {
 	if got := AntigravityWebSearchModelFor("gemini-alias-fork-high"); got != "" {
 		t.Fatalf("published model without web search support must win over its alias, got %q", got)
 	}
+
+	if got := AntigravityModelInfoFor("gemini-alias-search-high(low)"); got == nil || got.ID != "gemini-alias-search" {
+		t.Fatalf("model info for an upstream model published only under an alias = %+v, want the alias", got)
+	}
+	if got := AntigravityModelInfoFor("gemini-alias-fork-high"); got == nil || got.ID != "gemini-alias-fork-high" {
+		t.Fatalf("model info must prefer the published model over its alias, got %+v", got)
+	}
+	if got := AntigravityModelInfoFor("gemini-alias-unknown"); got != nil {
+		t.Fatalf("unknown model must have no model info, got %+v", got)
+	}
 }

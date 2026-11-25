@@ -89,19 +89,22 @@ func antigravityBaseModelAliases(models []*ModelInfo) []config.OAuthModelAlias {
 
 // withAntigravityBaseModelAliases appends the derived base-name aliases to the
 // explicitly configured Antigravity aliases. Explicit aliases win: a derived
-// alias is skipped when its upstream model or its alias is already configured.
-func withAntigravityBaseModelAliases(explicit []config.OAuthModelAlias) []config.OAuthModelAlias {
+// alias is skipped when its upstream model or its alias is already configured
+// in explicit or in any of the claimed lists.
+func withAntigravityBaseModelAliases(explicit []config.OAuthModelAlias, claimed ...[]config.OAuthModelAlias) []config.OAuthModelAlias {
 	derived := antigravityBaseModelAliases(registry.GetAntigravityModels())
 	if len(derived) == 0 {
 		return explicit
 	}
 	taken := make(map[string]struct{}, len(explicit)*2)
-	for _, entry := range explicit {
-		if name := strings.ToLower(strings.TrimSpace(entry.Name)); name != "" {
-			taken[name] = struct{}{}
-		}
-		if alias := strings.ToLower(strings.TrimSpace(entry.Alias)); alias != "" {
-			taken[alias] = struct{}{}
+	for _, entries := range append(claimed, explicit) {
+		for _, entry := range entries {
+			if name := strings.ToLower(strings.TrimSpace(entry.Name)); name != "" {
+				taken[name] = struct{}{}
+			}
+			if alias := strings.ToLower(strings.TrimSpace(entry.Alias)); alias != "" {
+				taken[alias] = struct{}{}
+			}
 		}
 	}
 	out := append([]config.OAuthModelAlias(nil), explicit...)
