@@ -383,6 +383,11 @@ func (e *AIStudioExecutor) consumeStream(
 		helps.InitializeApplyPatchStream(ctx, body.toFormat, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translatedReq, &param)
 		metadataLogged := false
 		var relayFrames helps.RelaySSEBuffer
+		expectedCandidates := aistudioRequestedCandidateCount(body.payload)
+		var finishedCandidates map[int]struct{}
+		if expectedCandidates > 1 {
+			finishedCandidates = make(map[int]struct{}, expectedCandidates)
+		}
 		var sawFinishReason bool
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
@@ -426,8 +431,14 @@ func (e *AIStudioExecutor) consumeStream(
 					if len(rawPayload) == 0 {
 						continue
 					}
-					if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
-						sawFinishReason = true
+					if !sawFinishReason {
+						if expectedCandidates > 1 {
+							if aistudioObserveFinishedCandidates(rawPayload, finishedCandidates) || len(finishedCandidates) >= expectedCandidates {
+								sawFinishReason = true
+							}
+						} else if geminiStreamHasFinishSignal(rawPayload) {
+							sawFinishReason = true
+						}
 					}
 					shells, action, finishReason := zeroOutputGuard.Observe(frame)
 					switch action {
@@ -976,3 +987,48 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
 func (e *AIStudioExecutor) SupportsApplyPatch() bool { return e != nil }
+
+func aistudioRequestedCandidateCount(payload []byte) int {
+	for _, path := range []string{
+		"generationConfig.candidateCount",
+		"generation_config.candidate_count",
+	} {
+		if res := ojson.GetBytesNoCopy(payload, path); res.Exists() {
+			if count := int(res.Int()); count > 1 {
+				return count
+			}
+		}
+	}
+	return 1
+}
+
+func aistudioObserveFinishedCandidates(payload []byte, finished map[int]struct{}) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, path := range []string{
+		"promptFeedback.blockReason",
+		"response.promptFeedback.blockReason",
+	} {
+		if res := ojson.GetBytesNoCopy(payload, path); res.Exists() && strings.TrimSpace(res.String()) != "" {
+			return true
+		}
+	}
+	for _, path := range []string{"candidates", "response.candidates"} {
+		res := ojson.GetBytesNoCopy(payload, path)
+		if !res.IsArray() {
+			continue
+		}
+		for i, candidate := range res.Array() {
+			if strings.TrimSpace(candidate.Get("finishReason").String()) == "" {
+				continue
+			}
+			idx := i
+			if idxRes := candidate.Get("index"); idxRes.Exists() {
+				idx = int(idxRes.Int())
+			}
+			finished[idx] = struct{}{}
+		}
+	}
+	return false
+}

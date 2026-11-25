@@ -882,3 +882,61 @@ func TestAIStudioConsumeStreamReportsTruncatedEOFWithoutFinishReason(t *testing.
 		})
 	}
 }
+
+func TestAIStudioConsumeStreamReportsTruncatedEOFWhenOnlySomeCandidatesFinish(t *testing.T) {
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	auth := &cliproxyauth.Auth{ID: "aistudio-eof-multi-candidate", Provider: "aistudio"}
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: []byte(`{"model":"gemini-2.5-pro","n":2,"messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+		Stream:         true,
+	}
+	translatedReq, body, errTranslate := exec.translateRequest(context.Background(), req, opts, true)
+	if errTranslate != nil {
+		t.Fatalf("translateRequest() error = %v", errTranslate)
+	}
+	if got := aistudioRequestedCandidateCount(body.payload); got != 2 {
+		t.Fatalf("aistudioRequestedCandidateCount() = %d, want 2; payload=%s", got, body.payload)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reporter := helps.NewExecutorUsageReporter(ctx, exec, req.Model, auth)
+	wsStream := make(chan wsrelay.StreamEvent, 2)
+	wsStream <- wsrelay.StreamEvent{
+		Type:    wsrelay.MessageTypeStreamChunk,
+		Payload: []byte("data: {\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done-0\"}]},\"finishReason\":\"STOP\"}],\"modelVersion\":\"gemini-2.5-pro\"}\n\n"),
+	}
+	wsStream <- wsrelay.StreamEvent{
+		Type:    wsrelay.MessageTypeStreamChunk,
+		Payload: []byte("data: {\"candidates\":[{\"index\":1,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"partial-1\"}]}}],\"modelVersion\":\"gemini-2.5-pro\"}\n\n"),
+	}
+	close(wsStream)
+
+	firstEvent := wsrelay.StreamEvent{
+		Type:   wsrelay.MessageTypeStreamStart,
+		Status: http.StatusOK,
+	}
+	chunks := exec.consumeStream(ctx, cancel, req, opts, body, translatedReq, reporter, nil, firstEvent, wsStream)
+
+	var streamErr error
+	for chunk := range chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("consumeStream() error = nil, want 502 truncation error when candidate 1 has not finished")
+	}
+	status, okStatus := streamErr.(interface{ StatusCode() int })
+	if !okStatus || status.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("consumeStream() error = %T %v, want status 502", streamErr, streamErr)
+	}
+	if !strings.Contains(streamErr.Error(), "finishReason") {
+		t.Fatalf("consumeStream() error = %q, want mention of finishReason", streamErr.Error())
+	}
+}
