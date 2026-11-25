@@ -43,14 +43,19 @@ const (
 )
 
 type antigravityCapabilityCacheEntry struct {
-	hints             antigravityModelCapabilityHints
-	expiresAt         time.Time
-	lastUsed          time.Time
-	probeRevision     uint64
-	appliedRevision   uint64
-	appliedEpoch      uint64
-	persistedRevision uint64
-	pending           bool
+	hints                    antigravityModelCapabilityHints
+	expiresAt                time.Time
+	lastUsed                 time.Time
+	probeRevision            uint64
+	appliedRevision          uint64
+	appliedEpoch             uint64
+	persistedRevision        uint64
+	pendingEnums             map[string]string
+	pendingGroups            map[string]map[string]int
+	pendingThinkingWebSearch map[string]bool
+	pendingEnumGrant         [sha256.Size]byte
+	checkSeededEnums         bool
+	pending                  bool
 }
 
 // Keep attempt history beyond nextRetry; deleting it at retry time would turn
@@ -234,11 +239,14 @@ var (
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs         map[string]struct{}
-	revision         uint64
-	updatedAt        time.Time
-	expiresAt        time.Time
-	routeFingerprint string
+	ModelIDs          map[string]struct{}
+	modelEnums        map[string]string
+	thinkingGroups    map[string]map[string]int
+	thinkingWebSearch map[string]bool
+	revision          uint64
+	updatedAt         time.Time
+	expiresAt         time.Time
+	routeFingerprint  string
 }
 
 func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints {
@@ -295,7 +303,7 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy, user
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
+	return fmt.Sprintf("%q/%d/%x/%q/%q/%q/%q", identity, auth.RegistrationEpoch, sha256.Sum256([]byte(antigravityProbeRefreshGrant(auth))), project, endpoint, proxy, userAgent)
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -367,6 +375,7 @@ func seedAntigravityCapabilityCacheLocked(cacheKey string, persisted antigravity
 	entry.hints = seeded
 	entry.persistedRevision = seeded.revision
 	entry.expiresAt = persistedAntigravityHintsExpiresAt(seeded, expectedRouteFingerprint, now)
+	entry.checkSeededEnums = !entry.expiresAt.IsZero()
 	entry.lastUsed = now
 	antigravityCapabilityCache[cacheKey] = entry
 	return entry
@@ -605,6 +614,14 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			hints.updatedAt = now
 			hints.expiresAt = expiresAt
 			hints.routeFingerprint = routeFingerprint
+			current.pendingEnums = hints.modelEnums
+			current.pendingGroups = hints.thinkingGroups
+			current.pendingThinkingWebSearch = hints.thinkingWebSearch
+			current.pendingEnumGrant = antigravityModelEnumGrant(probeAuth)
+			current.checkSeededEnums = false
+			hints.modelEnums = nil
+			hints.thinkingGroups = nil
+			hints.thinkingWebSearch = nil
 			current.hints, current.expiresAt, current.lastUsed = hints.clone(), expiresAt, now
 			antigravityCapabilityCache[cacheKey] = current
 			delete(antigravityAuthFailureCache, flightKey)
@@ -645,6 +662,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			retained.WebSearchModelIDs = hints.WebSearchModelIDs
 		}
 		antigravityCapabilityMu.Unlock()
+		coreauth.StoreAntigravityModelEnums(ctx, probeAuth, nil)
 		s.pruneStaleAntigravityTerminalFailures(staleTerminalCandidates)
 		return retained, nil
 	})
@@ -676,6 +694,9 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	return antigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		modelEnums:        hints.ModelEnums,
+		thinkingGroups:    hints.ThinkingGroups,
+		thinkingWebSearch: hints.ThinkingWebSearch,
 	}, status
 }
 
@@ -706,44 +727,7 @@ func antigravityModelFetchProxyURLWithConfig(auth *coreauth.Auth, cfg *config.Co
 }
 
 func antigravityModelBaseURLs(auth *coreauth.Auth) []string {
-	if auth != nil && auth.Attributes != nil {
-		if raw := strings.TrimSpace(auth.Attributes["base_urls"]); raw != "" {
-			parts := strings.Split(raw, ",")
-			urls := make([]string, 0, len(parts))
-			for _, p := range parts {
-				if trimmed := strings.TrimRight(strings.TrimSpace(p), "/"); trimmed != "" {
-					urls = append(urls, trimmed)
-				}
-			}
-			if len(urls) > 0 {
-				return urls
-			}
-		}
-	}
-	if baseURL := resolveAntigravityModelBaseURL(auth); baseURL != "" {
-		return []string{baseURL}
-	}
-	return []string{antigravityModelBaseURLDaily}
-}
-
-func resolveAntigravityModelBaseURL(auth *coreauth.Auth) string {
-	if auth == nil {
-		return ""
-	}
-	if auth.Attributes != nil {
-		if value := strings.TrimSpace(auth.Attributes["base_url"]); value != "" {
-			return strings.TrimRight(value, "/")
-		}
-	}
-	if auth.Metadata != nil {
-		if value, ok := auth.Metadata["base_url"].(string); ok {
-			value = strings.TrimSpace(value)
-			if value != "" {
-				return strings.TrimRight(value, "/")
-			}
-		}
-	}
-	return ""
+	return coreauth.AntigravityModelProbeBaseURLs(auth)
 }
 
 func parseAntigravityModelCapabilityHints(body []byte) (antigravityModelCapabilityHints, bool) {
@@ -808,6 +792,10 @@ func (s *Service) antigravityHomeEnabled() bool {
 }
 
 func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
+	if hints.ModelIDs == nil {
+		return models
+	}
+
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model != nil {
@@ -832,10 +820,7 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 	}
 	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
 	models = applyAntigravityFetchedModelCapabilities(models, hints)
-	excluded := cfg.OAuthExcludedModels[coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())]
-	if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
-		excluded = strings.Split(value, ",")
-	}
+	excluded := coreauth.AntigravityExcludedModels(auth, cfg)
 	models = applyExcludedModels(models, excluded)
 	models = applyOAuthModelAliasForAuth(cfg, "antigravity", auth.AuthKind(), auth.Attributes, models)
 	models = s.appendPluginModels("antigravity", models, excluded)
@@ -957,7 +942,7 @@ func (s *Service) refreshAntigravityModels(ctx context.Context) {
 		entry := antigravityCapabilityCache[key]
 		registered := entry.appliedRevision == entry.hints.revision && entry.appliedEpoch == epoch
 		persisted := s.coreManager == nil || entry.hints.ModelIDs == nil || entry.persistedRevision == entry.hints.revision
-		fresh := (antigravityNowFunc().Before(entry.expiresAt) && registered && persisted) || antigravityNowFunc().Before(antigravityFailureNextRetryLocked(key, failureKey))
+		fresh := entry.pendingEnums == nil && !entry.checkSeededEnums && ((antigravityNowFunc().Before(entry.expiresAt) && registered && persisted) || antigravityNowFunc().Before(antigravityFailureNextRetryLocked(key, failureKey)))
 		antigravityCapabilityMu.RUnlock()
 		if fresh {
 			continue

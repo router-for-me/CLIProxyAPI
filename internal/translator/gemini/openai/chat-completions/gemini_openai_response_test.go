@@ -108,13 +108,16 @@ func TestConvertGeminiResponseToOpenAI_AudioTranscriptionPartStreamsContent(t *t
 
 	chunk := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"audioTranscription":{"text":"Testing one two three."}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":185,"candidatesTokenCount":8,"totalTokenCount":193}}`)
 	result := ConvertGeminiResponseToOpenAI(ctx, "model", nil, nil, chunk, &param)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result))
+	if len(result) != 2 {
+		t.Fatalf("expected 2 results (payload + terminal), got %d", len(result))
 	}
 
 	content := ojson.GetBytesNoCopy(result[0], "choices.0.delta.content")
 	if !content.Exists() || content.String() != "Testing one two three." {
 		t.Fatalf("expected delta.content to carry the transcript, got %v. Output: %s", content.Raw, result[0])
+	}
+	if got := ojson.GetBytesNoCopy(result[1], "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("expected terminal finish_reason stop, got %q. Output: %s", got, result[1])
 	}
 }
 
@@ -731,8 +734,8 @@ func TestConvertGeminiResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T
 
 		chunk3 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"inlineData":{"mimeType":"image/png","data":"RklOQUxfSU1BR0U="},"thoughtSignature":"EjQKDg=="}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":1120,"thoughtsTokenCount":584,"totalTokenCount":1716},"modelVersion":"gemini-3-pro-image","responseId":"resp_7566"}`)
 		out3 := ConvertGeminiResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, chunk3, &param)
-		if len(out3) != 1 {
-			t.Fatalf("chunk3 count = %d, want 1", len(out3))
+		if len(out3) != 2 {
+			t.Fatalf("chunk3 count = %d, want 2 (payload + terminal)", len(out3))
 		}
 		images := ojson.GetBytesNoCopy(out3[0], "choices.0.delta.images").Array()
 		if len(images) != 1 {
@@ -744,8 +747,8 @@ func TestConvertGeminiResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T
 		if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
 			t.Fatalf("delta.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out3[0])
 		}
-		if got := ojson.GetBytesNoCopy(out3[0], "choices.0.finish_reason").String(); got != "stop" {
-			t.Fatalf("finish_reason = %q, want stop; payload=%s", got, out3[0])
+		if got := ojson.GetBytesNoCopy(out3[1], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("finish_reason = %q, want stop; payload=%s", got, out3[1])
 		}
 	})
 
@@ -753,8 +756,8 @@ func TestConvertGeminiResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T
 		var param any
 		chunk := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Drafting. "},{"thought":true,"inline_data":{"mime_type":"image/png","data":"RFJBRlRfSU1BR0U="}},{"thought":true,"text":"Refining."},{"inlineData":{"mimeType":"image/png","data":"RklOQUxfSU1BR0U="}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"thoughtsTokenCount":50,"totalTokenCount":160}}`)
 		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-nano-banana-2.1", nil, nil, chunk, &param)
-		if len(out) != 1 {
-			t.Fatalf("chunk count = %d, want 1", len(out))
+		if len(out) != 2 {
+			t.Fatalf("chunk count = %d, want 2 (payload + terminal)", len(out))
 		}
 		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Drafting. Refining." {
 			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Drafting. Refining.", out[0])
@@ -768,6 +771,351 @@ func TestConvertGeminiResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T
 		}
 		if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
 			t.Fatalf("delta.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out[0])
+		}
+		if got := ojson.GetBytesNoCopy(out[1], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("finish_reason = %q, want stop; payload=%s", got, out[1])
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAI_FunctionCallWithoutArgsUsesEmptyObject(t *testing.T) {
+	upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_time"}}]},"finishReason":"STOP"}]}`)
+
+	t.Run("streaming", func(t *testing.T) {
+		var param any
+		outputs := ConvertGeminiResponseToOpenAI(context.Background(), "gemini-2.5-flash", nil, nil, upstream, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		arguments := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.arguments")
+		if arguments.Type != ojson.String || arguments.String() != "{}" {
+			t.Fatalf("function.arguments = %s, want JSON string %q; payload=%s", arguments.Raw, "{}", outputs[0])
+		}
+	})
+
+	t.Run("non-streaming", func(t *testing.T) {
+		output := ConvertGeminiResponseToOpenAINonStream(context.Background(), "gemini-2.5-flash", nil, nil, upstream, nil)
+		arguments := ojson.GetBytesNoCopy(output, "choices.0.message.tool_calls.0.function.arguments")
+		if arguments.Type != ojson.String || arguments.String() != "{}" {
+			t.Fatalf("function.arguments = %s, want JSON string %q; payload=%s", arguments.Raw, "{}", output)
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAI_RestoresSanitizedOpenAIToolNames(t *testing.T) {
+	ctx := context.Background()
+	originalReq := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"mcp/search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}]}`)
+	upstream := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp_search","args":{"q":"test"}}}]},"finishReason":"STOP"}]}`)
+
+	t.Run("streaming", func(t *testing.T) {
+		var param any
+		outputs := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", originalReq, nil, upstream, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", outputs[0])
+		}
+	})
+
+	t.Run("streaming vertex partial args", func(t *testing.T) {
+		var param any
+		partial := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp_search","willContinue":true,"partialArgs":[{"jsonPath":"$.q","stringValue":"test"}]}}]}}]}`)
+		outputs := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", originalReq, nil, partial, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", outputs[0])
+		}
+	})
+
+	t.Run("streaming reused param lazy init", func(t *testing.T) {
+		var param any = &convertGeminiResponseToOpenAIChatParams{}
+		outputs := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", originalReq, nil, upstream, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", outputs[0])
+		}
+	})
+
+	t.Run("non-streaming", func(t *testing.T) {
+		output := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-4-argon", originalReq, nil, upstream, nil)
+		if got := ojson.GetBytesNoCopy(output, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("function.name = %q, want %q; payload=%s", got, "mcp/search", output)
+		}
+	})
+
+	t.Run("allowed_tools excludes colliding sibling round-trip", func(t *testing.T) {
+		filteredReq := []byte(`{
+			"model":"gemini-4-argon",
+			"messages":[{"role":"user","content":"hi"}],
+			"tools":[
+				{"type":"function","function":{"name":"mcp/search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}},
+				{"type":"function","function":{"name":"mcp_search","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}
+			],
+			"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"mcp/search"}}]}}
+		}`)
+		geminiReq, errConv := ConvertOpenAIRequestToGemini("gemini-4-argon", filteredReq, false)
+		if errConv != nil {
+			t.Fatalf("ConvertOpenAIRequestToGemini unexpected error: %v", errConv)
+		}
+		decls := ojson.GetBytesNoCopy(geminiReq, "tools.0.functionDeclarations").Array()
+		if len(decls) != 1 {
+			t.Fatalf("functionDeclarations count = %d, want 1; req=%s", len(decls), geminiReq)
+		}
+		sentName := decls[0].Get("name").String()
+		if sentName != "mcp_search" {
+			t.Fatalf("sent declaration name = %q, want %q", sentName, "mcp_search")
+		}
+
+		roundTripUpstream := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"` + sentName + `","args":{"q":"test"}}}]},"finishReason":"STOP"}]}`)
+
+		var param any
+		streamOut := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", filteredReq, geminiReq, roundTripUpstream, &param)
+		if len(streamOut) != 1 {
+			t.Fatalf("stream output count = %d, want 1", len(streamOut))
+		}
+		if got := ojson.GetBytesNoCopy(streamOut[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("stream function.name = %q, want %q; payload=%s", got, "mcp/search", streamOut[0])
+		}
+
+		nonStreamOut := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-4-argon", filteredReq, geminiReq, roundTripUpstream, nil)
+		if got := ojson.GetBytesNoCopy(nonStreamOut, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp/search" {
+			t.Fatalf("non-stream function.name = %q, want %q; payload=%s", got, "mcp/search", nonStreamOut)
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAI_SeparatesDeltaPayloadFromTerminalFinishReason(t *testing.T) {
+	ctx := context.Background()
+
+	assertNoChunkMixesDeltaAndFinishReason := func(t *testing.T, chunks [][]byte) {
+		t.Helper()
+		for i, chunk := range chunks {
+			fr := ojson.GetBytesNoCopy(chunk, "choices.0.finish_reason")
+			if !fr.Exists() || fr.Type == ojson.Null || fr.String() == "" {
+				continue
+			}
+			delta := ojson.GetBytesNoCopy(chunk, "choices.0.delta")
+			if content := delta.Get("content"); content.Exists() && content.Type != ojson.Null {
+				t.Fatalf("chunk %d mixes finish_reason=%q with delta.content=%s: %s", i, fr.String(), content.Raw, chunk)
+			}
+			if reasoning := delta.Get("reasoning_content"); reasoning.Exists() && reasoning.Type != ojson.Null {
+				t.Fatalf("chunk %d mixes finish_reason=%q with delta.reasoning_content=%s: %s", i, fr.String(), reasoning.Raw, chunk)
+			}
+			if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.Type != ojson.Null {
+				t.Fatalf("chunk %d mixes finish_reason=%q with delta.tool_calls=%s: %s", i, fr.String(), toolCalls.Raw, chunk)
+			}
+			if images := delta.Get("images"); images.Exists() && images.Type != ojson.Null {
+				t.Fatalf("chunk %d mixes finish_reason=%q with delta.images=%s: %s", i, fr.String(), images.Raw, chunk)
+			}
+		}
+	}
+
+	t.Run("parallel tool calls in terminal frame", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"responseId":"resp_gem_8039","modelVersion":"gemini-4-neon","createTime":"2026-11-23T00:00:00Z","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"read","args":{"path":"A"}}}]}}]}`)
+		chunk2 := []byte(`{"responseId":"resp_gem_8039","modelVersion":"gemini-4-neon","createTime":"2026-11-23T00:00:00Z","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_b","name":"read","args":{"path":"B"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":6,"totalTokenCount":16}}`)
+
+		out1 := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk1, &param)
+		out2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk2, &param)
+		done := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, []byte("[DONE]"), &param)
+		if len(done) != 0 {
+			t.Fatalf("expected 0 chunks on [DONE] after terminal frame, got %d: %q", len(done), done)
+		}
+		if len(out2) != 2 {
+			t.Fatalf("expected terminal tool-call frame to split into 2 chunks, got %d: %q", len(out2), out2)
+		}
+
+		all := append(append([][]byte(nil), out1...), out2...)
+		assertNoChunkMixesDeltaAndFinishReason(t, all)
+
+		if fr := ojson.GetBytesNoCopy(out2[0], "choices.0.finish_reason"); fr.Exists() && fr.Type != ojson.Null {
+			t.Fatalf("payload chunk finish_reason = %s, want null; payload=%s", fr.Raw, out2[0])
+		}
+		if usage := ojson.GetBytesNoCopy(out2[0], "usage"); usage.Exists() {
+			t.Fatalf("payload chunk must not carry usage: %s", out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.delta.tool_calls.0.index").Int(); got != 1 {
+			t.Fatalf("second tool call index = %d, want 1; payload=%s", got, out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"path":"B"}` {
+			t.Fatalf("second tool call arguments = %q, want %q; payload=%s", got, `{"path":"B"}`, out2[0])
+		}
+
+		if got := ojson.GetBytesNoCopy(out2[1], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("terminal chunk delta = %s, want {}; payload=%s", got, out2[1])
+		}
+		if got := ojson.GetBytesNoCopy(out2[1], "choices.0.finish_reason").String(); got != "tool_calls" {
+			t.Fatalf("terminal finish_reason = %q, want tool_calls; payload=%s", got, out2[1])
+		}
+		if got := ojson.GetBytesNoCopy(out2[1], "choices.0.native_finish_reason").String(); got != "stop" {
+			t.Fatalf("terminal native_finish_reason = %q, want stop; payload=%s", got, out2[1])
+		}
+		if got := ojson.GetBytesNoCopy(out2[1], "usage.total_tokens").Int(); got != 16 {
+			t.Fatalf("terminal usage.total_tokens = %d, want 16; payload=%s", got, out2[1])
+		}
+	})
+
+	t.Run("multiple candidates split independently", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"responseId":"resp_multi_cand","modelVersion":"gemini-4-neon","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"cand0"}]},"finishReason":"STOP"},{"index":1,"content":{"role":"model","parts":[{"text":"cand1"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":8,"totalTokenCount":18}}`)
+
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk, &param)
+		if len(out) != 4 {
+			t.Fatalf("expected 4 chunks (payload+terminal per candidate), got %d: %q", len(out), out)
+		}
+		assertNoChunkMixesDeltaAndFinishReason(t, out)
+
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.index").Int(); got != 0 {
+			t.Fatalf("out[0] choice index = %d, want 0", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "cand0" {
+			t.Fatalf("out[0] delta.content = %q, want cand0", got)
+		}
+		if usage := ojson.GetBytesNoCopy(out[0], "usage"); usage.Exists() {
+			t.Fatalf("out[0] payload chunk must not carry usage: %s", out[0])
+		}
+		if got := ojson.GetBytesNoCopy(out[1], "choices.0.index").Int(); got != 0 {
+			t.Fatalf("out[1] choice index = %d, want 0", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[1], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("out[1] terminal delta = %s, want {}", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[1], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("out[1] finish_reason = %q, want stop", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[1], "usage.total_tokens").Int(); got != 18 {
+			t.Fatalf("out[1] usage.total_tokens = %d, want 18", got)
+		}
+
+		if got := ojson.GetBytesNoCopy(out[2], "choices.0.index").Int(); got != 1 {
+			t.Fatalf("out[2] choice index = %d, want 1", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[2], "choices.0.delta.content").String(); got != "cand1" {
+			t.Fatalf("out[2] delta.content = %q, want cand1", got)
+		}
+		if usage := ojson.GetBytesNoCopy(out[2], "usage"); usage.Exists() {
+			t.Fatalf("out[2] payload chunk must not carry usage: %s", out[2])
+		}
+		if got := ojson.GetBytesNoCopy(out[3], "choices.0.index").Int(); got != 1 {
+			t.Fatalf("out[3] choice index = %d, want 1", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[3], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("out[3] terminal delta = %s, want {}", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[3], "choices.0.finish_reason").String(); got != "length" {
+			t.Fatalf("out[3] finish_reason = %q, want length", got)
+		}
+		if got := ojson.GetBytesNoCopy(out[3], "usage.total_tokens").Int(); got != 18 {
+			t.Fatalf("out[3] usage.total_tokens = %d, want 18", got)
+		}
+	})
+
+	t.Run("empty text part on terminal frame stays single clean terminal chunk", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"A"}}}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}`)
+
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk1, &param)
+		out2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk2, &param)
+		if len(out2) != 1 {
+			t.Fatalf("expected empty-text terminal frame to emit 1 chunk, got %d: %q", len(out2), out2)
+		}
+		assertNoChunkMixesDeltaAndFinishReason(t, out2)
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.finish_reason").String(); got != "tool_calls" {
+			t.Fatalf("terminal finish_reason = %q, want tool_calls; payload=%s", got, out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("terminal delta = %s, want {}; payload=%s", got, out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "usage.total_tokens").Int(); got != 6 {
+			t.Fatalf("terminal usage.total_tokens = %d, want 6; payload=%s", got, out2[0])
+		}
+	})
+
+	t.Run("separate non-payload terminal frame uses empty delta", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"responseId":"resp_gem_sep","modelVersion":"gemini-4-neon","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"read","args":{"path":"A"}}}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14}}`)
+
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk1, &param)
+		out2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk2, &param)
+		if len(out2) != 1 {
+			t.Fatalf("expected 1 terminal chunk, got %d: %q", len(out2), out2)
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("terminal delta = %s, want {}; payload=%s", got, out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.finish_reason").String(); got != "tool_calls" {
+			t.Fatalf("terminal finish_reason = %q, want tool_calls; payload=%s", got, out2[0])
+		}
+	})
+
+	t.Run("DONE and standalone trailing usage terminal chunks use empty delta", func(t *testing.T) {
+		// 1. [DONE] synthesis path
+		var doneParam any
+		doneChunk1 := []byte(`{"responseId":"resp_done","modelVersion":"gemini-4-neon","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"read","args":{"path":"A"}}}]},"finishReason":"STOP"}]}`)
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, doneChunk1, &doneParam)
+		doneOut := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, []byte("[DONE]"), &doneParam)
+		if len(doneOut) != 1 {
+			t.Fatalf("expected 1 DONE terminal chunk, got %d: %q", len(doneOut), doneOut)
+		}
+		if got := ojson.GetBytesNoCopy(doneOut[0], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("DONE terminal delta = %s, want {}; payload=%s", got, doneOut[0])
+		}
+		if got := ojson.GetBytesNoCopy(doneOut[0], "choices.0.finish_reason").String(); got != "tool_calls" {
+			t.Fatalf("DONE terminal finish_reason = %q, want tool_calls; payload=%s", got, doneOut[0])
+		}
+
+		// 2. Standalone trailing usage finalizing cached finishReason
+		var usageParam any
+		usageChunk1 := []byte(`{"responseId":"resp_usage","modelVersion":"gemini-4-neon","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`)
+		usageChunk2 := []byte(`{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}`)
+		_ = ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, usageChunk1, &usageParam)
+		usageOut := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, usageChunk2, &usageParam)
+		if len(usageOut) != 1 {
+			t.Fatalf("expected 1 trailing usage terminal chunk, got %d: %q", len(usageOut), usageOut)
+		}
+		if got := ojson.GetBytesNoCopy(usageOut[0], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("trailing usage terminal delta = %s, want {}; payload=%s", got, usageOut[0])
+		}
+		if got := ojson.GetBytesNoCopy(usageOut[0], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("trailing usage terminal finish_reason = %q, want stop; payload=%s", got, usageOut[0])
+		}
+	})
+
+	t.Run("duplicate terminal frame deduplicates per choice without blocking other choices", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"responseId":"resp_dup_gem","modelVersion":"gemini-4-neon","candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"read","args":{"path":"A"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14}}`)
+		chunk2 := []byte(`{"candidates":[{"index":0,"finishReason":"STOP"},{"index":1,"content":{"role":"model","parts":[{"text":"other"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":6,"totalTokenCount":16}}`)
+
+		out1 := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk1, &param)
+		out2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-neon", nil, nil, chunk2, &param)
+		if len(out1) != 2 {
+			t.Fatalf("expected 2 chunks from chunk1, got %d: %q", len(out1), out1)
+		}
+		if len(out2) != 2 {
+			t.Fatalf("expected 2 chunks from chunk2 (only choice 1 payload+terminal), got %d: %q", len(out2), out2)
+		}
+		assertNoChunkMixesDeltaAndFinishReason(t, append(append([][]byte(nil), out1...), out2...))
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.index").Int(); got != 1 {
+			t.Fatalf("out2[0] choice index = %d, want 1; payload=%s", got, out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[0], "choices.0.delta.content").String(); got != "other" {
+			t.Fatalf("out2[0] delta.content = %q, want other; payload=%s", got, out2[0])
+		}
+		if got := ojson.GetBytesNoCopy(out2[1], "choices.0.index").Int(); got != 1 {
+			t.Fatalf("out2[1] choice index = %d, want 1; payload=%s", got, out2[1])
+		}
+		if got := ojson.GetBytesNoCopy(out2[1], "choices.0.delta").Raw; got != "{}" {
+			t.Fatalf("out2[1] terminal delta = %s, want {}; payload=%s", got, out2[1])
+		}
+		if got := ojson.GetBytesNoCopy(out2[1], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("out2[1] finish_reason = %q, want stop; payload=%s", got, out2[1])
 		}
 	})
 }

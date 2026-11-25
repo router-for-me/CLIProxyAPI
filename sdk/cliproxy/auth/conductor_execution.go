@@ -1288,6 +1288,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		execCtx = m.WithAuthTransport(execCtx, auth)
+		execCtx = m.withAntigravityModelState(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -1589,6 +1590,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		execCtx = m.WithAuthTransport(execCtx, auth)
+		execCtx = m.withAntigravityModelState(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -2017,6 +2019,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		}
 		execCtx = m.WithAuthTransport(execCtx, auth)
+		execCtx = m.withAntigravityModelState(execCtx, auth)
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		if homeMode {
 			clearSchedulerSelectionID(opts.Metadata)
@@ -2164,18 +2167,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		execOpts := opts
 		if selection != nil {
 			execOpts.ExecutionLifecycle = selection
-			if selection.CanonicalSessionID != "" {
-				meta := make(map[string]any, len(execOpts.Metadata)+2)
-				for k, v := range execOpts.Metadata {
-					meta[k] = v
-				}
-				meta[cliproxyexecutor.CanonicalSessionIDMetadataKey] = selection.CanonicalSessionID
-				if selection.ParentSessionID != "" && selection.ParentSessionID != selection.CanonicalSessionID {
-					meta[cliproxyexecutor.ParentSessionIDMetadataKey] = selection.ParentSessionID
-				} else {
-					delete(meta, cliproxyexecutor.ParentSessionIDMetadataKey)
-				}
-				execOpts.Metadata = meta
+			if selection.CanonicalSessionID != "" || selection.lcpAffinitySessionID != "" {
+				execOpts.Metadata = applyHomeSelectionSessionMetadata(execOpts.Metadata, selection)
 			}
 		} else if pickOpts.Metadata != nil {
 			if canonicalID, ok := pickOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; ok {

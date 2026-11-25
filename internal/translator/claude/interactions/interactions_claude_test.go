@@ -3,6 +3,7 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -199,7 +200,7 @@ func TestConvertClaudeResponseToInteractionsStreamMergesUsageAndStatus(t *testin
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
-		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":2}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`),
 	} {
 		events = append(events, ConvertClaudeResponseToInteractions(context.Background(), "claude-test", nil, nil, raw, &param)...)
 	}
@@ -227,6 +228,57 @@ func TestConvertClaudeResponseToInteractionsStream(t *testing.T) {
 	}
 	if got := ojson.GetBytesNoCopy(payload, "delta.text").String(); got != "ok" {
 		t.Fatalf("delta.text = %q, want ok. Payload: %s", got, string(payload))
+	}
+}
+
+func TestConvertClaudeResponseToInteractionsWaitsForStreamStopReason(t *testing.T) {
+	var param any
+	usageEvents := ConvertClaudeResponseToInteractions(context.Background(), "claude-test", nil, nil, []byte(`data: {"type":"message_delta","usage":{"output_tokens":2}}`), &param)
+	if payload := findClaudeInteractionsEventPayload(usageEvents, "interaction.completed"); len(payload) != 0 {
+		t.Fatalf("interaction.completed emitted before stop reason. Payload: %s", payload)
+	}
+
+	terminalEvents := ConvertClaudeResponseToInteractions(context.Background(), "claude-test", nil, nil, []byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`), &param)
+	payload := findClaudeInteractionsEventPayload(terminalEvents, "interaction.completed")
+	if got := ojson.GetBytesNoCopy(payload, "interaction.status").String(); got != "requires_action" {
+		t.Fatalf("interaction.status = %q, want requires_action. Payload: %s", got, payload)
+	}
+}
+
+func TestConvertClaudeResponseToInteractionsMapsStopReasonToStatus(t *testing.T) {
+	for _, tt := range []struct {
+		stopReason string
+		wantStatus string
+	}{
+		{stopReason: "tool_use", wantStatus: "requires_action"},
+		{stopReason: "max_tokens", wantStatus: "incomplete"},
+		{stopReason: "end_turn", wantStatus: "completed"},
+	} {
+		t.Run(tt.stopReason+"/non-stream-native", func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{"id":"msg_1","model":"claude-test","content":[],"stop_reason":%q}`, tt.stopReason))
+			out := ConvertClaudeResponseToInteractionsNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+			if got := ojson.GetBytesNoCopy(out, "status").String(); got != tt.wantStatus {
+				t.Fatalf("status = %q, want %q. Output: %s", got, tt.wantStatus, out)
+			}
+		})
+
+		t.Run(tt.stopReason+"/non-stream-sse", func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`data: {"type":"message_delta","delta":{"stop_reason":%q}}`, tt.stopReason))
+			out := ConvertClaudeResponseToInteractionsNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+			if got := ojson.GetBytesNoCopy(out, "status").String(); got != tt.wantStatus {
+				t.Fatalf("status = %q, want %q. Output: %s", got, tt.wantStatus, out)
+			}
+		})
+
+		t.Run(tt.stopReason+"/stream", func(t *testing.T) {
+			var param any
+			raw := []byte(fmt.Sprintf(`data: {"type":"message_delta","delta":{"stop_reason":%q}}`, tt.stopReason))
+			events := ConvertClaudeResponseToInteractions(context.Background(), "claude-test", nil, nil, raw, &param)
+			payload := findClaudeInteractionsEventPayload(events, "interaction.completed")
+			if got := ojson.GetBytesNoCopy(payload, "interaction.status").String(); got != tt.wantStatus {
+				t.Fatalf("interaction.status = %q, want %q. Payload: %s", got, tt.wantStatus, payload)
+			}
+		})
 	}
 }
 

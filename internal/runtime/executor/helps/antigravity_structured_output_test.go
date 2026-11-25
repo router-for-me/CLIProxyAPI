@@ -70,3 +70,47 @@ func TestPrepareAntigravityClaudeStructuredOutput_ModelVariants(t *testing.T) {
 		})
 	}
 }
+
+func TestPrepareAntigravityClaudeStructuredOutput_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	payload := []byte(`{
+		"request": {
+			"generationConfig": {
+				"responseSchema": {
+					"type": 6,
+					"properties": {
+						"title": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}}
+					},
+					"required": ["title"]
+				},
+				"responseMimeType": "application/json"
+			}
+		}
+	}`)
+
+	out, converted := PrepareAntigravityClaudeStructuredOutput("claude-sonnet-5-5", payload)
+	if !converted {
+		t.Fatalf("expected structured output downgrade for claude-sonnet-5-5")
+	}
+	sysText := ojson.GetBytes(out, "request.systemInstruction.parts.0.text").String()
+	start := strings.Index(sysText, "{")
+	end := strings.LastIndex(sysText, "}")
+	if start < 0 || end <= start {
+		t.Fatalf("expected embedded JSON schema in systemInstruction, got: %s", sysText)
+	}
+	embedded := ojson.Parse(sysText[start : end+1])
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.title.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+	} {
+		got := embedded.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Fatalf("embedded schema %s = %s (type %v), want string %q; sysText=%s", tc.path, got.Raw, got.Type, tc.want, sysText)
+		}
+	}
+}
