@@ -20,6 +20,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
+// geminiSSEKeepAliveFrame is an empty SSE frame used for Gemini SSE heartbeats.
+// google.golang.org/genai's iterateResponseStream skips empty frames but rejects
+// SSE comment lines (": keep-alive") with "invalid stream chunk".
+var geminiSSEKeepAliveFrame = []byte("\n\n")
+
 // GeminiAPIHandler contains the handlers for Gemini API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type GeminiAPIHandler struct {
@@ -225,7 +230,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	}
 	writeKeepAlive := func() bool {
 		commitHeaders()
-		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+		_, _ = c.Writer.Write(geminiSSEKeepAliveFrame)
 		flusher.Flush()
 		return true
 	}
@@ -389,6 +394,11 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
+		WriteKeepAlive: func() {
+			if alt == "" {
+				_, _ = c.Writer.Write(geminiSSEKeepAliveFrame)
+			}
+		},
 		WriteChunk: func(chunk []byte) {
 			if alt == "" {
 				_, _ = c.Writer.Write([]byte("data: "))

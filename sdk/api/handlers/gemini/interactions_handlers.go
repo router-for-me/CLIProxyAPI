@@ -179,7 +179,7 @@ func (h *GeminiAPIHandler) handleInteractionsStream(c *gin.Context, cliCtx conte
 				waiting = false
 			case <-keepAliveC:
 				commitSSE()
-				_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+				_, _ = c.Writer.Write(geminiSSEKeepAliveFrame)
 				flusher.Flush()
 			}
 		}
@@ -250,6 +250,9 @@ func forwardInteractionsChunks(cliCtx context.Context, chunks <-chan handlers.Mo
 
 func (h *GeminiAPIHandler) forwardInteractionsStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		WriteKeepAlive: func() {
+			_, _ = c.Writer.Write(geminiSSEKeepAliveFrame)
+		},
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
