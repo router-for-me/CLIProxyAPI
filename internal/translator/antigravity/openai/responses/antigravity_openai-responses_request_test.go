@@ -1287,6 +1287,30 @@ func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchPreservesInstructio
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchToolChoiceNull(t *testing.T) {
+	modelID := "ag-websearch-toolchoice-null-model"
+	registerAntigravityResponsesWebSearchModel(t, "ag-search-toolchoice-null-client", modelID)
+
+	input := []byte(`{
+		"model": "` + modelID + `",
+		"tool_choice": null,
+		"input": "latest weather in Paris",
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	out, errConvert := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToAntigravity error: %v", errConvert)
+	}
+	parsed := util.ParseGJSONBytesNoCopy(out)
+	if parsed.Get("requestType").String() != "web_search" {
+		t.Fatalf("expected requestType web_search with tool_choice null, got %q. Output: %s", parsed.Get("requestType").String(), out)
+	}
+	if !parsed.Get("request.tools.0.googleSearch").Exists() {
+		t.Fatalf("expected request.tools.0.googleSearch with tool_choice null, got: %s", out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchToolChoiceAutoPreservesContext(t *testing.T) {
 	modelID := "ag-websearch-toolchoice-auto-model"
 	registerAntigravityResponsesWebSearchModel(t, "ag-search-toolchoice-auto-client", modelID)
