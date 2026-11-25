@@ -245,6 +245,23 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 	if errRel != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("auth filestore: id %q escapes base directory", id)
 	}
+
+	resolvedBase, errBaseSym := filepath.EvalSymlinks(absBase)
+	if errBaseSym == nil {
+		parentDir := filepath.Dir(absTarget)
+		resolvedParent, errParentSym := filepath.EvalSymlinks(parentDir)
+		if errParentSym == nil {
+			resolvedTarget := filepath.Join(resolvedParent, filepath.Base(absTarget))
+			relSym, errRelSym := filepath.Rel(resolvedBase, resolvedTarget)
+			if errRelSym != nil || relSym == "." || relSym == ".." || strings.HasPrefix(relSym, ".."+string(os.PathSeparator)) {
+				return "", fmt.Errorf("auth filestore: id %q escapes base directory via symlink", id)
+			}
+		} else if !os.IsNotExist(errParentSym) {
+			return "", fmt.Errorf("auth filestore: resolve delete parent symlinks: %w", errParentSym)
+		}
+	} else if !os.IsNotExist(errBaseSym) {
+		return "", fmt.Errorf("auth filestore: resolve base dir symlinks: %w", errBaseSym)
+	}
 	return absTarget, nil
 }
 
