@@ -51,6 +51,10 @@ func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) 
 	return antigravityProjectIDFromAuth(auth) == ""
 }
 
+func (e *AntigravityExecutor) ShouldPrepareHomePluginRequestAuth(auth *cliproxyauth.Auth) bool {
+	return e.ShouldPrepareRequestAuth(auth) || (e.cfg != nil && e.cfg.Home.Enabled && antigravityNeedsAccessTokenRefresh(auth))
+}
+
 func antigravityNeedsAccessTokenRefresh(auth *cliproxyauth.Auth) bool {
 	if auth == nil {
 		return false
@@ -76,7 +80,7 @@ func detachedAntigravityCredentialContext(ctx context.Context) context.Context {
 }
 
 func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
+	if !e.ShouldPrepareHomePluginRequestAuth(auth) {
 		return nil, nil
 	}
 
@@ -87,6 +91,11 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 	}
 	if refreshedAuth != nil {
 		updated = refreshedAuth
+	}
+	if e.cfg != nil && e.cfg.Home.Enabled {
+		if expiry, known := updated.ExpirationTime(); known && !expiry.After(antigravityNow()) {
+			return nil, statusErr{code: http.StatusBadGateway, msg: "home returned an expired antigravity access token"}
+		}
 	}
 	if antigravityProjectIDFromAuth(updated) != "" {
 		e.maybeRefreshAntigravityCreditsHint(ctx, updated, token)

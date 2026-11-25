@@ -500,7 +500,7 @@ func isTerminalRequestStopError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isRequestStopError(err) {
+	if isRequestStopError(err) || isHomeExecutorPluginUnavailableError(err) {
 		return true
 	}
 	return isRequestTerminatedError(err) && !isCredentialScopedError(err) && !IsRequestScopedContinueError(err)
