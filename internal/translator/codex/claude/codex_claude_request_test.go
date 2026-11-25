@@ -45,6 +45,24 @@ func TestConvertClaudeRequestToCodex_MaxOutputTokens(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_DefaultsMissingToolInputToEmptyObject(t *testing.T) {
+	input := []byte(`{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"get_time"}]}]}`)
+
+	out, errConvert := ConvertClaudeRequestToCodex("test-model", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToCodex() error = %v", errConvert)
+	}
+
+	functionCall := ojson.GetBytesNoCopy(out, `input.#(type=="function_call")`)
+	arguments := functionCall.Get("arguments")
+	if arguments.Type != ojson.String {
+		t.Fatalf("function_call.arguments type = %v, want string; item=%s", arguments.Type, functionCall.Raw)
+	}
+	if got := arguments.String(); got != "{}" {
+		t.Fatalf("function_call.arguments = %q, want %q; item=%s", got, "{}", functionCall.Raw)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	tests := []struct {
 		name             string

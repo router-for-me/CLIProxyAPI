@@ -241,6 +241,47 @@ func TestConvertInteractionsResponseToClaudeStreamToolCall(t *testing.T) {
 	}
 }
 
+func TestConvertInteractionsResponseToClaudeStreamToolCallInlineArguments(t *testing.T) {
+	var param any
+	var out [][]byte
+	chunks := [][]byte{
+		[]byte(`data: {"interaction":{"id":"interaction_1","model":"gemini-3.1-flash-lite"},"event_type":"interaction.created"}`),
+		[]byte(`data: {"index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":{"q":"x"}},"event_type":"step.start"}`),
+		[]byte(`data: {"index":0,"event_type":"step.stop"}`),
+	}
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3.1-flash-lite", nil, nil, chunk, &param)...)
+	}
+	payload := findClaudeEventPayload(out, "content_block_delta")
+	if got := ojson.GetBytesNoCopy(payload, "delta.type").String(); got != "input_json_delta" {
+		t.Fatalf("delta.type = %q, want input_json_delta. Payload: %s", got, payload)
+	}
+	if got := ojson.GetBytesNoCopy(payload, "delta.partial_json").String(); got != `{"q":"x"}` {
+		t.Fatalf("delta.partial_json = %q, want object JSON. Payload: %s", got, payload)
+	}
+}
+
+func TestConvertInteractionsResponseToClaudeStreamToolCallEmptyInlineArguments(t *testing.T) {
+	var param any
+	var out [][]byte
+	chunks := [][]byte{
+		[]byte(`data: {"index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":{ }},"event_type":"step.start"}`),
+		[]byte(`data: {"index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"x\"}"},"event_type":"step.delta"}`),
+	}
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3.1-flash-lite", nil, nil, chunk, &param)...)
+	}
+	var partials []string
+	for _, event := range out {
+		if payload := ojson.GetBytesNoCopy(event, "delta.type").String(); payload == "input_json_delta" {
+			partials = append(partials, ojson.GetBytesNoCopy(event, "delta.partial_json").String())
+		}
+	}
+	if len(partials) != 1 || partials[0] != `{"q":"x"}` {
+		t.Fatalf("partial_json values = %#v, want one non-empty argument delta", partials)
+	}
+}
+
 func TestConvertInteractionsResponseToClaudeStreamFinishMetadataUsage(t *testing.T) {
 	var param any
 	out := ConvertInteractionsResponseToClaude(context.Background(), "claude-test", nil, nil, []byte(`data: {"event_type":"finish","metadata":{"total_usage":{"total_input_tokens":2,"total_output_tokens":6,"total_tokens":8}}}`), &param)
@@ -683,5 +724,79 @@ func TestConvertInteractionsResponseToClaude_ResponseFailed(t *testing.T) {
 				t.Fatalf("error.message = %q, want containing %q", got, tt.wantMsg)
 			}
 		})
+	}
+}
+
+func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfigFormat(t *testing.T) {
+	raw := []byte(`{
+		"model": "gemini-3.5-flash",
+		"max_tokens": 1030323,
+		"stop_sequences": ["STOP", "\n", "", 123, null],
+		"output_config": {
+			"effort": "low",
+			"format": {
+				"type": "json_schema",
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"],
+					"additionalProperties": false
+				}
+			}
+		},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+	}
+	if got := ojson.GetBytesNoCopy(out, "generation_config.max_output_tokens").Raw; got != "1030323" {
+		t.Fatalf("max_output_tokens raw = %q, want 1030323; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "low" {
+		t.Fatalf("thinking_level = %q, want low; out=%s", got, out)
+	}
+	stops := ojson.GetBytesNoCopy(out, "generation_config.stop_sequences").Array()
+	if len(stops) != 2 || stops[0].String() != "STOP" || stops[1].String() != "\n" {
+		t.Fatalf("stop_sequences = %s, want [STOP \\n]; out=%s", ojson.GetBytesNoCopy(out, "generation_config.stop_sequences").Raw, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "response_format.type").String(); got != "text" {
+		t.Fatalf("response_format.type = %q, want text; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "response_format.mime_type").String(); got != "application/json" {
+		t.Fatalf("response_format.mime_type = %q, want application/json; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "response_format.schema.properties.city.type").String(); got != "string" {
+		t.Fatalf("response_format.schema.properties.city.type = %q, want string; out=%s", got, out)
+	}
+
+	zeroRaw := []byte(`{
+		"model": "gemini-3.5-flash",
+		"max_tokens": 0,
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	zeroOut, errZero := ConvertClaudeRequestToInteractions("gemini-3.5-flash", zeroRaw, false)
+	if errZero != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractions() zero error = %v", errZero)
+	}
+	if got := ojson.GetBytesNoCopy(zeroOut, "generation_config.max_output_tokens").Raw; got != "0" {
+		t.Fatalf("max_output_tokens raw = %q, want 0; out=%s", got, zeroOut)
+	}
+
+	invalidRaw := []byte(`{
+		"model": "gemini-3.5-flash",
+		"max_tokens": null,
+		"stop_sequences": ["", 123],
+		"output_config": {"format": {"type": "json_schema"}},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	invalidOut, errInvalid := ConvertClaudeRequestToInteractions("gemini-3.5-flash", invalidRaw, false)
+	if errInvalid != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractions() invalid error = %v", errInvalid)
+	}
+	for _, path := range []string{"generation_config.max_output_tokens", "generation_config.stop_sequences", "response_format"} {
+		if ojson.GetBytesNoCopy(invalidOut, path).Exists() {
+			t.Fatalf("%s should be omitted for invalid input; out=%s", path, invalidOut)
+		}
 	}
 }

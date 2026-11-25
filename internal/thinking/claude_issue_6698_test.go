@@ -214,8 +214,8 @@ func TestApplyThinking_ClaudeAdaptiveOnlyModelsConvertBudgetAndAuto(t *testing.T
 			if ojson.GetBytes(out, "thinking.budget_tokens").Exists() {
 				t.Fatalf("thinking.budget_tokens still present: %s", out)
 			}
-			if got := ojson.GetBytes(out, "output_config.effort").String(); got != "xhigh" {
-				t.Fatalf("output_config.effort = %q, want xhigh; body=%s", got, out)
+			if got := ojson.GetBytes(out, "output_config.effort").String(); got != "max" {
+				t.Fatalf("output_config.effort = %q, want max; body=%s", got, out)
 			}
 		})
 
@@ -298,6 +298,34 @@ func TestApplyThinking_ClaudeAdaptiveOnlyModelsConvertBudgetAndAuto(t *testing.T
 			}
 			if got := ojson.GetBytes(out, "thinking.budget_tokens").Int(); got != 16384 {
 				t.Fatalf("thinking.budget_tokens = %d, want 16384; body=%s", got, out)
+			}
+		})
+	}
+}
+
+func TestApplyThinking_ClaudeHybridUsesNearestEffortForTranslatedBudget(t *testing.T) {
+	info := &registry.ModelInfo{
+		ID:   "claude-hybrid",
+		Type: "claude",
+		Thinking: &registry.ThinkingSupport{
+			Min: 1024, Max: 128000, Levels: []string{"low", "medium", "high", "max"},
+		},
+	}
+	for _, tt := range []struct {
+		budget     string
+		wantEffort string
+	}{
+		{budget: "32768", wantEffort: "high"},
+		{budget: "32769", wantEffort: "max"},
+	} {
+		t.Run(tt.budget, func(t *testing.T) {
+			source := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingBudget":` + tt.budget + `}}}`)
+			out, errApply := thinking.ApplyThinkingWithModelInfo([]byte(`{}`), source, info.ID, "gemini", "claude", "claude", info)
+			if errApply != nil {
+				t.Fatal(errApply)
+			}
+			if got := ojson.GetBytes(out, "output_config.effort").String(); got != tt.wantEffort {
+				t.Fatalf("output_config.effort = %q, want %q; body=%s", got, tt.wantEffort, out)
 			}
 		})
 	}

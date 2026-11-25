@@ -445,41 +445,57 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string,
 }
 
 // antigravityTransportScope returns the connection-pool scope for one credential.
-// Runtime auths always carry an ID. Incomplete auth objects, such as those built by
-// tests, plugins or SDK embedders, fall back to another stable credential marker so
-// they neither share a pool with an unrelated OAuth identity nor allocate a fresh
-// pool, and with it a fresh set of pool goroutines, on every single request.
+// Runtime auths always carry an ID. The credential marker is included when available
+// so replacing the account behind a stable ID cannot reuse the previous account's
+// keep-alive TCP/TLS connections. Incomplete auth objects, such as those built by
+// tests, plugins or SDK embedders, fall back to another stable marker so they neither
+// share a pool with an unrelated OAuth identity nor allocate a fresh pool on every
+// request.
 func antigravityTransportScope(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return antigravityAnonymousTransportScope
 	}
+
+	credentialScope := antigravityTransportCredentialScope(auth)
+	identity := ""
 	if id := strings.TrimSpace(auth.ID); id != "" {
-		return "id:" + id
-	}
-	if auth.Attributes != nil {
+		identity = "id:" + id
+	} else if auth.Attributes != nil {
 		if path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath]); path != "" {
-			return "path:" + path
-		}
-		if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); source != "" {
-			return "source:" + source
+			identity = "path:" + path
+		} else if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); source != "" {
+			identity = "source:" + source
 		}
 	}
-	// Fall back to the credential material itself. Auth.Label is deliberately not used:
-	// it is documented as an optional human readable label for logging and carries no
-	// uniqueness guarantee, so two different OAuth identities sharing one label would
-	// wrongly share a TCP/TLS pool.
-	//
+	if identity != "" {
+		if credentialScope != "" {
+			return identity + "|" + credentialScope
+		}
+		if auth.RegistrationEpoch > 0 {
+			return fmt.Sprintf("%s|epoch:%d", identity, auth.RegistrationEpoch)
+		}
+		return identity
+	}
+	if credentialScope != "" {
+		return credentialScope
+	}
+	return antigravityAnonymousTransportScope
+}
+
+func antigravityTransportCredentialScope(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
 	// The refresh token is preferred over the access token because it stays stable
-	// across token rotation. Keying on the access token would move a credential to a new
-	// pool on every refresh, and would also strand refresh requests themselves, which
-	// run before any access token exists.
+	// across access-token rotation. Refresh requests also run before any access token
+	// exists, so this keeps their connection in the same credential pool.
 	if refresh := strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")); refresh != "" {
 		return antigravityCredentialScope("refresh:", refresh)
 	}
 	if access := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token")); access != "" {
 		return antigravityCredentialScope("token:", access)
 	}
-	return antigravityAnonymousTransportScope
+	return ""
 }
 
 // antigravityCredentialScope derives a pool scope from secret credential material.
@@ -912,8 +928,12 @@ func validateAntigravityRequestSignatures(ctx context.Context, modelName string,
 		logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "provider_cleanup", "empty_or_non_gemini_signature")
 		return rawJSON, nil
 	}
-	// Claude models accept only Claude-format thinking signatures.
-	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
+	// Claude models accept only Claude-format thinking signatures. In cache mode,
+	// unsigned thinking blocks must survive until the translator recovers a
+	// signature for the current credential scope.
+	if !cache.SignatureCacheEnabled() {
+		rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
+	}
 	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "prefix_cleanup", "empty_or_non_claude_signature")
 	if cache.SignatureCacheEnabled() {
 		return rawJSON, nil

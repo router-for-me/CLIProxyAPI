@@ -2020,8 +2020,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 func canonicalLCPProvider(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
-	case "google", "gemini", "vertex", "aistudio":
-		return "google"
+	case "google", "gemini":
+		return "gemini"
 	case "codex", "openai":
 		return "openai"
 	case "claude", "anthropic":
@@ -2355,8 +2355,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
+	isFork, _ := res.Options.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
 	var fallbackKey string
-	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
+	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) && !isFork {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
