@@ -72,9 +72,14 @@ func TestIssue7000AntigravityAliasesPreserveOtherFieldsAndToolChoice(t *testing.
 					}
 					request := ojson.GetBytes(encoded, "request")
 					assertIssue7000PromptSchema(t, request.Get(systemKey), issue7000LiteralSchema)
+					// The wire-format normalizer may merge the schema prompt into the
+					// first system part, so only require the original text to lead.
+					if got := request.Get(systemKey + ".parts.0.text").String(); !strings.HasPrefix(got, "keep system") {
+						t.Errorf("%s.parts.0.text = %q, want it to start with %q", systemKey, got, "keep system")
+					}
 					for path, want := range map[string]string{
 						"generationConfig.temperature": "0.25", "generation_config.stopSequences.0": "STOP",
-						systemKey + ".parts.0.text": "keep system", "contents.0.parts.0.text": "keep history",
+						"contents.0.parts.0.text":             "keep history",
 						"tools.0.functionDeclarations.0.name": "lookup",
 					} {
 						if got := request.Get(path).String(); got != want {
