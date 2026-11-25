@@ -439,7 +439,7 @@ func removePlaceholderFields(jsonStr string) string {
 		doc := ojson.NewDocString(jsonStr)
 		modified := false
 		for _, p := range paths {
-			if !strings.HasSuffix(p, ".properties._") {
+			if p != "properties._" && !strings.HasSuffix(p, ".properties._") {
 				continue
 			}
 			if doc.Delete(p) == nil {
@@ -478,7 +478,7 @@ func removePlaceholderFields(jsonStr string) string {
 		doc := ojson.NewDocString(jsonStr)
 		modified := false
 		for _, p := range reasonPaths {
-			if !strings.HasSuffix(p, ".properties.reason") {
+			if p != "properties.reason" && !strings.HasSuffix(p, ".properties.reason") {
 				continue
 			}
 			parentPath := trimSuffix(p, ".properties.reason")
