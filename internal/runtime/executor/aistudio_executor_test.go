@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -804,6 +805,79 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsCondu
 			assertMalformedFunctionCallConductorResultUncooled(t, manager, auth.ID, "gemini-4-argon", resultHook.results)
 			if errClient := <-clientDone; errClient != nil {
 				t.Fatal(errClient)
+			}
+		})
+	}
+}
+
+func TestAIStudioConsumeStreamReportsTruncatedEOFWithoutFinishReason(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseFormat sdktranslator.Format
+		reqPayload     []byte
+	}{
+		{
+			name:           "claude",
+			responseFormat: sdktranslator.FormatClaude,
+			reqPayload:     []byte(`{"model":"gemini-2.5-pro","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`),
+		},
+		{
+			name:           "openai",
+			responseFormat: sdktranslator.FormatOpenAI,
+			reqPayload:     []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+			auth := &cliproxyauth.Auth{ID: "aistudio-eof-" + tc.name, Provider: "aistudio"}
+			req := cliproxyexecutor.Request{
+				Model:   "gemini-2.5-pro",
+				Payload: tc.reqPayload,
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   tc.responseFormat,
+				ResponseFormat: tc.responseFormat,
+				Stream:         true,
+			}
+			translatedReq, body, errTranslate := exec.translateRequest(context.Background(), req, opts, true)
+			if errTranslate != nil {
+				t.Fatalf("translateRequest() error = %v", errTranslate)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reporter := helps.NewExecutorUsageReporter(ctx, exec, req.Model, auth)
+			wsStream := make(chan wsrelay.StreamEvent, 1)
+			// Unterminated SSE frame without a Gemini finishReason, followed by channel close without StreamEnd.
+			wsStream <- wsrelay.StreamEvent{
+				Type:    wsrelay.MessageTypeStreamChunk,
+				Payload: []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"modelVersion":"gemini-2.5-pro"}`),
+			}
+			close(wsStream)
+
+			firstEvent := wsrelay.StreamEvent{
+				Type:   wsrelay.MessageTypeStreamStart,
+				Status: http.StatusOK,
+			}
+			chunks := exec.consumeStream(ctx, cancel, req, opts, body, translatedReq, reporter, nil, firstEvent, wsStream)
+
+			var streamErr error
+			for chunk := range chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if streamErr == nil {
+				t.Fatal("consumeStream() error = nil, want 502 truncation error")
+			}
+			status, okStatus := streamErr.(interface{ StatusCode() int })
+			if !okStatus || status.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("consumeStream() error = %T %v, want status 502", streamErr, streamErr)
+			}
+			if !strings.Contains(streamErr.Error(), "finishReason") {
+				t.Fatalf("consumeStream() error = %q, want mention of finishReason", streamErr.Error())
 			}
 		})
 	}

@@ -383,6 +383,7 @@ func (e *AIStudioExecutor) consumeStream(
 		helps.InitializeApplyPatchStream(ctx, body.toFormat, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translatedReq, &param)
 		metadataLogged := false
 		var relayFrames helps.RelaySSEBuffer
+		var sawFinishReason bool
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
 			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
@@ -421,8 +422,12 @@ func (e *AIStudioExecutor) consumeStream(
 					}
 					reporter.ObserveResponseModel(frame)
 					streamUsage.ObserveGeminiStream(frame)
-					if len(helps.JSONPayload(frame)) == 0 {
+					rawPayload := helps.JSONPayload(frame)
+					if len(rawPayload) == 0 {
 						continue
+					}
+					if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
+						sawFinishReason = true
 					}
 					shells, action, finishReason := zeroOutputGuard.Observe(frame)
 					switch action {
@@ -662,6 +667,18 @@ func (e *AIStudioExecutor) consumeStream(
 						return
 					}
 				}
+			}
+			if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI) && !sawFinishReason {
+				truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason", streamTruncated: true}
+				helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+				if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+					reporter.PublishFailure(ctx, truncErr)
+				}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+				case <-ctx.Done():
+				}
+				return
 			}
 		}
 		_ = helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
