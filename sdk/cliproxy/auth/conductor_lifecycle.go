@@ -101,7 +101,7 @@ func (m *Manager) RegisterExecutorWithRevision(executor ProviderExecutor) uint64
 	if executor == nil {
 		return 0
 	}
-	provider := strings.TrimSpace(executor.Identifier())
+	provider := strings.ToLower(strings.TrimSpace(executor.Identifier()))
 	if provider == "" {
 		return 0
 	}
@@ -889,7 +889,12 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
 	delete(m.auths, id)
 	m.notifyAuthChangeLocked(id)
 	if m.modelPoolOffsets != nil {
-		delete(m.modelPoolOffsets, id)
+		poolPrefix := strings.ToLower(strings.TrimSpace(id)) + "|"
+		for key := range m.modelPoolOffsets {
+			if key == id || strings.HasPrefix(key, poolPrefix) {
+				delete(m.modelPoolOffsets, key)
+			}
+		}
 	}
 	for sessionID, sessionAuths := range m.homeRuntimeAuths {
 		if sessionAuths == nil {
