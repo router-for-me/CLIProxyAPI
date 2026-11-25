@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 )
 
@@ -2200,4 +2201,265 @@ func TestConvertGeminiRequestToInteractionsPreservesArraysEmptyContainersAndRoot
 	if !emptyRules.Exists() || !emptyRules.IsArray() || len(emptyRules.Array()) != 0 {
 		t.Fatalf("tools.0.empty_rules = %q (exists=%v), want empty array []", emptyRules.Raw, emptyRules.Exists())
 	}
+}
+
+func TestConvertInteractionsResponseToGeminiNonStream_ThoughtSummaryAndSignature(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		wantParts []struct {
+			text    string
+			thought bool
+			sig     string
+		}
+	}{
+		{
+			name: "thought summary with signature",
+			raw:  `{"id":"int_1","model":"gemini-3-pro","steps":[{"type":"thought","summary":[{"type":"text","text":"reasoning step"}],"signature":"sig_summary"},{"type":"model_output","content":[{"type":"text","text":"final answer"}]}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "reasoning step", thought: true, sig: "sig_summary"},
+				{text: "final answer", thought: false, sig: ""},
+			},
+		},
+		{
+			name: "thought text with snake_case thought_signature",
+			raw:  `{"id":"int_2","model":"gemini-3-pro","steps":[{"type":"thought","text":"plain thought","thought_signature":"sig_text"}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "plain thought", thought: true, sig: "sig_text"},
+			},
+		},
+		{
+			name: "thought content array attaches thoughtSignature to last part",
+			raw:  `{"id":"int_3","model":"gemini-3-pro","steps":[{"type":"thought","content":[{"type":"text","text":"part 1"},{"type":"text","text":"part 2"}],"thoughtSignature":"sig_multi"}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "part 1", thought: true, sig: ""},
+				{text: "part 2", thought: true, sig: "sig_multi"},
+			},
+		},
+		{
+			name: "signature-only thought step preserved",
+			raw:  `{"id":"int_4","model":"gemini-3-pro","steps":[{"type":"thought","signature":"sig_only"},{"type":"model_output","content":[{"type":"text","text":"done"}]}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "", thought: true, sig: "sig_only"},
+				{text: "done", thought: false, sig: ""},
+			},
+		},
+		{
+			name: "empty content array falls back to summary and preserves signature",
+			raw:  `{"id":"int_5","model":"gemini-3-pro","steps":[{"type":"thought","content":[],"summary":[{"type":"text","text":"fallback summary"}],"signature":"sig_fallback"}]}`,
+			wantParts: []struct {
+				text    string
+				thought bool
+				sig     string
+			}{
+				{text: "fallback summary", thought: true, sig: "sig_fallback"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3-pro", nil, nil, []byte(tc.raw), nil)
+			parts := ojson.GetBytesNoCopy(out, "candidates.0.content.parts").Array()
+			if len(parts) != len(tc.wantParts) {
+				t.Fatalf("parts count = %d, want %d. Output: %s", len(parts), len(tc.wantParts), string(out))
+			}
+			for i, want := range tc.wantParts {
+				if got := parts[i].Get("text").String(); got != want.text {
+					t.Errorf("parts[%d].text = %q, want %q. Part: %s", i, got, want.text, parts[i].Raw)
+				}
+				if got := parts[i].Get("thought").Bool(); got != want.thought {
+					t.Errorf("parts[%d].thought = %v, want %v. Part: %s", i, got, want.thought, parts[i].Raw)
+				}
+				if got := parts[i].Get("thoughtSignature").String(); got != want.sig {
+					t.Errorf("parts[%d].thoughtSignature = %q, want %q. Part: %s", i, got, want.sig, parts[i].Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToInteractions_ModelHistoryThoughtSignature(t *testing.T) {
+	const validGeminiThoughtSig = "ErUDCrIDCAISrQMBEU0yD9ECvDhSY1DQJNUGafArdfd2mDfO8VQq7XjLx/91zESuo0QPSdkRFWkLeVIocSQmQULonYMOJcs6XDLV2LTRC9myb3MCCP9CUoWbEeqhAvXKTScyS3nwBDDVJYuDDbY3YvR4V86T/DnU3qufpaVZ3wQOiJVyBVZ515dYTN+XGq7SuUc3RpfAqVU06jgxaCM0WKV4Df5mGMJWb25e/aFG2Jc7upSqpf3n6aElj+4c/eWr4GdKd0TUIElXBZ0HEN/vNcWzD3F0S4MeVbk1LDakL6HG6oyaSS2gocxYNYxqm9mdMHaXYa4mIYqWqmqBEnbgcHp8H4fgqBxc3Cx8C3otV8IarO5OALaVDA3NaXB1zjLet1587kEpkCNr9OvrYOES2nCl/i4EgbPK01nlXo+Wwm5jsZU5nEG4/Z0bErzqC5TKwOsqpJ7afL2sPWI0IGrXhXL+QCumWCS5iUtwybSkL7CYSk9GC+iY+ev6FAmC4V5JEc4OaWOc9+m/29LniN/iPTSxtUQSZT94pUa3/irIIdH7ReAS3cpeM6OTvumR1PwNxXx3XM1mEGc="
+
+	t.Run("non-empty thought part writes summary and survives sanitization", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"text":"deep thought","thought":true,"thoughtSignature":"` + validGeminiThoughtSig + `"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		sanitized := helps.SanitizeGeminiInteractionsUnsupportedInputIDs(out, false)
+		steps := ojson.GetBytesNoCopy(sanitized, "input").Array()
+		if len(steps) != 1 {
+			t.Fatalf("input len = %d, want 1. Output: %s", len(steps), string(sanitized))
+		}
+		if got := steps[0].Get("type").String(); got != "thought" {
+			t.Fatalf("steps[0].type = %q, want thought", got)
+		}
+		if got := steps[0].Get("signature").String(); got != validGeminiThoughtSig {
+			t.Fatalf("steps[0].signature = %q, want %q. Output: %s", got, validGeminiThoughtSig, string(sanitized))
+		}
+		if steps[0].Get("content").Exists() {
+			t.Fatalf("thought step should use summary rather than content: %s", steps[0].Raw)
+		}
+		if got := steps[0].Get("summary.0.text").String(); got != "deep thought" {
+			t.Fatalf("steps[0].summary.0.text = %q, want deep thought. Step: %s", got, steps[0].Raw)
+		}
+	})
+
+	t.Run("non-empty model text preserves signature as thought step", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"text":"answer","thoughtSignature":"sig_answer"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "model_output" || steps[0].Get("content.0.text").String() != "answer" {
+			t.Fatalf("steps[0] = %s, want model_output answer", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_answer" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_answer", steps[1].Raw)
+		}
+	})
+
+	t.Run("model inlineData preserves signature as thought step", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="},"thoughtSignature":"sig_img"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "model_output" || steps[0].Get("content.0.type").String() != "image" {
+			t.Fatalf("steps[0] = %s, want model_output image", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_img" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_img", steps[1].Raw)
+		}
+	})
+
+	t.Run("model fileData preserves signature as thought step", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"fileData":{"mimeType":"image/png","fileUri":"gs://bucket/img.png"},"thoughtSignature":"sig_file"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "model_output" || steps[0].Get("content.0.uri").String() != "gs://bucket/img.png" {
+			t.Fatalf("steps[0] = %s, want model_output file uri", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_file" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_file", steps[1].Raw)
+		}
+	})
+
+	t.Run("standalone signature-only parts without text key preserved", func(t *testing.T) {
+		req := []byte(`{"model":"gemini-3-pro","contents":[{"role":"model","parts":[{"thoughtSignature":"sig_bare"},{"thought":true,"thought_signature":"sig_thought_bare"}]}]}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3-pro", req, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		steps := ojson.GetBytesNoCopy(out, "input").Array()
+		if len(steps) != 2 {
+			t.Fatalf("input len = %d, want 2. Output: %s", len(steps), string(out))
+		}
+		if steps[0].Get("type").String() != "thought" || steps[0].Get("signature").String() != "sig_bare" {
+			t.Fatalf("steps[0] = %s, want thought with signature sig_bare", steps[0].Raw)
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != "sig_thought_bare" {
+			t.Fatalf("steps[1] = %s, want thought with signature sig_thought_bare", steps[1].Raw)
+		}
+	})
+
+	t.Run("non-stream response to follow-up request round-trips multi-part text summary and signature through sanitization", func(t *testing.T) {
+		upstream := []byte(`{"id":"int_rt","model":"gemini-3-pro","steps":[{"type":"thought","summary":[{"type":"text","text":"step one"},{"type":"text","text":"step two"}],"signature":"` + validGeminiThoughtSig + `"},{"type":"model_output","content":[{"type":"text","text":"hello"}]},{"type":"thought","signature":"` + validGeminiThoughtSig + `"}]}`)
+		geminiResp := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3-pro", nil, nil, upstream, nil)
+		modelContent := ojson.GetBytesNoCopy(geminiResp, "candidates.0.content").Raw
+
+		followUp := `{"model":"gemini-3-pro","contents":[{"role":"user","parts":[{"text":"hi"}]},` + modelContent + `,{"role":"user","parts":[{"text":"continue"}]}]}`
+		interactionsReq, err := ConvertGeminiRequestToInteractions("gemini-3-pro", []byte(followUp), false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		sanitized := helps.SanitizeGeminiInteractionsUnsupportedInputIDs(interactionsReq, false)
+		steps := ojson.GetBytesNoCopy(sanitized, "input").Array()
+		if len(steps) != 5 {
+			t.Fatalf("input len = %d, want 5. Output: %s", len(steps), string(sanitized))
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != validGeminiThoughtSig {
+			t.Fatalf("steps[1] = %s, want thought with valid signature", steps[1].Raw)
+		}
+		if steps[1].Get("summary.#").Int() != 2 || steps[1].Get("summary.0.text").String() != "step one" || steps[1].Get("summary.1.text").String() != "step two" {
+			t.Fatalf("steps[1].summary = %s, want [step one, step two]", steps[1].Raw)
+		}
+		if steps[2].Get("type").String() != "model_output" || steps[2].Get("content.0.text").String() != "hello" {
+			t.Fatalf("steps[2] = %s, want model_output hello", steps[2].Raw)
+		}
+		if steps[3].Get("type").String() != "thought" || steps[3].Get("signature").String() != validGeminiThoughtSig {
+			t.Fatalf("steps[3] = %s, want thought with valid signature", steps[3].Raw)
+		}
+	})
+
+	t.Run("non-stream response to follow-up request round-trips mixed text and image thought summary", func(t *testing.T) {
+		upstream := []byte(`{"id":"int_rt_img","model":"gemini-3-pro","steps":[{"type":"thought","summary":[{"type":"text","text":"sketch diagram"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}],"signature":"` + validGeminiThoughtSig + `"},{"type":"model_output","content":[{"type":"text","text":"final answer"}]}]}`)
+		geminiResp := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3-pro", nil, nil, upstream, nil)
+		respParts := ojson.GetBytesNoCopy(geminiResp, "candidates.0.content.parts").Array()
+		if len(respParts) != 3 {
+			t.Fatalf("response parts count = %d, want 3. Output: %s", len(respParts), string(geminiResp))
+		}
+		if !respParts[0].Get("thought").Bool() || respParts[0].Get("text").String() != "sketch diagram" {
+			t.Fatalf("respParts[0] = %s, want thought text part", respParts[0].Raw)
+		}
+		if !respParts[1].Get("thought").Bool() || respParts[1].Get("inlineData.mimeType").String() != "image/png" || respParts[1].Get("thoughtSignature").String() != validGeminiThoughtSig {
+			t.Fatalf("respParts[1] = %s, want thought inlineData image part with thoughtSignature", respParts[1].Raw)
+		}
+		if respParts[2].Get("thought").Bool() || respParts[2].Get("text").String() != "final answer" {
+			t.Fatalf("respParts[2] = %s, want non-thought model text part", respParts[2].Raw)
+		}
+
+		modelContent := ojson.GetBytesNoCopy(geminiResp, "candidates.0.content").Raw
+		followUp := `{"model":"gemini-3-pro","contents":[{"role":"user","parts":[{"text":"hi"}]},` + modelContent + `,{"role":"user","parts":[{"text":"next"}]}]}`
+		interactionsReq, err := ConvertGeminiRequestToInteractions("gemini-3-pro", []byte(followUp), false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions error: %v", err)
+		}
+		sanitized := helps.SanitizeGeminiInteractionsUnsupportedInputIDs(interactionsReq, false)
+		steps := ojson.GetBytesNoCopy(sanitized, "input").Array()
+		if len(steps) != 4 {
+			t.Fatalf("input len = %d, want 4. Output: %s", len(steps), string(sanitized))
+		}
+		if steps[1].Get("type").String() != "thought" || steps[1].Get("signature").String() != validGeminiThoughtSig {
+			t.Fatalf("steps[1] = %s, want thought step with valid signature", steps[1].Raw)
+		}
+		if steps[1].Get("summary.#").Int() != 2 || steps[1].Get("summary.0.text").String() != "sketch diagram" || steps[1].Get("summary.1.type").String() != "image" || steps[1].Get("summary.1.data").String() != "iVBORw0KGgo=" {
+			t.Fatalf("steps[1].summary = %s, want mixed text and image summary", steps[1].Raw)
+		}
+		if steps[2].Get("type").String() != "model_output" || steps[2].Get("content.0.text").String() != "final answer" {
+			t.Fatalf("steps[2] = %s, want model_output final answer", steps[2].Raw)
+		}
+	})
 }

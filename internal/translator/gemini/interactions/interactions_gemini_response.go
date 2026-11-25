@@ -346,33 +346,65 @@ func interactionsStepToGeminiParts(step ojson.Result) [][]byte {
 	case "function_result":
 		return [][]byte{interactionsFunctionResponseStepToGeminiPart(step)}
 	case "thought":
-		return interactionsContentToGeminiParts(step.Get("content"), true)
+		partDocs := extractInteractionsThoughtPartDocsToGemini(step)
+		sig := firstNonEmptyString(
+			step.Get("signature").String(),
+			step.Get("thoughtSignature").String(),
+			step.Get("thought_signature").String(),
+			step.Get("extra_content.google.thought_signature").String(),
+		)
+		if sig != "" {
+			if len(partDocs) > 0 {
+				_ = partDocs[len(partDocs)-1].Set("thoughtSignature", sig)
+			} else {
+				partDoc := ojson.NewDocString(`{"text":"","thought":true}`)
+				_ = partDoc.Set("thoughtSignature", sig)
+				partDocs = append(partDocs, partDoc)
+			}
+		}
+		parts := make([][]byte, 0, len(partDocs))
+		for _, partDoc := range partDocs {
+			parts = append(parts, partDoc.Bytes())
+		}
+		return parts
 	default:
 		return interactionsContentToGeminiParts(step.Get("content"), false)
 	}
 }
 
-func interactionsContentToGeminiParts(content ojson.Result, thought bool) [][]byte {
-	var parts [][]byte
+func interactionsContentToGeminiPartDocs(content ojson.Result, thought bool) []*ojson.Doc {
+	var partDocs []*ojson.Doc
 	if !content.Exists() {
-		return parts
+		return partDocs
 	}
 	if content.Type == ojson.String {
-		return [][]byte{geminiTextPartJSON(content.String(), thought)}
+		return []*ojson.Doc{geminiTextPartDoc(content.String(), thought)}
 	}
 	if content.IsObject() {
-		if part := interactionsContentPartToGeminiPart(content, thought); len(part) > 0 {
-			parts = append(parts, part)
+		if partDoc := interactionsContentPartToGeminiPartDoc(content, thought); partDoc != nil {
+			partDocs = append(partDocs, partDoc)
 		}
-		return parts
+		return partDocs
 	}
 	if content.IsArray() {
 		content.ForEach(func(_, item ojson.Result) bool {
-			if part := interactionsContentPartToGeminiPart(item, thought); len(part) > 0 {
-				parts = append(parts, part)
+			if partDoc := interactionsContentPartToGeminiPartDoc(item, thought); partDoc != nil {
+				partDocs = append(partDocs, partDoc)
 			}
 			return true
 		})
+	}
+	return partDocs
+}
+
+func interactionsContentToGeminiParts(content ojson.Result, thought bool) [][]byte {
+	partDocs := interactionsContentToGeminiPartDocs(content, thought)
+	if len(partDocs) == 0 {
+		return nil
+	}
+	parts := make([][]byte, 0, len(partDocs))
+	for _, partDoc := range partDocs {
+		parts = append(parts, partDoc.Bytes())
 	}
 	return parts
 }
