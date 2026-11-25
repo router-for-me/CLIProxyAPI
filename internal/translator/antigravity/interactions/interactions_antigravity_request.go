@@ -157,17 +157,55 @@ func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]str
 
 func copyInteractionsSystemToAntigravityDoc(outDoc *ojson.Doc, root ojson.Result) {
 	sys := root.Get("system_instruction")
-	if !sys.Exists() {
+	if !sys.Exists() || sys.Type == ojson.Null {
 		return
 	}
 	if sys.Type == ojson.String {
-		instr, _ := ojson.SetBytes([]byte(`{"parts":[{"text":""}]}`), "parts.0.text", sys.String())
-		_ = outDoc.SetRawBytes("request.systemInstruction", instr)
+		instrDoc := ojson.NewDocString(`{"parts":[{"text":""}]}`)
+		_ = instrDoc.Set("parts.0.text", sys.String())
+		_ = outDoc.SetRawBytes("request.systemInstruction", instrDoc.Bytes())
+		return
+	}
+	if sys.IsArray() {
+		var partItems [][]byte
+		sys.ForEach(func(_, item ojson.Result) bool {
+			switch {
+			case item.Type == ojson.String:
+				if item.String() != "" {
+					partItems = append(partItems, antigravityTextPartJSON(item.String(), false))
+				}
+			case item.IsObject():
+				itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+				if itemType != "" && itemType != "text" {
+					return true
+				}
+				if text := item.Get("text"); text.Exists() && text.Type == ojson.String && text.String() != "" {
+					partItems = append(partItems, antigravityTextPartJSON(text.String(), false))
+				}
+			}
+			return true
+		})
+		if len(partItems) == 0 {
+			return
+		}
+		instrDoc := ojson.NewDocString(`{"parts":[]}`)
+		_ = instrDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(partItems))
+		_ = outDoc.SetRawBytes("request.systemInstruction", instrDoc.Bytes())
+		return
+	}
+	if !sys.IsObject() {
 		return
 	}
 	if text := sys.Get("text"); text.Exists() && !sys.Get("parts").Exists() {
-		instr, _ := ojson.SetBytes([]byte(`{"parts":[{"text":""}]}`), "parts.0.text", text.String())
-		_ = outDoc.SetRawBytes("request.systemInstruction", instr)
+		if text.Type != ojson.String {
+			return
+		}
+		instrDoc := ojson.NewDocString(`{"parts":[{"text":""}]}`)
+		_ = instrDoc.Set("parts.0.text", text.String())
+		_ = outDoc.SetRawBytes("request.systemInstruction", instrDoc.Bytes())
+		return
+	}
+	if parts := sys.Get("parts"); !parts.Exists() || !parts.IsArray() || len(parts.Array()) == 0 {
 		return
 	}
 	_ = outDoc.SetRaw("request.systemInstruction", sys.Raw)
@@ -211,20 +249,27 @@ func normalizeInteractionsGenerationConfigForAntigravityDoc(outDoc *ojson.Doc) {
 
 func copyInteractionsReasoningToAntigravityDoc(outDoc *ojson.Doc, root ojson.Result) {
 	reasoning := root.Get("reasoning")
-	if !reasoning.Exists() {
+	if !reasoning.Exists() || !reasoning.IsObject() {
 		return
 	}
-	effort := strings.ToLower(strings.TrimSpace(reasoning.Get("effort").String()))
+	effort := ""
+	if effortRes := reasoning.Get("effort"); effortRes.Exists() && effortRes.Type == ojson.String {
+		effort = strings.ToLower(strings.TrimSpace(effortRes.String()))
+	}
 	if effort == "" {
-		effort = strings.ToLower(strings.TrimSpace(reasoning.Get("thinking_level").String()))
+		if levelRes := reasoning.Get("thinking_level"); levelRes.Exists() && levelRes.Type == ojson.String {
+			effort = strings.ToLower(strings.TrimSpace(levelRes.String()))
+		}
 	}
 	if effort != "" {
 		// Thinking amount and summary visibility are independent. This OpenAI-style
 		// compatibility alias controls only the amount; includeThoughts is written
 		// below only for an explicit Interactions summary selector.
 		if effort == "auto" {
+			_ = outDoc.Delete("request.generationConfig.thinkingConfig.thinkingLevel")
 			_ = outDoc.Set("request.generationConfig.thinkingConfig.thinkingBudget", -1)
 		} else {
+			_ = outDoc.Delete("request.generationConfig.thinkingConfig.thinkingBudget")
 			_ = outDoc.Set("request.generationConfig.thinkingConfig.thinkingLevel", effort)
 		}
 	}

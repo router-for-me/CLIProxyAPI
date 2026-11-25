@@ -1430,3 +1430,140 @@ func TestConvertAntigravityResponseToInteractionsNonStream_ParallelFunctionCallF
 		t.Fatalf("second non-stream fallback id = %q, want _1 suffix. Output: %s", id1, string(out))
 	}
 }
+
+func TestConvertInteractionsRequestToAntigravitySystemInstructionNormalization(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantExist bool
+		wantText  string
+	}{
+		{
+			name:      "null system_instruction is omitted",
+			input:     `{"model":"antigravity-test","system_instruction":null,"input":"hi"}`,
+			wantExist: false,
+		},
+		{
+			name:      "array of text parts converted to systemInstruction parts",
+			input:     `{"model":"antigravity-test","system_instruction":[{"type":"text","text":"be brief"},{"text":"be accurate"},"stay focused"],"input":"hi"}`,
+			wantExist: true,
+			wantText:  "be brief\n\nbe accurate\n\nstay focused",
+		},
+		{
+			name:      "empty array system_instruction is omitted",
+			input:     `{"model":"antigravity-test","system_instruction":[],"input":"hi"}`,
+			wantExist: false,
+		},
+		{
+			name:      "array with only non-text items is omitted",
+			input:     `{"model":"antigravity-test","system_instruction":[null,{}],"input":"hi"}`,
+			wantExist: false,
+		},
+		{
+			name:      "primitive non-string system_instruction is omitted",
+			input:     `{"model":"antigravity-test","system_instruction":123,"input":"hi"}`,
+			wantExist: false,
+		},
+		{
+			name:      "object system_instruction with text is wrapped",
+			input:     `{"model":"antigravity-test","system_instruction":{"text":"be brief"},"input":"hi"}`,
+			wantExist: true,
+			wantText:  "be brief",
+		},
+		{
+			name:      "object system_instruction with null text is omitted",
+			input:     `{"model":"antigravity-test","system_instruction":{"text":null},"input":"hi"}`,
+			wantExist: false,
+		},
+		{
+			name:      "object system_instruction with parts is preserved",
+			input:     `{"model":"antigravity-test","system_instruction":{"parts":[{"text":"part one"},{"text":"part two"}]},"input":"hi"}`,
+			wantExist: true,
+			wantText:  "part one\n\npart two",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+			}
+			sys := ojson.GetBytesNoCopy(out, "request.systemInstruction")
+			if sys.Exists() != tt.wantExist {
+				t.Fatalf("request.systemInstruction exists = %v (raw=%s), want %v. Output: %s", sys.Exists(), sys.Raw, tt.wantExist, string(out))
+			}
+			if !tt.wantExist {
+				return
+			}
+			if !sys.IsObject() {
+				t.Fatalf("request.systemInstruction is not an object: %s. Output: %s", sys.Raw, string(out))
+			}
+			if gotRole := sys.Get("role").String(); gotRole != "user" {
+				t.Fatalf("request.systemInstruction.role = %q, want user. Output: %s", gotRole, string(out))
+			}
+			if gotText := sys.Get("parts.0.text").String(); gotText != tt.wantText {
+				t.Fatalf("request.systemInstruction.parts.0.text = %q, want %q. Output: %s", gotText, tt.wantText, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravityReasoningClearsConflictingThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantBudget    bool
+		wantBudgetVal int64
+		wantLevel     bool
+		wantLevelVal  string
+	}{
+		{
+			name:          "reasoning auto deletes thinkingLevel before setting thinkingBudget",
+			input:         `{"model":"antigravity-test","input":"hi","generation_config":{"thinking_level":"high"},"reasoning":{"effort":"auto"}}`,
+			wantBudget:    true,
+			wantBudgetVal: -1,
+		},
+		{
+			name:         "reasoning effort deletes thinkingBudget before setting thinkingLevel",
+			input:        `{"model":"antigravity-test","input":"hi","generation_config":{"thinking_budget":2048},"reasoning":{"effort":"high"}}`,
+			wantLevel:    true,
+			wantLevelVal: "high",
+		},
+		{
+			name:         "reasoning thinking_level deletes nested thinkingConfig thinkingBudget",
+			input:        `{"model":"antigravity-test","input":"hi","generationConfig":{"thinkingConfig":{"thinkingBudget":1024}},"reasoning":{"thinking_level":"medium"}}`,
+			wantLevel:    true,
+			wantLevelVal: "medium",
+		},
+		{
+			name:          "reasoning auto deletes nested thinkingConfig thinkingLevel",
+			input:         `{"model":"antigravity-test","input":"hi","generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}},"reasoning":{"effort":"auto"}}`,
+			wantBudget:    true,
+			wantBudgetVal: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+			}
+			budget := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.thinkingBudget")
+			level := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.thinkingLevel")
+			if budget.Exists() != tt.wantBudget {
+				t.Fatalf("thinkingBudget exists = %v (raw=%s), want %v. Output: %s", budget.Exists(), budget.Raw, tt.wantBudget, string(out))
+			}
+			if tt.wantBudget && budget.Int() != tt.wantBudgetVal {
+				t.Fatalf("thinkingBudget = %d, want %d. Output: %s", budget.Int(), tt.wantBudgetVal, string(out))
+			}
+			if level.Exists() != tt.wantLevel {
+				t.Fatalf("thinkingLevel exists = %v (raw=%s), want %v. Output: %s", level.Exists(), level.Raw, tt.wantLevel, string(out))
+			}
+			if tt.wantLevel && level.String() != tt.wantLevelVal {
+				t.Fatalf("thinkingLevel = %q, want %q. Output: %s", level.String(), tt.wantLevelVal, string(out))
+			}
+		})
+	}
+}
