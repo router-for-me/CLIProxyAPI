@@ -729,7 +729,11 @@ type backendSeriesSelector struct {
 	fableBlockedUntil map[string]time.Time
 	// quotaHoldWeekly: the hold in quotaBlockedUntil is Anthropic's rejection of the week alone (7d rejected,
 	// 5h not), the only kind a poll showing the week reset may lift (liftResetWeeklyHoldLocked).
-	quotaHoldWeekly   map[string]bool
+	quotaHoldWeekly map[string]bool
+	// quotaHoldPeak: the highest weekly use read while the hold in quotaBlockedUntil lasts, from the 429's own
+	// headers or a poll. A poll lags and overwrites the stored figure, so the reading just before a reset can be
+	// lower than the one Anthropic refused at; liftResetWeeklyHoldLocked measures the fall from this peak.
+	quotaHoldPeak     map[string]float64
 	fableBackoffLevel map[string]int       // refusals in a row with no reset known, for the backoff
 	fableHoldGuessed  map[string]bool      // the hold is a backoff, not a reset: a reset learned later ends it sooner
 	fableHoldFloor    map[string]time.Time // the last reset Anthropic gave for a refusal: no hold ends before it
@@ -1256,6 +1260,7 @@ func (s *backendSeriesSelector) quotaBlockedLocked(authID string) bool {
 	until, blocked := s.quotaBlockedUntil[authID]
 	if blocked && !s.now().Before(until) {
 		delete(s.quotaBlockedUntil, authID)
+		delete(s.quotaHoldPeak, authID)
 		return false
 	}
 	return blocked
@@ -1287,6 +1292,7 @@ func (s *backendSeriesSelector) observeQuota(authID string, quota backendWeeklyQ
 				existing.used = quota.used
 				s.quota[authID] = existing
 				s.noteQuotaLocked(authID, existing)
+				s.noteHoldPeakLocked(authID, existing.used)
 			}
 			return
 		case !quota.resetsAt.IsZero() && !existing.resetsAt.IsZero() && quota.resetsAt.Before(existing.resetsAt):
@@ -1297,6 +1303,7 @@ func (s *backendSeriesSelector) observeQuota(authID string, quota backendWeeklyQ
 	}
 	s.quota[authID] = quota
 	s.noteQuotaLocked(authID, quota)
+	s.noteHoldPeakLocked(authID, quota.used)
 }
 
 func backendAvailabilityModel(selectionModel string, opts coreexecutor.Options) string {
@@ -1380,6 +1387,9 @@ func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 		until = previous
 	}
 	s.quotaBlockedUntil[result.AuthID] = until
+	if q := s.currentQuotaLocked(result.AuthID); q.known {
+		s.noteHoldPeakLocked(result.AuthID, q.used) // the figure the 429 itself carried, stored just before
+	}
 	s.noteResultLocked(result, cooldown, until, result.RetryAfter != nil)
 }
 

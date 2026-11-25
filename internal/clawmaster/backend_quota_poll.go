@@ -254,6 +254,9 @@ func (s *backendSeriesSelector) observePolledQuotaLifting(authID string, quota b
 	s.quota[authID] = quota
 	s.quotaRevision[authID]++
 	s.noteQuotaLocked(authID, quota)
+	if !lifted {
+		s.noteHoldPeakLocked(authID, quota.used)
+	}
 	observeUsagePoll(s.profileNameLocked(authID), "ok")
 	return true, lifted
 }
@@ -272,14 +275,45 @@ func (s *backendSeriesSelector) noteCredentialRejection(authID string, headers h
 	s.quotaHoldWeekly[authID] = status("7d") == "rejected" && status("5h") != "rejected"
 }
 
+// weekResetFall is how far below the hold's peak the poll must read the week before a hold is lifted. Within
+// a week the use only grows; it falls only when the week is reset, and a reset takes it to about nothing, so
+// a quarter of the allowance is far beyond any rounding or lag between readings.
+const weekResetFall = 0.25
+
+// noteHoldPeakLocked keeps the highest weekly use read while Anthropic holds the subscription for its week.
+func (s *backendSeriesSelector) noteHoldPeakLocked(authID string, used float64) {
+	if !s.quotaBlockedLocked(authID) {
+		delete(s.quotaHoldPeak, authID)
+		return
+	}
+	if s.quotaHoldPeak == nil {
+		s.quotaHoldPeak = make(map[string]float64, len(s.authIDs))
+	}
+	if peak, seen := s.quotaHoldPeak[authID]; !seen || used > peak {
+		s.quotaHoldPeak[authID] = used
+	}
+}
+
 // liftResetWeeklyHoldLocked: Anthropic refused the subscription for its week alone (7d rejected, 5h not)
-// and the poll, which read the week used up, now reads it well below that, with the five-hour window not
-// full: the week's usage was reset (a limit reset on claude.ai, seen 2026-11-22). Without this the hold
-// strands the whole week until the old reset. The hold is lifted so the next request asks Anthropic, which
-// decides; a refusal holds the subscription again and the request moves on. It reports a lift, so the
-// caller clears the core's cooldown for the same rejection.
+// and the poll now reads the week at least weekResetFall below the highest use read during the hold, with the
+// five-hour window not full: the week's usage was reset (a limit reset on claude.ai, seen 2026-11-22). Without
+// this the hold strands the whole week until the old reset. The hold is lifted so the next request asks
+// Anthropic, which decides; a refusal holds the subscription again and the request moves on. It reports a
+// lift, so the caller clears the core's cooldown for the same rejection.
+//
+// The fall is measured from the hold's peak, not from the reading just before: on 2026-11-25 Anthropic refused
+// a subscription its lagging poll read at 90%, the polls kept reading 90% through the hold, and when the week
+// was reset (90% to 41%) a rule that wanted the previous reading at 100% kept the hold until the old reset,
+// with every other subscription out: the pool refused every request until a restart.
 func (s *backendSeriesSelector) liftResetWeeklyHoldLocked(authID string, previous, polled backendWeeklyQuota) bool {
-	if !s.quotaBlockedLocked(authID) || !s.quotaHoldWeekly[authID] || !previous.known || previous.used < 1 || polled.used > 0.9 {
+	if !s.quotaBlockedLocked(authID) || !s.quotaHoldWeekly[authID] {
+		return false
+	}
+	peak, seen := s.quotaHoldPeak[authID]
+	if previous.known && (!seen || previous.used > peak) {
+		peak, seen = previous.used, true
+	}
+	if !seen || polled.used > peak-weekResetFall {
 		return false
 	}
 	if five, known := s.fiveHourNowLocked(authID, s.nowOrReal()); known && five.UsedFraction >= 1 {
@@ -288,7 +322,9 @@ func (s *backendSeriesSelector) liftResetWeeklyHoldLocked(authID string, previou
 	delete(s.quotaBlockedUntil, authID)
 	delete(s.quotaBackoffLevel, authID)
 	delete(s.quotaHoldWeekly, authID)
+	delete(s.quotaHoldPeak, authID)
 	lg().Info("weekly usage reset while Anthropic refused the subscription; asking Anthropic again",
-		"profile", s.profileNameLocked(authID), "used_pct", fmt.Sprintf("%.0f", polled.used*100))
+		"profile", s.profileNameLocked(authID), "used_pct", fmt.Sprintf("%.0f", polled.used*100),
+		"peak_used_pct", fmt.Sprintf("%.0f", peak*100))
 	return true
 }
