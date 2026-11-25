@@ -131,6 +131,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
 <td><strong>10dian-API</strong><br>One key to call on AI from around the world!<br>10dian-API brings leading AI models and protocols together in one API that works with popular clients. Independent developers, AI enthusiasts, and teams get the same access, including stable connections for high volumes of concurrent requests. Prices are low, billing multipliers are public, and you get the model you choose without substitutions. The service accepts multiple top-up methods and can also pay for popular AI subscriptions on your behalf.<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">Sign up</a></td>
 </tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td><strong>SubRouter</strong><br>Enterprise-grade multi-model AI API relay platform supporting Claude, GPT, Gemini, DeepSeek, and more with OpenAI/Claude protocol compatibility, low latency, and high concurrency.<br>👉 <a href="https://subrouter.ai/register?aff=nP93">Sign up</a></td>
+</tr>
 </tbody>
 </table>
 

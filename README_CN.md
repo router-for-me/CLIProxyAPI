@@ -126,6 +126,10 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
 <td><strong>10dian-API</strong><br>“用一把钥匙，召唤全世界的 AI～”<br>10dian-API 提供全品类主流 AI 模型与协议的 API 聚合接入，兼容常见客户端，个人开发者、AI 热爱者和团队用户均可低门槛使用。价格透明、低价不复杂；模型真实、倍率透明、不偷换模型；高并发稳定接入，并支持主流 AI 订阅代充。全品类一站式，支持多种充值方式，个人与团队同权，高并发接入门槛更低。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">点击注册</a></td>
 </tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td><strong>SubRouter</strong><br>企业级多模型 AI API 中转平台，支持 Claude、GPT、Gemini、DeepSeek 等模型，兼容 OpenAI 和 Claude 协议，提供低延迟、高并发接入。<br>👉 <a href="https://subrouter.ai/register?aff=nP93">点击注册</a></td>
+</tr>
 </tbody>
 </table>
 

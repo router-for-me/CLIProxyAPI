@@ -122,6 +122,10 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
 <td><strong>10dian-API</strong><br>ひとつのキーで、世界中の AI を呼び出そう！<br>10dian-API は主要な AI モデルとプロトコルをひとつの API にまとめ、一般的なクライアントから利用できます。個人開発者や AI 愛好家もチームと同じ条件で利用でき、多数の同時リクエストでも安定して接続できます。料金は手頃で、課金倍率も公開しています。選んだモデルが別のモデルにすり替わることはありません。複数のチャージ方法に加え、主要な AI サブスクリプションの支払い代行にも対応しています。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">登録はこちら</a></td>
 </tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td><strong>SubRouter</strong><br>Claude、GPT、Gemini、DeepSeek などに対応する企業向けのマルチモデル AI API 中継プラットフォームです。OpenAI と Claude のプロトコルに対応し、多数のリクエストを低遅延で同時に処理できます。<br>👉 <a href="https://subrouter.ai/register?aff=nP93">登録はこちら</a></td>
+</tr>
 </tbody>
 </table>
 
