@@ -444,3 +444,140 @@ func TestConvertCodexResponseToGemini_RefusalStreamAndNonStream(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertCodexResponseToGemini_StreamFunctionCallsOmitPrematureFinishReason(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("parallel_function_calls_completed", func(t *testing.T) {
+		var param any
+		var outputs [][]byte
+		events := [][]byte{
+			[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_a","name":"alpha","arguments":"{\"x\":1}"}}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_b","name":"beta","arguments":"{\"y\":2}"}}`),
+			[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`),
+		}
+		for _, ev := range events {
+			outputs = append(outputs, ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", nil, nil, ev, &param)...)
+		}
+		if len(outputs) != 3 {
+			t.Fatalf("got %d chunks, want 3; outputs=%q", len(outputs), outputs)
+		}
+		for i := 0; i < 2; i++ {
+			if fr := ojson.GetBytesNoCopy(outputs[i], "candidates.0.finishReason"); fr.Exists() {
+				t.Fatalf("function_call chunk %d unexpectedly set finishReason=%q; payload=%s", i, fr.String(), outputs[i])
+			}
+		}
+		if got := ojson.GetBytesNoCopy(outputs[2], "candidates.0.finishReason").String(); got != "STOP" {
+			t.Fatalf("terminal chunk finishReason = %q, want STOP; payload=%s", got, outputs[2])
+		}
+	})
+
+	t.Run("function_call_then_incomplete_max_tokens", func(t *testing.T) {
+		var param any
+		var outputs [][]byte
+		events := [][]byte{
+			[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_a","name":"alpha","arguments":"{\"x\":1}"}}`),
+			[]byte(`data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":2}}}`),
+		}
+		for _, ev := range events {
+			outputs = append(outputs, ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", nil, nil, ev, &param)...)
+		}
+		if len(outputs) != 2 {
+			t.Fatalf("got %d chunks, want 2; outputs=%q", len(outputs), outputs)
+		}
+		if fr := ojson.GetBytesNoCopy(outputs[0], "candidates.0.finishReason"); fr.Exists() {
+			t.Fatalf("function_call chunk unexpectedly set finishReason=%q before incomplete terminal; payload=%s", fr.String(), outputs[0])
+		}
+		if got := ojson.GetBytesNoCopy(outputs[1], "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+			t.Fatalf("terminal chunk finishReason = %q, want MAX_TOKENS; payload=%s", got, outputs[1])
+		}
+	})
+}
+
+func TestConvertCodexResponseToGemini_InvalidOrTruncatedFunctionCallArguments(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name     string
+		rawArgs  string
+		wantArgs string
+	}{
+		{
+			name:     "truncated_object",
+			rawArgs:  `{"query":"trunc`,
+			wantArgs: `{}`,
+		},
+		{
+			name:     "trailing_garbage",
+			rawArgs:  `{"query":"ok"} trailing`,
+			wantArgs: `{}`,
+		},
+		{
+			name:     "non_object_array",
+			rawArgs:  `[1,2]`,
+			wantArgs: `{}`,
+		},
+		{
+			name:     "whitespace_padded_valid_object",
+			rawArgs:  `  {"query":"ok"}  `,
+			wantArgs: `{"query":"ok"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("stream_"+tc.name, func(t *testing.T) {
+			itemDoc := ojson.NewDocString(`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`)
+			_ = itemDoc.Set("item.arguments", tc.rawArgs)
+
+			var param any
+			var outputs [][]byte
+			outputs = append(outputs, ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", nil, nil, append([]byte("data: "), itemDoc.Bytes()...), &param)...)
+			outputs = append(outputs, ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", nil, nil, []byte(`data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":2}}}`), &param)...)
+			if len(outputs) != 2 {
+				t.Fatalf("got %d chunks, want 2; outputs=%q", len(outputs), outputs)
+			}
+			if !ojson.ValidBytes(outputs[0]) {
+				t.Fatalf("stream chunk is not valid JSON: %s", outputs[0])
+			}
+			if got := ojson.GetBytesNoCopy(outputs[0], "candidates.0.content.parts.0.functionCall.args").Raw; got != tc.wantArgs {
+				t.Fatalf("stream functionCall.args = %s, want %s; payload=%s", got, tc.wantArgs, outputs[0])
+			}
+		})
+
+		t.Run("nonstream_"+tc.name, func(t *testing.T) {
+			respDoc := ojson.NewDocString(`{"type":"response.incomplete","response":{"id":"resp_1","created_at":1700000000,"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":2},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}]}}`)
+			_ = respDoc.Set("response.output.0.arguments", tc.rawArgs)
+
+			out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", nil, nil, respDoc.Bytes(), nil)
+			if !ojson.ValidBytes(out) {
+				t.Fatalf("non-stream response is not valid JSON: %s", out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.args").Raw; got != tc.wantArgs {
+				t.Fatalf("non-stream functionCall.args = %s, want %s; payload=%s", got, tc.wantArgs, out)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToGemini_RestoresShortenedNameFromSnakeCaseDeclarations_Issue8098(t *testing.T) {
+	ctx := context.Background()
+	prefix := strings.Repeat("a", 65)
+	tool1 := prefix + "_first"
+	tool2 := prefix + "_second"
+
+	origReqDoc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	_ = origReqDoc.Set("tools.0.function_declarations.0.name", tool1)
+	_ = origReqDoc.Set("tools.0.function_declarations.1.name", tool2)
+	origReq := origReqDoc.Bytes()
+
+	shortMap := buildShortNameMap([]string{tool1, tool2})
+	short2 := shortMap[tool2]
+
+	respDoc := ojson.NewDocString(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"usage":{"input_tokens":1,"output_tokens":2},"output":[{"type":"function_call","call_id":"call_1","name":"","arguments":"{}"}]}}`)
+	_ = respDoc.Set("response.output.0.name", short2)
+
+	out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", origReq, nil, respDoc.Bytes(), nil)
+	if got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.name").String(); got != tool2 {
+		t.Fatalf("functionCall.name = %q, want %q; out=%s", got, tool2, out)
+	}
+}

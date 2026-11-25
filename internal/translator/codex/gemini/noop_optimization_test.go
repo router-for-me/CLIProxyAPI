@@ -17,14 +17,15 @@ func TestCleanGeminiCodexToolParametersPreservesCanonicalSchema(t *testing.T) {
 	}
 }
 
-func TestSetCodexToolChoiceFromGeminiToolConfigReusesAutoChoice(t *testing.T) {
-	input := []byte(`{"tool_choice":"auto","input":[]}`)
+func TestSetCodexToolChoiceFromGeminiToolConfigDocPreservesAutoChoice(t *testing.T) {
+	input := `{"tool_choice":"auto","input":[]}`
+	doc := ojson.NewDocString(input)
 	config := ojson.Parse(`{"mode":"AUTO"}`)
 
-	output := setCodexToolChoiceFromGeminiToolConfig(input, config)
+	setCodexToolChoiceFromGeminiToolConfigDoc(doc, true, nil, config)
 
-	if &output[0] != &input[0] {
-		t.Fatal("AUTO tool choice caused a payload copy")
+	if got := doc.String(); got != input {
+		t.Fatalf("AUTO tool choice mutated payload:\n got: %s\nwant: %s", got, input)
 	}
 }
 

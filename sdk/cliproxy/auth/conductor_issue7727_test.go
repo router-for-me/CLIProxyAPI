@@ -573,7 +573,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 			snap.UpdatedAt = time.Unix(100, 0)
 			snap.Runtime = func() int { return 0 }
 			snap.Storage = callerStorages[0]
-			results[0], errs[0] = manager.prepareHomeAuthSnapshot(ctx, exec, snap)
+			results[0], errs[0] = manager.prepareHomeAuthSnapshot(ctx, exec, snap, false)
 		}()
 		<-started
 
@@ -585,7 +585,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 				snap.UpdatedAt = time.Unix(int64(100+idx), 0)
 				snap.Runtime = func() int { return idx }
 				snap.Storage = callerStorages[idx]
-				results[idx], errs[idx] = manager.prepareHomeAuthSnapshot(ctx, exec, snap)
+				results[idx], errs[idx] = manager.prepareHomeAuthSnapshot(ctx, exec, snap, false)
 			}()
 		}
 
@@ -668,7 +668,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 
 		doneA := make(chan *Auth, 1)
 		go func() {
-			prepared, errA := manager.prepareHomeAuthSnapshot(ctx, exec, authA)
+			prepared, errA := manager.prepareHomeAuthSnapshot(ctx, exec, authA, false)
 			if errA != nil {
 				t.Errorf("prepare A error: %v", errA)
 			}
@@ -676,7 +676,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 		}()
 		<-startedA
 
-		preparedB, errB := manager.prepareHomeAuthSnapshot(ctx, exec, authB)
+		preparedB, errB := manager.prepareHomeAuthSnapshot(ctx, exec, authB, false)
 		if errB != nil {
 			close(releaseA)
 			<-doneA
@@ -720,7 +720,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 
 		doneA := make(chan *Auth, 1)
 		go func() {
-			prepared, errA := manager.prepareHomeAuthSnapshot(ctx, exec, authA)
+			prepared, errA := manager.prepareHomeAuthSnapshot(ctx, exec, authA, false)
 			if errA != nil {
 				t.Errorf("prepare A error: %v", errA)
 			}
@@ -728,7 +728,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 		}()
 		<-startedA
 
-		preparedB, errB := manager.prepareHomeAuthSnapshot(ctx, exec, authB)
+		preparedB, errB := manager.prepareHomeAuthSnapshot(ctx, exec, authB, false)
 		if errB != nil {
 			close(releaseA)
 			<-doneA
@@ -776,12 +776,12 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, errs[0] = manager.prepareHomeAuthSnapshot(ctx, exec, homeAuth.Clone())
+			_, errs[0] = manager.prepareHomeAuthSnapshot(ctx, exec, homeAuth.Clone(), false)
 		}()
 		<-started
 		go func() {
 			defer wg.Done()
-			_, errs[1] = manager.prepareHomeAuthSnapshot(ctx, exec, homeAuth.Clone())
+			_, errs[1] = manager.prepareHomeAuthSnapshot(ctx, exec, homeAuth.Clone(), false)
 		}()
 		waitForHomePrepareFlightWaiters(t, manager, key, 2)
 		close(release)
@@ -822,7 +822,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 
 		leaderDone := make(chan error, 1)
 		go func() {
-			_, errPrep := manager.prepareHomeAuthSnapshot(ctx, exec, homeAuth.Clone())
+			_, errPrep := manager.prepareHomeAuthSnapshot(ctx, exec, homeAuth.Clone(), false)
 			leaderDone <- errPrep
 		}()
 		<-exec.prepareStarted
@@ -830,7 +830,7 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 		waitCtx, cancelWait := context.WithCancel(ctx)
 		waiterDone := make(chan error, 1)
 		go func() {
-			_, errPrep := manager.prepareHomeAuthSnapshot(waitCtx, exec, homeAuth.Clone())
+			_, errPrep := manager.prepareHomeAuthSnapshot(waitCtx, exec, homeAuth.Clone(), false)
 			waiterDone <- errPrep
 		}()
 		waitForHomePrepareFlightWaiters(t, manager, key, 2)
@@ -887,13 +887,13 @@ func TestIssue7727_HomePrepareAuthSnapshotCoalescesAndHonorsContextCancellation(
 		done2 := make(chan error, 1)
 
 		go func() {
-			_, err1 := manager.prepareHomeAuthSnapshot(ctx1, exec, homeAuth.Clone())
+			_, err1 := manager.prepareHomeAuthSnapshot(ctx1, exec, homeAuth.Clone(), false)
 			done1 <- err1
 		}()
 		<-started
 
 		go func() {
-			_, err2 := manager.prepareHomeAuthSnapshot(ctx2, exec, homeAuth.Clone())
+			_, err2 := manager.prepareHomeAuthSnapshot(ctx2, exec, homeAuth.Clone(), false)
 			done2 <- err2
 		}()
 		waitForHomePrepareFlightWaiters(t, manager, key, 2)

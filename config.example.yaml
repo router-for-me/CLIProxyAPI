@@ -752,6 +752,11 @@ upstream:
 #       prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #       disable-cooling: false                       # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3                             # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       request-scoped-errors:                       # optional: custom rules to classify upstream errors by status and body patterns
+#         - status: 400
+#           match:
+#             - "invalid_argument"
+#           action: "stop"
 #       base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #       proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential

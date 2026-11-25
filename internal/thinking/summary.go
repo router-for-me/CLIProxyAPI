@@ -90,8 +90,12 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 		if config, ok := firstSummaryBoolConfigFromGetter(get, []string{
 			"generationConfig.thinkingConfig.includeThoughts",
 			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
 			"generation_config.thinking_config.include_thoughts",
 			"generation_config.thinking_config.includeThoughts",
+			"generation_config.thinkingConfig.include_thoughts",
+			"generation_config.thinkingConfig.includeThoughts",
 		}); ok {
 			return config
 		}

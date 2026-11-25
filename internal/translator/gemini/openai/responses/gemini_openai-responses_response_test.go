@@ -1948,6 +1948,199 @@ func TestConvertGeminiResponseToOpenAIResponses_InputBufferReuse(t *testing.T) {
 	}
 }
 
+func TestConvertGeminiResponseToOpenAIResponses_MissingAndNullFunctionCallArgs(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "missing args",
+			raw:  `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"ping"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,"totalTokenCount":6},"modelVersion":"gemini-2.5-flash","responseId":"resp_missing_args"}`,
+		},
+		{
+			name: "null args",
+			raw:  `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"ping","args":null}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,"totalTokenCount":6},"modelVersion":"gemini-2.5-flash","responseId":"resp_null_args"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("nonstream_"+tc.name, func(t *testing.T) {
+			out := ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, "gemini-2.5-flash", nil, nil, []byte(tc.raw), nil)
+			root := ojson.ParseBytes(out)
+			item := root.Get("output.0")
+			if item.Get("type").String() != "function_call" {
+				t.Fatalf("output.0 type = %q, want function_call (raw=%s)", item.Get("type").String(), out)
+			}
+			if got := item.Get("arguments").String(); got != "{}" {
+				t.Fatalf("non-stream output.0.arguments = %q, want {}", got)
+			}
+		})
+
+		t.Run("stream_"+tc.name, func(t *testing.T) {
+			var param any
+			events := ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-flash", nil, nil, []byte("data: "+tc.raw), &param)
+			var deltaArgs, doneArgs, itemDoneArgs, completedArgs string
+			for _, ev := range events {
+				evName, data := parseSSEEvent(t, ev)
+				switch evName {
+				case "response.function_call_arguments.delta":
+					deltaArgs = data.Get("delta").String()
+				case "response.function_call_arguments.done":
+					doneArgs = data.Get("arguments").String()
+				case "response.output_item.done":
+					if data.Get("item.type").String() == "function_call" {
+						itemDoneArgs = data.Get("item.arguments").String()
+					}
+				case "response.completed":
+					completedArgs = data.Get("response.output.0.arguments").String()
+				}
+			}
+			if deltaArgs != "{}" || doneArgs != "{}" || itemDoneArgs != "{}" || completedArgs != "{}" {
+				t.Fatalf("stream args mismatch: delta=%q done=%q itemDone=%q completed=%q, want all {}", deltaArgs, doneArgs, itemDoneArgs, completedArgs)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_NullEchoedRequestFieldsNotCoerced(t *testing.T) {
+	ctx := context.Background()
+	nullReq := []byte(`{
+		"model": null,
+		"instructions": null,
+		"max_output_tokens": null,
+		"max_tool_calls": null,
+		"parallel_tool_calls": null,
+		"previous_response_id": null,
+		"prompt_cache_key": null,
+		"reasoning": null,
+		"safety_identifier": null,
+		"service_tier": null,
+		"store": null,
+		"temperature": null,
+		"text": null,
+		"tool_choice": null,
+		"tools": null,
+		"top_logprobs": null,
+		"top_p": null,
+		"truncation": null,
+		"user": null,
+		"metadata": null,
+		"input": "hello"
+	}`)
+	rawResp := `{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-2.5-flash","responseId":"resp_null_echo"}`
+
+	omittedWhenNull := []string{
+		"instructions",
+		"max_output_tokens",
+		"max_tool_calls",
+		"parallel_tool_calls",
+		"previous_response_id",
+		"prompt_cache_key",
+		"reasoning",
+		"safety_identifier",
+		"service_tier",
+		"store",
+		"temperature",
+		"text",
+		"tool_choice",
+		"tools",
+		"top_logprobs",
+		"top_p",
+		"truncation",
+		"user",
+		"metadata",
+	}
+
+	t.Run("nonstream_null_fields", func(t *testing.T) {
+		out := ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, "gemini-2.5-flash", nullReq, nil, []byte(rawResp), nil)
+		root := ojson.ParseBytes(out)
+		for _, field := range omittedWhenNull {
+			if v := root.Get(field); v.Exists() {
+				t.Fatalf("non-stream field %q unexpectedly present with value %s", field, v.Raw)
+			}
+		}
+		if got := root.Get("model").String(); got != "gemini-2.5-flash" {
+			t.Fatalf("non-stream model = %q, want fallback gemini-2.5-flash", got)
+		}
+	})
+
+	t.Run("stream_null_fields", func(t *testing.T) {
+		var param any
+		events := ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-flash", nullReq, nil, []byte("data: "+rawResp), &param)
+		var completed ojson.Result
+		for _, ev := range events {
+			evName, data := parseSSEEvent(t, ev)
+			if evName == "response.completed" {
+				completed = data.Get("response")
+			}
+		}
+		if !completed.Exists() {
+			t.Fatalf("missing response.completed event")
+		}
+		for _, field := range append(append([]string{}, omittedWhenNull...), "model") {
+			if v := completed.Get(field); v.Exists() {
+				t.Fatalf("stream response.completed field %q unexpectedly present with value %s", field, v.Raw)
+			}
+		}
+	})
+
+	t.Run("explicit_zero_typed_values_preserved", func(t *testing.T) {
+		typedReq := []byte(`{
+			"model": "gpt-5",
+			"instructions": "",
+			"max_output_tokens": 0,
+			"max_tool_calls": 0,
+			"parallel_tool_calls": false,
+			"store": false,
+			"temperature": 0,
+			"top_logprobs": 0,
+			"top_p": 0
+		}`)
+
+		nonStreamOut := ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, "gemini-2.5-flash", typedReq, nil, []byte(rawResp), nil))
+		var param any
+		var streamCompleted ojson.Result
+		for _, ev := range ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-flash", typedReq, nil, []byte("data: "+rawResp), &param) {
+			evName, data := parseSSEEvent(t, ev)
+			if evName == "response.completed" {
+				streamCompleted = data.Get("response")
+			}
+		}
+
+		for label, doc := range map[string]ojson.Result{"nonstream": nonStreamOut, "stream": streamCompleted} {
+			if v := doc.Get("model"); !v.Exists() || v.String() != "gpt-5" {
+				t.Fatalf("%s model = %s, want gpt-5", label, v.Raw)
+			}
+			if v := doc.Get("instructions"); !v.Exists() || v.Type != ojson.String || v.String() != "" {
+				t.Fatalf("%s instructions = %s, want empty string", label, v.Raw)
+			}
+			if v := doc.Get("max_output_tokens"); !v.Exists() || v.Type != ojson.Number || v.Int() != 0 {
+				t.Fatalf("%s max_output_tokens = %s, want 0", label, v.Raw)
+			}
+			if v := doc.Get("max_tool_calls"); !v.Exists() || v.Type != ojson.Number || v.Int() != 0 {
+				t.Fatalf("%s max_tool_calls = %s, want 0", label, v.Raw)
+			}
+			if v := doc.Get("parallel_tool_calls"); !v.Exists() || v.Type != ojson.False {
+				t.Fatalf("%s parallel_tool_calls = %s, want false", label, v.Raw)
+			}
+			if v := doc.Get("store"); !v.Exists() || v.Type != ojson.False {
+				t.Fatalf("%s store = %s, want false", label, v.Raw)
+			}
+			if v := doc.Get("temperature"); !v.Exists() || v.Type != ojson.Number || v.Float() != 0 {
+				t.Fatalf("%s temperature = %s, want 0", label, v.Raw)
+			}
+			if v := doc.Get("top_logprobs"); !v.Exists() || v.Type != ojson.Number || v.Int() != 0 {
+				t.Fatalf("%s top_logprobs = %s, want 0", label, v.Raw)
+			}
+			if v := doc.Get("top_p"); !v.Exists() || v.Type != ojson.Number || v.Float() != 0 {
+				t.Fatalf("%s top_p = %s, want 0", label, v.Raw)
+			}
+		}
+	})
+}
+
 func BenchmarkConvertGeminiResponseToOpenAIResponses_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","instructions":"` + strings.Repeat("x", 1024*1024) + `"}`)
 	delta := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"token "}]} }],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)

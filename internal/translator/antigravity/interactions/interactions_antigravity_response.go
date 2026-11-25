@@ -117,7 +117,7 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 	_ = outDoc.Set("model", modelName)
 	var steps [][]byte
 	root.Get("candidates.0.content.parts").ForEach(func(_, part ojson.Result) bool {
-		for _, step := range antigravityPartToInteractionsSteps(part) {
+		for _, step := range antigravityPartToInteractionsStepsAt(part, len(steps)) {
 			if len(step) > 0 {
 				steps = append(steps, step)
 			}
@@ -249,9 +249,9 @@ func appendAntigravityInteractionsDone(out [][]byte, st *antigravityToInteractio
 }
 
 func appendAntigravityInteractionsStepStart(out [][]byte, st *antigravityToInteractionsStreamState, stepType string, part ojson.Result) [][]byte {
-	st.StepID = fmt.Sprintf("step_%d", time.Now().UnixNano())
 	st.ActiveStepIndex = st.StepIndex
 	st.StepIndex++
+	st.StepID = fmt.Sprintf("step_%d_%d", time.Now().UnixNano(), st.ActiveStepIndex)
 	st.ActiveStepType = strings.Clone(stepType)
 	st.ActiveStepOpen = true
 	stepStartDoc := ojson.NewDoc([]byte(`{"index":0,"step":{"type":""},"event_type":"step.start"}`))
@@ -312,11 +312,7 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 		out = ensureAntigravityInteractionsStep(out, st, "function_call", fc)
 		deltaDoc := ojson.NewDoc([]byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`))
 		_ = deltaDoc.Set("index", st.ActiveStepIndex)
-		arguments := `{}`
-		if args := fc.Get("args"); args.Exists() {
-			arguments = args.Raw
-		}
-		_ = deltaDoc.Set("delta.arguments", arguments)
+		_ = deltaDoc.Set("delta.arguments", antigravityFunctionCallArgsString(fc.Get("args")))
 		out = append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
 		return appendAntigravityInteractionsStepStop(out, st)
 	}
@@ -330,6 +326,14 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 		}
 		out = append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
 		return appendAntigravityInteractionsStepStop(out, st)
+	}
+	if item := antigravityPartInlineDataContent(part); len(item) > 0 {
+		out = ensureAntigravityInteractionsStep(out, st, "model_output", ojson.Result{})
+		deltaDoc := ojson.NewDoc([]byte(`{"index":0,"delta":{},"event_type":"step.delta"}`))
+		_ = deltaDoc.Set("index", st.ActiveStepIndex)
+		_ = deltaDoc.SetRawBytes("delta", item)
+		out = append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
+		return appendAntigravityThoughtSignature(out, st, part)
 	}
 	if sig := antigravityThoughtSignature(part); sig != "" {
 		return appendAntigravityThoughtSignature(out, st, part)
@@ -349,6 +353,10 @@ func appendAntigravityThoughtSignature(out [][]byte, st *antigravityToInteractio
 }
 
 func antigravityPartToInteractionsSteps(part ojson.Result) [][]byte {
+	return antigravityPartToInteractionsStepsAt(part, 0)
+}
+
+func antigravityPartToInteractionsStepsAt(part ojson.Result, stepIndex int) [][]byte {
 	sig := antigravityThoughtSignature(part)
 	if fc := part.Get("functionCall"); fc.Exists() {
 		var steps [][]byte
@@ -357,14 +365,13 @@ func antigravityPartToInteractionsSteps(part ojson.Result) [][]byte {
 		}
 		stepDoc := ojson.NewDoc([]byte(`{"type":"function_call","name":"","arguments":{}}`))
 		_ = stepDoc.Set("name", fc.Get("name").String())
-		if id := fc.Get("id"); id.Exists() {
-			_ = stepDoc.Set("call_id", id.String())
-		} else if callID := fc.Get("call_id"); callID.Exists() {
-			_ = stepDoc.Set("call_id", callID.String())
+		id := antigravityFunctionPartID(fc)
+		if id == "" {
+			id = fmt.Sprintf("step_%d_%d", time.Now().UnixNano(), stepIndex+len(steps))
 		}
-		if args := fc.Get("args"); args.Exists() {
-			_ = stepDoc.SetRaw("arguments", args.Raw)
-		}
+		_ = stepDoc.Set("id", id)
+		_ = stepDoc.Set("call_id", id)
+		translatorcommon.SetGeminiFunctionCallArgsDoc(stepDoc, "arguments", fc.Get("args"))
 		steps = append(steps, stepDoc.Bytes())
 		return steps
 	}
@@ -454,7 +461,21 @@ func antigravityPartToInteractionsStep(part ojson.Result) []byte {
 	return steps[0]
 }
 
-func antigravityInlineDataToInteractionsStep(inline ojson.Result) []byte {
+func antigravityPartInlineDataContent(part ojson.Result) []byte {
+	if inline := part.Get("inlineData"); inline.Exists() {
+		if item := antigravityInlineDataToInteractionsContent(inline); len(item) > 0 {
+			return item
+		}
+	}
+	if inline := part.Get("inline_data"); inline.Exists() {
+		if item := antigravityInlineDataToInteractionsContent(inline); len(item) > 0 {
+			return item
+		}
+	}
+	return nil
+}
+
+func antigravityInlineDataToInteractionsContent(inline ojson.Result) []byte {
 	mimeType := inline.Get("mimeType").String()
 	if mimeType == "" {
 		mimeType = inline.Get("mime_type").String()
@@ -477,8 +498,33 @@ func antigravityInlineDataToInteractionsStep(inline ojson.Result) []byte {
 	_ = itemDoc.Set("type", contentType)
 	_ = itemDoc.Set("mime_type", mimeType)
 	_ = itemDoc.Set("data", data)
-	step, _ := ojson.SetRawBytes([]byte(`{"type":"model_output","content":[]}`), "content.-1", itemDoc.Bytes())
-	return step
+	return itemDoc.Bytes()
+}
+
+func antigravityInlineDataToInteractionsStep(inline ojson.Result) []byte {
+	item := antigravityInlineDataToInteractionsContent(inline)
+	if len(item) == 0 {
+		return nil
+	}
+	stepDoc := ojson.NewDoc([]byte(`{"type":"model_output","content":[]}`))
+	translatorcommon.SetRawArrayItemsDoc(stepDoc, "content", [][]byte{item})
+	return stepDoc.Bytes()
+}
+
+func antigravityFunctionCallArgsString(args ojson.Result) string {
+	if args.IsObject() {
+		raw := strings.TrimSpace(args.Raw)
+		if ojson.Valid(raw) {
+			return raw
+		}
+	}
+	if args.Type == ojson.String {
+		raw := strings.TrimSpace(args.String())
+		if raw != "" && ojson.Valid(raw) && ojson.Parse(raw).IsObject() {
+			return raw
+		}
+	}
+	return `{}`
 }
 
 func hasAntigravityStreamUsage(root ojson.Result) bool {
@@ -572,10 +618,10 @@ func antigravityUsagePathExists(usage ojson.Result, paths ...string) bool {
 }
 
 func antigravityFunctionPartID(part ojson.Result) string {
-	if id := part.Get("id"); id.Exists() {
+	if id := part.Get("id"); id.Exists() && id.String() != "" {
 		return id.String()
 	}
-	if callID := part.Get("call_id"); callID.Exists() {
+	if callID := part.Get("call_id"); callID.Exists() && callID.String() != "" {
 		return callID.String()
 	}
 	return ""
