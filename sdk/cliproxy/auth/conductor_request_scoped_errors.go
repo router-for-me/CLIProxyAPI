@@ -355,36 +355,49 @@ func extractRequestScopedErrorRules(auth *Auth, cfg *internalconfig.Config) []in
 			compatName = strings.TrimPrefix(provider, "openai-compatibility:")
 		}
 	}
-	if compatName != "" || providerKey != "" || provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatibility:") || strings.HasPrefix(provider, "openai-compatible") {
-		if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
-			return entry.RequestScopedErrors
+	if compatName == "" {
+		switch provider {
+		case "claude":
+			if index >= 0 && index < len(cfg.ClaudeKey) {
+				return cfg.ClaudeKey[index].RequestScopedErrors
+			}
+			return nil
+		case "codex":
+			if index >= 0 && index < len(cfg.CodexKey) {
+				return cfg.CodexKey[index].RequestScopedErrors
+			}
+			return nil
+		case "xai":
+			if index >= 0 && index < len(cfg.XAIKey) {
+				return cfg.XAIKey[index].RequestScopedErrors
+			}
+			return nil
+		case "meta":
+			if index >= 0 && index < len(cfg.MetaKey) {
+				return cfg.MetaKey[index].RequestScopedErrors
+			}
+			return nil
+		case "gemini":
+			if index >= 0 && index < len(cfg.GeminiKey) {
+				return cfg.GeminiKey[index].RequestScopedErrors
+			}
+			return nil
+		case "interactions", "gemini-interactions":
+			if index >= 0 && index < len(cfg.InteractionsKey) {
+				return cfg.InteractionsKey[index].RequestScopedErrors
+			}
+			return nil
+		case "vertex":
+			if index >= 0 && index < len(cfg.VertexCompatAPIKey) {
+				return cfg.VertexCompatAPIKey[index].RequestScopedErrors
+			}
+			return nil
 		}
 	}
 
-	switch provider {
-	case "claude":
-		if index >= 0 && index < len(cfg.ClaudeKey) {
-			return cfg.ClaudeKey[index].RequestScopedErrors
-		}
-	case "codex":
-		if index >= 0 && index < len(cfg.CodexKey) {
-			return cfg.CodexKey[index].RequestScopedErrors
-		}
-	case "xai":
-		if index >= 0 && index < len(cfg.XAIKey) {
-			return cfg.XAIKey[index].RequestScopedErrors
-		}
-	case "meta":
-		if index >= 0 && index < len(cfg.MetaKey) {
-			return cfg.MetaKey[index].RequestScopedErrors
-		}
-	case "gemini":
-		if index >= 0 && index < len(cfg.GeminiKey) {
-			return cfg.GeminiKey[index].RequestScopedErrors
-		}
-	case "interactions", "gemini-interactions":
-		if index >= 0 && index < len(cfg.InteractionsKey) {
-			return cfg.InteractionsKey[index].RequestScopedErrors
+	if compatName != "" || providerKey != "" || provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatibility:") || strings.HasPrefix(provider, "openai-compatible") {
+		if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
+			return entry.RequestScopedErrors
 		}
 	}
 
@@ -500,7 +513,7 @@ func isTerminalRequestStopError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isRequestStopError(err) {
+	if isRequestStopError(err) || isHomeExecutorPluginUnavailableError(err) {
 		return true
 	}
 	return isRequestTerminatedError(err) && !isCredentialScopedError(err) && !IsRequestScopedContinueError(err)

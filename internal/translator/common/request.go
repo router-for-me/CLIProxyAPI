@@ -89,6 +89,34 @@ func ClaudeStopSequences(v ojson.Result) []string {
 	return sequences
 }
 
+// OpenAIStopSequences extracts non-empty stop sequence strings from an OpenAI stop field
+// (either a single string or an array of strings).
+func OpenAIStopSequences(v ojson.Result) []string {
+	if !v.Exists() || v.Type == ojson.Null {
+		return nil
+	}
+	if v.Type == ojson.String {
+		if s := v.String(); s != "" {
+			return []string{s}
+		}
+		return nil
+	}
+	if !v.IsArray() {
+		return nil
+	}
+	var sequences []string
+	v.ForEach(func(_, item ojson.Result) bool {
+		if item.Type == ojson.String && item.String() != "" {
+			sequences = append(sequences, item.String())
+		}
+		return true
+	})
+	if len(sequences) == 0 {
+		return nil
+	}
+	return sequences
+}
+
 // ClaudeOutputJSONSchema returns the schema object when output_config.format
 // specifies a valid json_schema format.
 func ClaudeOutputJSONSchema(format ojson.Result) (ojson.Result, bool) {

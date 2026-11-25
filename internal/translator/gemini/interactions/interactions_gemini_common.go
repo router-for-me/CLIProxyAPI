@@ -79,17 +79,46 @@ func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 		}
 		// Counts what this turn sends; empty text is not sendable.
 		sendable := 0
+		var pendingThoughtSummary [][]byte
+		flushPendingThought := func(sig string) {
+			if len(pendingThoughtSummary) == 0 && sig == "" {
+				return
+			}
+			stepDoc := ojson.NewDocString(`{"type":"thought"}`)
+			if sig != "" {
+				_ = stepDoc.Set("signature", sig)
+			}
+			if len(pendingThoughtSummary) > 0 {
+				translatorcommon.SetRawArrayItemsDoc(stepDoc, "summary", pendingThoughtSummary)
+			}
+			inputItems = append(inputItems, stepDoc.Bytes())
+			pendingThoughtSummary = nil
+		}
 		content.Get("parts").ForEach(func(_, part ojson.Result) bool {
 			if fc := part.Get("functionCall"); fc.Exists() {
-				for _, step := range geminiPartToInteractionsSteps(part) {
-					if len(step) > 0 {
-						inputItems = append(inputItems, step)
-						sendable++
+				mergedPendingSig := false
+				if len(pendingThoughtSummary) > 0 {
+					if fcSig := interactionsThoughtSignature(part); fcSig != "" {
+						flushPendingThought(fcSig)
+						mergedPendingSig = true
+					} else {
+						flushPendingThought("")
 					}
+				}
+				for _, step := range geminiPartToInteractionsSteps(part) {
+					if len(step) == 0 {
+						continue
+					}
+					if mergedPendingSig && ojson.GetBytesNoCopy(step, "type").String() == "thought" {
+						continue
+					}
+					inputItems = append(inputItems, step)
+					sendable++
 				}
 				return true
 			}
 			if fr := translatorcommon.GeminiPartFunctionResponse(part); fr.Exists() {
+				flushPendingThought("")
 				for _, step := range geminiPartToInteractionsSteps(part) {
 					if len(step) > 0 {
 						inputItems = append(inputItems, step)
@@ -99,6 +128,15 @@ func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 				return true
 			}
 			if text := part.Get("text"); text.Exists() && text.String() == "" {
+				if role == "model" {
+					if sig := interactionsThoughtSignature(part); sig != "" {
+						flushPendingThought(sig)
+						return true
+					}
+					if part.Get("thought").Bool() && len(pendingThoughtSummary) > 0 {
+						return true
+					}
+				}
 				for _, step := range geminiPartToInteractionsSteps(part) {
 					if len(step) > 0 {
 						inputItems = append(inputItems, step)
@@ -108,22 +146,37 @@ func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 			}
 			item := geminiPartToInteractionsContent(part)
 			if len(item) == 0 {
-				if role != "model" && geminiPartFileData(part).Exists() {
+				if role == "model" {
+					if sig := interactionsThoughtSignature(part); sig != "" {
+						flushPendingThought(sig)
+					}
+				} else if geminiPartFileData(part).Exists() {
 					drops.Drop("fileData")
 				}
 				return true
 			}
-			currentStepType := stepType
 			if part.Get("thought").Bool() && role == "model" {
-				currentStepType = "thought"
+				pendingThoughtSummary = append(pendingThoughtSummary, item)
+				if sig := interactionsThoughtSignature(part); sig != "" {
+					flushPendingThought(sig)
+				}
+				sendable++
+				return true
 			}
+			flushPendingThought("")
 			stepDoc := ojson.NewDocString(`{"type":"","content":[]}`)
-			_ = stepDoc.Set("type", currentStepType)
+			_ = stepDoc.Set("type", stepType)
 			translatorcommon.SetRawArrayItemsDoc(stepDoc, "content", [][]byte{item})
 			inputItems = append(inputItems, stepDoc.Bytes())
+			if role == "model" {
+				if sig := interactionsThoughtSignature(part); sig != "" {
+					inputItems = append(inputItems, geminiThoughtStepJSON(sig, ""))
+				}
+			}
 			sendable++
 			return true
 		})
+		flushPendingThought("")
 		if role != "model" {
 			drops.EndTurn(sendable)
 		}
@@ -820,36 +873,7 @@ func convertSnakeCaseKeysToCamelCase(raw []byte) []byte {
 	if !root.Exists() {
 		return raw
 	}
-	outDoc := ojson.NewDocString(`{}`)
-	copySnakeCaseValueToCamelCaseDoc(outDoc, "", root)
-	return outDoc.Bytes()
-}
-
-func copySnakeCaseValueToCamelCaseDoc(outDoc *ojson.Doc, path string, node ojson.Result) {
-	if node.IsObject() {
-		node.ForEach(func(key, value ojson.Result) bool {
-			childPath := joinJSONPath(path, toCamelCase(key.String()))
-			copySnakeCaseValueToCamelCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	if node.IsArray() {
-		node.ForEach(func(_, value ojson.Result) bool {
-			childPath := path + ".-1"
-			copySnakeCaseValueToCamelCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	_ = outDoc.SetRaw(path, node.Raw)
-}
-
-func joinJSONPath(path, key string) string {
-	if path == "" {
-		return key
-	}
-	return path + "." + key
+	return translatorcommon.ConvertJSONNodeKeys(root, toCamelCase)
 }
 
 func toCamelCase(s string) string {
@@ -872,29 +896,7 @@ func convertCamelCaseKeysToSnakeCase(raw []byte) []byte {
 	if !root.Exists() {
 		return raw
 	}
-	outDoc := ojson.NewDocString(`{}`)
-	copyCamelCaseValueToSnakeCaseDoc(outDoc, "", root)
-	return outDoc.Bytes()
-}
-
-func copyCamelCaseValueToSnakeCaseDoc(outDoc *ojson.Doc, path string, node ojson.Result) {
-	if node.IsObject() {
-		node.ForEach(func(key, value ojson.Result) bool {
-			childPath := joinJSONPath(path, toSnakeCase(key.String()))
-			copyCamelCaseValueToSnakeCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	if node.IsArray() {
-		node.ForEach(func(_, value ojson.Result) bool {
-			childPath := path + ".-1"
-			copyCamelCaseValueToSnakeCaseDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	_ = outDoc.SetRaw(path, node.Raw)
+	return translatorcommon.ConvertJSONNodeKeys(root, toSnakeCase)
 }
 
 func toSnakeCase(s string) string {
@@ -1292,31 +1294,27 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func extractInteractionsThoughtPartDocsToGemini(step ojson.Result) []*ojson.Doc {
+	for _, field := range []string{"content", "summary", "text"} {
+		content := step.Get(field)
+		if !content.Exists() {
+			continue
+		}
+		if partDocs := interactionsContentToGeminiPartDocs(content, true); len(partDocs) > 0 {
+			return partDocs
+		}
+	}
+	return nil
+}
+
 func extractInteractionsThoughtPartsToGemini(step ojson.Result) [][]byte {
-	content := step.Get("content")
-	if !content.Exists() {
-		content = step.Get("summary")
-	}
-	if !content.Exists() {
-		content = step.Get("text")
-	}
-	if !content.Exists() {
+	partDocs := extractInteractionsThoughtPartDocsToGemini(step)
+	if len(partDocs) == 0 {
 		return nil
 	}
-	var partItems [][]byte
-	if content.IsArray() {
-		content.ForEach(func(_, part ojson.Result) bool {
-			if partJSON := interactionsContentPartToGeminiPart(part, true); len(partJSON) > 0 {
-				partItems = append(partItems, partJSON)
-			}
-			return true
-		})
-	} else if content.IsObject() {
-		if partJSON := interactionsContentPartToGeminiPart(content, true); len(partJSON) > 0 {
-			partItems = append(partItems, partJSON)
-		}
-	} else if content.Type == ojson.String {
-		partItems = append(partItems, geminiTextPartJSON(content.String(), true))
+	partItems := make([][]byte, 0, len(partDocs))
+	for _, partDoc := range partDocs {
+		partItems = append(partItems, partDoc.Bytes())
 	}
 	return partItems
 }
@@ -1359,9 +1357,7 @@ func buildGeminiFunctionCallPartWithSig(item ojson.Result, sig string) []byte {
 	} else if id := item.Get("id"); id.Exists() {
 		_ = partDoc.Set("functionCall.id", id.String())
 	}
-	if args := item.Get("arguments"); args.Exists() {
-		_ = partDoc.SetRaw("functionCall.args", args.Raw)
-	}
+	translatorcommon.SetGeminiFunctionCallArgsDoc(partDoc, "functionCall.args", item.Get("arguments"))
 	if sig != "" {
 		_ = partDoc.Set("thoughtSignature", sig)
 	}
@@ -1425,6 +1421,8 @@ func interactionsGeminiContentRole(role, defaultRole string) string {
 
 func interactionsNativeGeminiPart(part ojson.Result) []byte {
 	switch {
+	case part.Get("functionCall").IsObject():
+		return translatorcommon.NormalizeGeminiFunctionCallPart(part)
 	case part.Get("text").Exists(), part.Get("functionCall").Exists(), part.Get("functionResponse").Exists():
 		return []byte(part.Raw)
 	case part.Get("inlineData").Exists():
@@ -1456,71 +1454,91 @@ func appendInteractionsContentPart(items *[][]byte, role string, part ojson.Resu
 }
 
 func interactionsContentPartToGeminiPart(part ojson.Result, thought bool) []byte {
-	if text := part.Get("text"); text.Exists() {
-		return geminiTextPartJSON(text.String(), thought)
+	partDoc := interactionsContentPartToGeminiPartDoc(part, thought)
+	if partDoc == nil {
+		return nil
 	}
-	if inline := part.Get("inline_data"); inline.Exists() {
-		return geminiInlineDataPartJSON(inline)
-	}
-	if inline := part.Get("inlineData"); inline.Exists() {
-		return geminiInlineDataPartJSON(inline)
-	}
-	partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
-	switch partType {
-	case "text":
-		if text := part.Get("text"); text.Exists() {
-			return geminiTextPartJSON(text.String(), thought)
-		}
-	case "image", "audio", "video", "document":
-		if mime := part.Get("mime_type"); mime.Exists() || part.Get("mimeType").Exists() {
-			mimeType := mime.String()
-			if mimeType == "" {
-				mimeType = part.Get("mimeType").String()
-			}
-			data := part.Get("data").String()
-			if data != "" {
-				return geminiInlineDataPartJSON(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
-			}
-		}
-		// uri is the Interactions spelling of file_uri.
-		if fileURI := firstNonEmptyString(part.Get("file_uri").String(), part.Get("fileUri").String(), part.Get("uri").String()); fileURI != "" {
-			mimeType := part.Get("mime_type").String()
-			if mimeType == "" {
-				mimeType = part.Get("mimeType").String()
-			}
-			return geminiFileDataPartJSON(ojson.Parse(fmt.Sprintf(`{"mimeType":%q,"fileUri":%q}`, mimeType, fileURI)))
-		}
-		if url := part.Get("url"); url.Exists() {
-			return geminiInlineDataPartFromDataURL(url.String())
-		}
-	case "image_url":
-		return geminiInlineDataPartFromDataURL(part.Get("image_url.url").String())
-	case "input_audio":
-		mimeType := interactionsInputAudioMimeType(part.Get("input_audio.format").String())
-		return geminiInlineDataPartJSON(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, part.Get("input_audio.data").String())))
-	case "file":
-		filename := part.Get("file.filename").String()
-		fileData := part.Get("file.file_data").String()
-		if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
-			return geminiInlineDataPartJSON(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
-		}
-	}
-	return nil
-}
-
-func geminiTextPartJSON(text string, thought bool) []byte {
-	if !thought {
-		partJSON := []byte(`{"text":""}`)
-		partJSON, _ = ojson.SetBytes(partJSON, "text", text)
-		return partJSON
-	}
-	partDoc := ojson.NewDocString(`{"text":""}`)
-	_ = partDoc.Set("text", text)
-	_ = partDoc.Set("thought", true)
 	return partDoc.Bytes()
 }
 
-func geminiInlineDataPartJSON(inline ojson.Result) []byte {
+func interactionsContentPartToGeminiPartDoc(part ojson.Result, thought bool) *ojson.Doc {
+	if text := part.Get("text"); text.Exists() {
+		return geminiTextPartDoc(text.String(), thought)
+	}
+	var partDoc *ojson.Doc
+	if inline := part.Get("inline_data"); inline.Exists() {
+		partDoc = geminiInlineDataPartDoc(inline)
+	} else if inline := part.Get("inlineData"); inline.Exists() {
+		partDoc = geminiInlineDataPartDoc(inline)
+	} else {
+		partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
+		switch partType {
+		case "text":
+			if text := part.Get("text"); text.Exists() {
+				return geminiTextPartDoc(text.String(), thought)
+			}
+		case "image", "audio", "video", "document":
+			if mime := part.Get("mime_type"); mime.Exists() || part.Get("mimeType").Exists() {
+				mimeType := mime.String()
+				if mimeType == "" {
+					mimeType = part.Get("mimeType").String()
+				}
+				data := part.Get("data").String()
+				if data != "" {
+					partDoc = geminiInlineDataPartDoc(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
+				}
+			}
+			// uri is the Interactions spelling of file_uri.
+			if partDoc == nil {
+				if fileURI := firstNonEmptyString(part.Get("file_uri").String(), part.Get("fileUri").String(), part.Get("uri").String()); fileURI != "" {
+					mimeType := part.Get("mime_type").String()
+					if mimeType == "" {
+						mimeType = part.Get("mimeType").String()
+					}
+					partDoc = geminiFileDataPartDoc(ojson.Parse(fmt.Sprintf(`{"mimeType":%q,"fileUri":%q}`, mimeType, fileURI)))
+				}
+			}
+			if partDoc == nil {
+				if url := part.Get("url"); url.Exists() {
+					partDoc = geminiInlineDataPartFromDataURLDoc(url.String())
+				}
+			}
+		case "image_url":
+			partDoc = geminiInlineDataPartFromDataURLDoc(part.Get("image_url.url").String())
+		case "input_audio":
+			mimeType := interactionsInputAudioMimeType(part.Get("input_audio.format").String())
+			partDoc = geminiInlineDataPartDoc(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, part.Get("input_audio.data").String())))
+		case "file":
+			filename := part.Get("file.filename").String()
+			fileData := part.Get("file.file_data").String()
+			if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
+				partDoc = geminiInlineDataPartDoc(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
+			}
+		}
+	}
+	if partDoc == nil {
+		return nil
+	}
+	if thought {
+		_ = partDoc.Set("thought", true)
+	}
+	return partDoc
+}
+
+func geminiTextPartDoc(text string, thought bool) *ojson.Doc {
+	partDoc := ojson.NewDocString(`{"text":""}`)
+	_ = partDoc.Set("text", text)
+	if thought {
+		_ = partDoc.Set("thought", true)
+	}
+	return partDoc
+}
+
+func geminiTextPartJSON(text string, thought bool) []byte {
+	return geminiTextPartDoc(text, thought).Bytes()
+}
+
+func geminiInlineDataPartDoc(inline ojson.Result) *ojson.Doc {
 	mimeType := inline.Get("mimeType").String()
 	if mimeType == "" {
 		mimeType = inline.Get("mime_type").String()
@@ -1532,10 +1550,18 @@ func geminiInlineDataPartJSON(inline ojson.Result) []byte {
 	partDoc := ojson.NewDocString(`{"inlineData":{"mimeType":"","data":""}}`)
 	_ = partDoc.Set("inlineData.mimeType", mimeType)
 	_ = partDoc.Set("inlineData.data", data)
+	return partDoc
+}
+
+func geminiInlineDataPartJSON(inline ojson.Result) []byte {
+	partDoc := geminiInlineDataPartDoc(inline)
+	if partDoc == nil {
+		return nil
+	}
 	return partDoc.Bytes()
 }
 
-func geminiFileDataPartJSON(fileData ojson.Result) []byte {
+func geminiFileDataPartDoc(fileData ojson.Result) *ojson.Doc {
 	mimeType := fileData.Get("mimeType").String()
 	if mimeType == "" {
 		mimeType = fileData.Get("mime_type").String()
@@ -1550,10 +1576,18 @@ func geminiFileDataPartJSON(fileData ojson.Result) []byte {
 	partDoc := ojson.NewDocString(`{"fileData":{"mimeType":"","fileUri":""}}`)
 	_ = partDoc.Set("fileData.mimeType", mimeType)
 	_ = partDoc.Set("fileData.fileUri", fileURI)
+	return partDoc
+}
+
+func geminiFileDataPartJSON(fileData ojson.Result) []byte {
+	partDoc := geminiFileDataPartDoc(fileData)
+	if partDoc == nil {
+		return nil
+	}
 	return partDoc.Bytes()
 }
 
-func geminiInlineDataPartFromDataURL(dataURL string) []byte {
+func geminiInlineDataPartFromDataURLDoc(dataURL string) *ojson.Doc {
 	if !strings.HasPrefix(dataURL, "data:") {
 		return nil
 	}
@@ -1564,7 +1598,15 @@ func geminiInlineDataPartFromDataURL(dataURL string) []byte {
 	}
 	mimeType := pieces[0]
 	data := pieces[1][7:]
-	return geminiInlineDataPartJSON(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
+	return geminiInlineDataPartDoc(ojson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
+}
+
+func geminiInlineDataPartFromDataURL(dataURL string) []byte {
+	partDoc := geminiInlineDataPartFromDataURLDoc(dataURL)
+	if partDoc == nil {
+		return nil
+	}
+	return partDoc.Bytes()
 }
 
 func interactionsInputAudioMimeType(format string) string {

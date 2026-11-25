@@ -53,7 +53,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		*param = &ConvertOpenAIResponseToGeminiParams{
 			ToolCallsAccumulator: nil,
 			ContentAccumulator:   strings.Builder{},
-			IsFirstChunk:         false,
+			IsFirstChunk:         true,
 		}
 	}
 
@@ -78,7 +78,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		// Handle empty choices array (usage-only chunk)
 		if len(choices.Array()) == 0 {
 			// This is a usage-only chunk, handle usage and return
-			if usage := root.Get("usage"); usage.Exists() {
+			if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
 				templateDoc := ojson.NewDocString(`{"candidates":[],"usageMetadata":{}}`)
 
 				// Set model if available
@@ -96,26 +96,29 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 		choices.ForEach(func(choiceIndex, choice ojson.Result) bool {
 			// Base Gemini response template without finishReason; set when known
-			template := []byte(`{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`)
+			baseTemplateDoc := ojson.NewDocString(`{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`)
 
 			// Set model if available
 			if model := root.Get("model"); model.Exists() {
-				template, _ = ojson.SetBytes(template, "model", model.String())
+				_ = baseTemplateDoc.Set("model", model.String())
 			}
 
 			_ = int(choice.Get("index").Int()) // choiceIdx not used in streaming
 			delta := choice.Get("delta")
-			baseTemplate := append([]byte(nil), template...)
+			baseTemplate := baseTemplateDoc.Bytes()
 
-			// Handle role (only in first chunk)
+			// Handle role (first chunk typically has role: "assistant")
 			if role := delta.Get("role"); role.Exists() && (*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk {
-				// OpenAI assistant -> Gemini model
-				if role.String() == "assistant" {
-					template, _ = ojson.SetBytes(template, "candidates.0.content.role", "model")
-				}
 				(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
-				results = append(results, template)
-				return true
+				if !hasOpenAIDeltaPayload(choice, delta, root) {
+					roleDoc := ojson.NewDoc(baseTemplate)
+					// OpenAI assistant -> Gemini model
+					if role.String() == "assistant" {
+						_ = roleDoc.Set("candidates.0.content.role", "model")
+					}
+					results = append(results, roleDoc.Bytes())
+					return true
+				}
 			}
 
 			var chunkOutputs [][]byte
@@ -150,7 +153,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			if len(chunkOutputs) > 0 {
 				results = append(results, chunkOutputs...)
 				finishReason := choice.Get("finish_reason")
-				if !delta.Get("tool_calls").Exists() && (finishReason.Type != ojson.String || finishReason.String() == "") {
+				if !delta.Get("tool_calls").Exists() && (finishReason.Type != ojson.String || finishReason.String() == "") && !hasOpenAIUsageObject(root) {
 					return true
 				}
 			}
@@ -210,15 +213,17 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 				})
 
 				if finishReason := choice.Get("finish_reason"); finishReason.Type != ojson.String || finishReason.String() == "" {
-					// Don't output anything for tool call deltas - wait for completion
-					return true
+					if !hasOpenAIUsageObject(root) {
+						// Don't output anything for tool call deltas - wait for completion
+						return true
+					}
 				}
 			}
 
 			// Handle finish reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
-				templateDoc := ojson.NewDoc(template)
+				templateDoc := ojson.NewDoc(baseTemplate)
 				_ = templateDoc.Set("candidates.0.finishReason", geminiFinishReason)
 
 				// If we have accumulated tool calls, output them now
@@ -251,13 +256,16 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 				}
 
+				if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
+					setGeminiUsageMetadataFromOpenAIUsageDoc(templateDoc, usage)
+				}
 				results = append(results, templateDoc.Bytes())
 				return true
 			}
 
 			// Handle usage information
-			if usage := root.Get("usage"); usage.Exists() {
-				templateDoc := ojson.NewDoc(template)
+			if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
+				templateDoc := ojson.NewDoc(baseTemplate)
 				setGeminiUsageMetadataFromOpenAIUsageDoc(templateDoc, usage)
 				results = append(results, templateDoc.Bytes())
 				return true
@@ -265,9 +273,39 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			return true
 		})
+		(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
 		return results
 	}
 	return [][]byte{}
+}
+
+func hasOpenAIDeltaPayload(choice, delta, root ojson.Result) bool {
+	for _, reasoningText := range collectOpenAIObjectReasoningTexts(delta) {
+		if reasoningText != "" {
+			return true
+		}
+	}
+	hasContent := false
+	forEachOpenAIContentSegment(delta.Get("content"), func(_ bool, segText string) {
+		if segText != "" {
+			hasContent = true
+		}
+	})
+	if hasContent {
+		return true
+	}
+	if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+		return true
+	}
+	if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
+		return true
+	}
+	return hasOpenAIUsageObject(root)
+}
+
+func hasOpenAIUsageObject(root ojson.Result) bool {
+	usage := root.Get("usage")
+	return usage.Exists() && usage.IsObject()
 }
 
 func openAIToolCallThoughtSignature(toolCall ojson.Result) string {
@@ -668,7 +706,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 	}
 
 	// Handle usage information
-	if usage := root.Get("usage"); usage.Exists() {
+	if usage := root.Get("usage"); usage.Exists() && usage.IsObject() {
 		setGeminiUsageMetadataFromOpenAIUsageDoc(outDoc, usage)
 	}
 

@@ -84,10 +84,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>Swiftproxyは、世界220以上の国と地域をカバーする9,000万以上のクリーンな住宅IPを提供し、HTTP(S)/SOCKS5、IPローテーション、Sticky Session、詳細な地域指定に対応しています。AI APIツールや自動化ワークフローが異なる地域からオンラインサービスへ安定してアクセスできるよう支援し、APIリクエスト、Webアクセス、データ収集、地域別テストなどに最適です。住宅プロキシは&#36;0.7/GBから利用でき、無料テストにも対応しています。割引コードPROXY90の使用で10%割引になります。<a href="https://www.swiftproxy.net/?code=PR67S9A95">今すぐSwiftproxyを試す</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
-<td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> は、自動化や複数アカウント運用向けに設計された高性能プロキシプロバイダーで、クリーンな住宅プロキシとネイティブ静的 ISP IP を提供しています。世界中に9,000万以上の住宅 IP を保有し、スマートローテーション、安定したセッション、高い同時接続性能に対応しています。Webスクレイピング、ブラウザ自動化、SNSアカウント管理、EC運用、アカウントの一括登録などに最適です。住宅プロキシはわずか &#36;0.55/GB から利用でき、トラフィックに有効期限はありません。コード RAPID10 の使用で10%割引になり、<a href="https://www.rapidproxy.io/?code=KHM9B6E6M">今すぐ無料トライアルを開始できます。</a></td>
-</tr>
-<tr>
 <td width="180"><a href="https://pateway.ai/?ch=jjvdb"><img src="./assets/patewayai.png" alt="PatewayAI" width="150"></a></td>
 <td>PatewayAI は、経験豊富な AI 開発者向けの API リレーサービスプロバイダーで、Claude および Codex シリーズのモデルを完全にサポートしています。すべてのモデルは高品質な公式チャネルから提供され、希釈や偽装は一切なく、課金明細も透明で確認可能です。エコノミーモードは公式価格のわずか5%から利用できます。<a href="https://pateway.ai/?ch=jjvdb">こちらのリンク</a>から登録するとトライアルクレジットを受け取れるほか、不定期のキャンペーンで無料クレジットを獲得できます。また、エンタープライズ級の同時接続、専用管理ダッシュボード、正式な契約書と請求書に対応し、双方に最大150米ドルが付与される紹介特典も提供しています。</td>
 </tr>

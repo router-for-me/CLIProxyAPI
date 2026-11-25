@@ -284,3 +284,108 @@ func TestOpenAIToAntigravityStandaloneNativeToolsRemainAvailable(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIToAntigravitySearchOnlyAllowsNullToolChoice(t *testing.T) {
+	const model = "issue-8115-search-null-choice"
+	input := []byte(`{
+		"model":"` + model + `",
+		"messages":[{"role":"user","content":"latest Go release"}],
+		"tools":[{"google_search":{}}],
+		"tool_choice":null
+	}`)
+	envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format:    sdktranslator.FormatOpenAI,
+		Model:     model,
+		Body:      input,
+		ModelInfo: &registry.ModelInfo{ID: model, SupportsWebSearch: true},
+	})
+	if envelope.Err != nil {
+		t.Fatalf("convert error: %v", envelope.Err)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, envelope.Body)
+	}
+	if !ojson.GetBytesNoCopy(envelope.Body, "request.tools.0.googleSearch").Exists() {
+		t.Fatalf("dedicated search envelope is missing googleSearch: %s", envelope.Body)
+	}
+}
+
+func TestOpenAIToAntigravitySearchOnlyAllowedToolsToolChoice(t *testing.T) {
+	const model = "issue-8115-search-allowed-tools"
+	tests := []struct {
+		name       string
+		toolChoice string
+		wantSearch bool
+	}{
+		{
+			name:       "allowed_tools listing google_search permits search",
+			toolChoice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"google_search"}]}}`,
+			wantSearch: true,
+		},
+		{
+			name:       "allowed_tools with none mode disables search",
+			toolChoice: `{"type":"allowed_tools","allowed_tools":{"mode":"none","tools":[{"type":"google_search"}]}}`,
+			wantSearch: false,
+		},
+		{
+			name:       "allowed_tools listing only function disables search",
+			toolChoice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"lookup"}}]}}`,
+			wantSearch: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"latest Go release"}],"tools":[{"google_search":{}}],"tool_choice":` + tt.toolChoice + `}`)
+			envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+				Format:    sdktranslator.FormatOpenAI,
+				Model:     model,
+				Body:      input,
+				ModelInfo: &registry.ModelInfo{ID: model, SupportsWebSearch: true},
+			})
+			if envelope.Err != nil {
+				t.Fatalf("convert error: %v", envelope.Err)
+			}
+			gotSearch := ojson.GetBytesNoCopy(envelope.Body, "requestType").String() == "web_search"
+			if gotSearch != tt.wantSearch {
+				t.Fatalf("web_search = %t, want %t: %s", gotSearch, tt.wantSearch, envelope.Body)
+			}
+		})
+	}
+}
+
+func TestOpenAIToAntigravityMixedToolsAllowedToolsOnlySearchUsesDedicatedEnvelope(t *testing.T) {
+	const model = "issue-8115-mixed-allowed-search"
+	input := []byte(`{
+		"model":"` + model + `",
+		"messages":[{"role":"user","content":"latest Go release"}],
+		"tools":[
+			{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{}}}},
+			{"google_search":{"includedDomains":["go.dev"]}}
+		],
+		"tool_choice":{
+			"type":"allowed_tools",
+			"allowed_tools":{
+				"mode":"auto",
+				"tools":[{"type":"google_search"}]
+			}
+		}
+	}`)
+	envelope := sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format:    sdktranslator.FormatOpenAI,
+		Model:     model,
+		Body:      input,
+		ModelInfo: &registry.ModelInfo{ID: model, SupportsWebSearch: true},
+	})
+	if envelope.Err != nil {
+		t.Fatalf("convert error: %v", envelope.Err)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, envelope.Body)
+	}
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.tools.0.googleSearch.includedDomains.0").String(); got != "go.dev" {
+		t.Fatalf("included domain = %q, want go.dev: %s", got, envelope.Body)
+	}
+	if ojson.GetBytesNoCopy(envelope.Body, "request.tools.#(functionDeclarations)").Exists() {
+		t.Fatalf("disallowed functionDeclarations survived search envelope: %s", envelope.Body)
+	}
+}

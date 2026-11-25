@@ -1144,7 +1144,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			}
 			return
 		}
-		if scanner.Err() == nil && len(pendingFilterLine) > 0 {
+		if (scanner == nil || scanner.Err() == nil) && len(pendingFilterLine) > 0 {
 			if !guardAndEmitLine(pendingFilterLine) {
 				return
 			}
@@ -1560,7 +1560,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			}
 			return
 		}
-		if scanner.Err() == nil && len(pendingFilterLine) > 0 {
+		if (scanner == nil || scanner.Err() == nil) && len(pendingFilterLine) > 0 {
 			if !guardAndEmitLine(pendingFilterLine) {
 				return
 			}
@@ -1966,28 +1966,10 @@ func vertexAPIKeyModelsURL(baseURL, model, action string) string {
 	return fmt.Sprintf("%s/publishers/google/models/%s:%s", base, model, action)
 }
 
-// vertexAPIVersionSuffix reports whether the trimmed base URL already ends
-// with a Google API version segment like "/v1" or "/v1beta1".
+// vertexAPIVersionSuffix reports whether the trimmed base URL's path already
+// ends with a Google API version segment like "/v1" or "/v1beta1".
 func vertexAPIVersionSuffix(base string) bool {
-	if base == "" {
-		return false
-	}
-	seg := base[strings.LastIndexByte(base, '/')+1:]
-	if len(seg) < 2 || seg[0] != 'v' {
-		return false
-	}
-	hasDigit := false
-	for i := 1; i < len(seg); i++ {
-		c := seg[i]
-		switch {
-		case c >= '0' && c <= '9':
-			hasDigit = true
-		case c == '_' || c == '-' || (c >= 'a' && c <= 'z'):
-		default:
-			return false
-		}
-	}
-	return hasDigit
+	return helps.VertexAPIVersionSuffix(base)
 }
 
 func vertexBaseURL(location string) string {
