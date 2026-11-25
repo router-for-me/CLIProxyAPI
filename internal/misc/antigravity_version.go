@@ -22,7 +22,7 @@ const (
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
 	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion = "2.34.0"
+	antigravityFallbackVersion = "2.35.1"
 	antigravityHubPlatform     = "os_type=darwin; arch=arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
@@ -47,6 +47,8 @@ var antigravityHubChangelists = map[string]string{
 	"2.32.2": "1022991777",
 	"2.33.0": "1023160026",
 	"2.34.0": "1026637980",
+	"2.35.0": "1028447422",
+	"2.35.1": "1029194470",
 }
 
 type antigravityHubUpdaterManifest struct {
