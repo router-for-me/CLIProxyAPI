@@ -92,6 +92,12 @@ func TestIssue7000AntigravityClaudeStructuredOutputUsesPromptAndAutoTools(t *tes
 						}
 					}
 
+					if request.Get("systemInstruction.role").String() != "user" {
+						t.Errorf("system instruction role = %q, want user", request.Get("systemInstruction.role").String())
+					}
+					if got := len(request.Get("systemInstruction.parts").Array()); got != 1 {
+						t.Errorf("system instruction parts = %d, want 1", got)
+					}
 					var systemText strings.Builder
 					for _, part := range request.Get("systemInstruction.parts").Array() {
 						systemText.WriteString(part.Get("text").String())

@@ -50,6 +50,7 @@ func convertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, s
 	copyInteractionsServiceTierDoc(outDoc, root)
 	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	errInput := appendInteractionsInput(&contentItems, root.Get("input"))
+	contentItems = translatorcommon.MergeAdjacentGeminiUserContents(contentItems)
 	translatorcommon.SetRawArrayItemsDoc(outDoc, "contents", contentItems)
 	return outDoc.Bytes(), errInput
 }
@@ -268,7 +269,7 @@ func normalizeGeminiResponseFormatForInteractionsDoc(outDoc *ojson.Doc, genCfg o
 				_ = entryDoc.Set("mime_type", mimeType)
 			}
 			if schema.Exists() {
-				_ = entryDoc.SetRaw("schema", schema.Raw)
+				_ = entryDoc.SetRaw("schema", util.NormalizeJSONSchemaNumericConstraints(schema.Raw))
 			}
 			return entryDoc.Bytes()
 		}

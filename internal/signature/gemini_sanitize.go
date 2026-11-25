@@ -210,7 +210,7 @@ func sanitizeGeminiRequestThoughtSignaturesDoc(doc *ojson.Doc, contentsPath stri
 			partIdx++
 			partPath := fmt.Sprintf("%s.%d.parts.%d", contentsPath, cIdx, pIdx)
 			rawSignature, hasSignature := geminiPartThoughtSignature(part)
-			if part.Get("functionResponse").Exists() {
+			if geminiPartHasFunctionResponse(part) {
 				if hasSignature {
 					if deleteGeminiPartThoughtSignatureFieldsDoc(doc, partPath) {
 						contentsChanged = true
@@ -232,7 +232,7 @@ func sanitizeGeminiRequestThoughtSignaturesDoc(doc *ojson.Doc, contentsPath stri
 				return true
 			}
 
-			hasFunctionCall := part.Get("functionCall").Exists()
+			hasFunctionCall := geminiPartHasFunctionCall(part)
 			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
 			if hasFunctionCall || !part.Get("thought").Bool() {
 				firstFunctionCallSeen = hasFunctionCall
@@ -353,7 +353,7 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents ojson.Result, opts gem
 		firstFunctionCallSeen := false
 		parts.ForEach(func(_, part ojson.Result) bool {
 			rawSignature, hasSignature := geminiPartThoughtSignature(part)
-			if part.Get("functionResponse").Exists() {
+			if geminiPartHasFunctionResponse(part) {
 				needsSanitize = hasSignature
 				return !needsSanitize
 			}
@@ -363,7 +363,7 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents ojson.Result, opts gem
 			if part.Get("toolCall").Exists() || part.Get("tool_call").Exists() || part.Get("toolResponse").Exists() || part.Get("tool_response").Exists() {
 				return true
 			}
-			hasFunctionCall := part.Get("functionCall").Exists()
+			hasFunctionCall := geminiPartHasFunctionCall(part)
 			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
 			if hasFunctionCall || !part.Get("thought").Bool() {
 				firstFunctionCallSeen = hasFunctionCall
@@ -398,19 +398,36 @@ var geminiPartThoughtSignaturePaths = []string{
 	"thought_signature",
 	"functionCall.thoughtSignature",
 	"functionCall.thought_signature",
+	"function_call.thoughtSignature",
+	"function_call.thought_signature",
 	"functionResponse.thoughtSignature",
 	"functionResponse.thought_signature",
+	"function_response.thoughtSignature",
+	"function_response.thought_signature",
 	"extra_content.google.thought_signature",
 }
 
+func geminiPartHasFunctionCall(part ojson.Result) bool {
+	return part.Get("functionCall").Exists() || part.Get("function_call").Exists()
+}
+
+func geminiPartHasFunctionResponse(part ojson.Result) bool {
+	return part.Get("functionResponse").Exists() || part.Get("function_response").Exists()
+}
+
 func geminiPartThoughtSignature(part ojson.Result) (string, bool) {
+	foundEmpty := false
 	for _, path := range geminiPartThoughtSignaturePaths {
 		result := part.Get(path)
-		if result.Exists() {
-			return result.String(), true
+		if !result.Exists() {
+			continue
 		}
+		if sig := result.String(); strings.TrimSpace(sig) != "" {
+			return sig, true
+		}
+		foundEmpty = true
 	}
-	return "", false
+	return "", foundEmpty
 }
 
 func hasNormalizedGeminiPartThoughtSignature(part ojson.Result, replaySignature string) bool {

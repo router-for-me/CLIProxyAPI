@@ -56,6 +56,17 @@ var specialDevinAliases = map[string]string{
 	"gpt-4-1":          "MODEL_CHAT_GPT_4_1_2025_04_14",
 }
 
+var (
+	devinGPT52Model = &registry.ModelInfo{
+		ID:       "MODEL_GPT_5_2",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+	}
+	devinGeminiFlashModel = &registry.ModelInfo{
+		ID:       "MODEL_GOOGLE_GEMINI_3_0_FLASH",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"minimal", "low", "medium", "high"}},
+	}
+)
+
 // HasDevinEffortSuffix reports whether the model name already ends with a known Devin effort suffix.
 func HasDevinEffortSuffix(model string) bool {
 	lower := strings.ToLower(strings.TrimSpace(model))
@@ -67,32 +78,19 @@ func HasDevinEffortSuffix(model string) bool {
 	return false
 }
 
-// NormalizeThinkingLevel normalizes a Devin effort or budget, leaving auto for catalog resolution.
-func NormalizeThinkingLevel(level string, budgetTokens int) string {
-	normalized := strings.ToLower(strings.TrimSpace(level))
-	switch normalized {
-	case "minimal", "low", "medium", "high", "xhigh", "max", "fast":
-		return normalized
+// normalizeDevinThinkingLevel resolves aliases in a lowercased, trimmed effort.
+func normalizeDevinThinkingLevel(level string) string {
+	switch level {
+	case "fast":
+		return level
 	case "none", "off", "disabled":
 		return "none"
 	case "auto", "adaptive":
 		return string(thinking.LevelAuto)
+	default:
+		effort, _ := thinking.ParseLevelSuffix(level)
+		return string(effort)
 	}
-
-	if budgetTokens > 0 {
-		switch {
-		case budgetTokens <= 4096:
-			return "low"
-		case budgetTokens <= 16384:
-			return "medium"
-		case budgetTokens <= 32768:
-			return "high"
-		default:
-			return "max"
-		}
-	}
-
-	return ""
 }
 
 // ResolveDevinChatModelUID resolves a model identifier into a valid upstream Devin chat_model_uid.
@@ -135,10 +133,13 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	}
 
 	// 4. Normalize requested effort. Compound "<level>-fast" requests select upstream
-	// fast-mode variants (see step 10); NormalizeThinkingLevel cannot represent them,
+	// fast-mode variants (see step 10); normalization cannot represent them,
 	// so keep the raw level alongside the normalized effort.
 	rawLevel := strings.ToLower(strings.TrimSpace(thinkingLevel))
-	effort := NormalizeThinkingLevel(thinkingLevel, budgetTokens)
+	effort := normalizeDevinThinkingLevel(rawLevel)
+	if effort == "" && budgetTokens > 0 {
+		effort, _ = thinking.ConvertBudgetToLevel(budgetTokens)
+	}
 	lowerBase := strings.ToLower(baseModel)
 	canonicalBase := strings.ReplaceAll(lowerBase, ".", "-")
 
@@ -168,12 +169,10 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	normalizedUnder := strings.ReplaceAll(canonicalBase, "-", "_")
 	switch normalizedUnder {
 	case "model_gpt_5_2":
-		gptLevels := []string{"none", "low", "medium", "high", "xhigh"}
-		eff := clampEffort(effort, gptLevels, "low")
+		eff := clampEffort(effort, devinGPT52Model, "low")
 		return "MODEL_GPT_5_2_" + strings.ToUpper(eff)
 	case "model_google_gemini_3_0_flash":
-		gemLevels := []string{"minimal", "low", "medium", "high"}
-		eff := clampEffort(effort, gemLevels, "high")
+		eff := clampEffort(effort, devinGeminiFlashModel, "high")
 		return "MODEL_GOOGLE_GEMINI_3_0_FLASH_" + strings.ToUpper(eff)
 	case "model_claude_4_5_opus":
 		if effort != "" && effort != "none" {
@@ -190,7 +189,7 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	// 7. Special base models that default to bare name unless specific variant requested
 	switch canonicalBase {
 	case "swe-1-7":
-		if effort == "medium" {
+		if thinking.ClampLevel(thinking.ThinkingLevel(effort), modelInfo, "devin") == thinking.LevelMedium {
 			return "swe-1-7-medium"
 		}
 		return "swe-1-7"
@@ -244,7 +243,7 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 			return canonicalBase
 		}
 		defaultEffort := selectDefaultDevinEffort(stem, allowedLevels)
-		clamped := clampEffort(effort, allowedLevels, defaultEffort)
+		clamped := clampEffort(effort, modelInfo, defaultEffort)
 		return stem + "-" + clamped + "-lightning"
 	}
 
@@ -255,15 +254,17 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 
 	// 10. Fast-mode variants: a strict "<level>-fast" request keeps its level
 	// clamped to the catalog, never to the plain default.
-	if base, isFast := strings.CutSuffix(rawLevel, "-fast"); isFast && devinLevelIndex(base) != -1 {
-		defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
-		clamped := clampEffort(base, allowedLevels, defaultEffort)
-		return canonicalBase + "-" + clamped + "-fast"
+	if base, isFast := strings.CutSuffix(rawLevel, "-fast"); isFast {
+		if level, ok := thinking.ParseLevelSuffix(strings.TrimSpace(base)); ok {
+			defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
+			clamped := clampEffort(string(level), modelInfo, defaultEffort)
+			return canonicalBase + "-" + clamped + "-fast"
+		}
 	}
 
 	// 11. Model has thinking levels: determine default effort and clamp
 	defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
-	clamped := clampEffort(effort, allowedLevels, defaultEffort)
+	clamped := clampEffort(effort, modelInfo, defaultEffort)
 	if effort == "fast" {
 		return canonicalBase + "-" + clamped + "-fast"
 	}
@@ -315,59 +316,15 @@ func selectDefaultDevinEffort(baseModel string, levels []string) string {
 	return levels[0]
 }
 
-var devinStandardLevelOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
-
-func devinLevelIndex(level string) int {
-	lower := strings.ToLower(strings.TrimSpace(level))
-	for i, l := range devinStandardLevelOrder {
-		if l == lower {
-			return i
-		}
-	}
-	return -1
-}
-
-func clampEffort(requested string, allowed []string, defaultEffort string) string {
+func clampEffort(requested string, modelInfo *registry.ModelInfo, defaultEffort string) string {
 	if requested == "" {
 		return defaultEffort
 	}
-	reqLower := strings.ToLower(strings.TrimSpace(requested))
-	for _, a := range allowed {
-		if reqLower == strings.ToLower(strings.TrimSpace(a)) {
-			return a
+	clamped := thinking.ClampLevel(thinking.ThinkingLevel(strings.TrimSpace(requested)), modelInfo, "devin")
+	for _, allowed := range modelInfo.Thinking.Levels {
+		if strings.EqualFold(string(clamped), strings.TrimSpace(allowed)) {
+			return allowed
 		}
 	}
-	if reqLower == "none" {
-		return defaultEffort
-	}
-
-	reqIdx := devinLevelIndex(reqLower)
-	if reqIdx == -1 {
-		return defaultEffort
-	}
-
-	bestMatch := defaultEffort
-	bestDist := 999
-	bestIdx := -1
-	for _, a := range allowed {
-		aIdx := devinLevelIndex(a)
-		if aIdx == -1 {
-			continue
-		}
-		dist := reqIdx - aIdx
-		if dist < 0 {
-			dist = -dist
-		}
-		if dist < bestDist {
-			bestDist = dist
-			bestMatch = a
-			bestIdx = aIdx
-		} else if dist == bestDist && aIdx > bestIdx {
-			// On tie, prefer the higher effort (e.g. medium -> high for glm-5-3; xhigh -> max for swe-2)
-			bestMatch = a
-			bestIdx = aIdx
-		}
-	}
-
-	return bestMatch
+	return defaultEffort
 }

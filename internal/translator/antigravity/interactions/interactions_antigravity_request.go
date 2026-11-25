@@ -6,6 +6,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
@@ -29,12 +30,14 @@ func convertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	copyInteractionsGenerationConfigToAntigravityDoc(outDoc, root)
 	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
 	errInput := appendInteractionsInputToAntigravity(&contentItems, root.Get("input"))
+	contentItems = translatorcommon.MergeAdjacentGeminiUserContents(contentItems)
 	translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", contentItems)
 	copyInteractionsToolsToAntigravityDoc(outDoc, root, functionNameMap)
 	if outDoc.Get("request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
 		_ = outDoc.Delete("request.tools")
 	}
 	attachDefaultAntigravitySafetySettingsDoc(outDoc)
+	antigravitygemini.NormalizeAntigravityRequestDoc(outDoc)
 	out := rewriteInteractionsFunctionNames(outDoc.Bytes(), functionNameMap)
 	return out, errInput
 }

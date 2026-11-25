@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -2254,6 +2256,174 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(
 	}
 	if !bytes.Equal(out, payload) {
 		t.Fatalf("out = %s, want original payload %s", out, payload)
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradesAndCommitsNextTurn(t *testing.T) {
+	modes := []struct {
+		name  string
+		useKV bool
+	}{
+		{name: "memory", useKV: false},
+		{name: "kv", useKV: true},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			homekv.ClearCurrent()
+			internalcache.ClearAntigravityReasoningReplayCache()
+			if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+				t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+			}
+			var dbPath string
+			if mode.useKV {
+				// Allocate TempDir before registering ShutdownLocal cleanup so LIFO
+				// order closes bbolt before removing the directory (required on Windows).
+				dbPath = filepath.Join(t.TempDir(), "issue7997-kv.db")
+			}
+			t.Cleanup(func() {
+				internalcache.ClearAntigravityReasoningReplayCache()
+				homekv.ClearCurrent()
+				if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+					t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+				}
+			})
+			if mode.useKV {
+				if errCfg := kvstore.ConfigureLocal(true, dbPath); errCfg != nil {
+					t.Fatalf("kvstore.ConfigureLocal() error = %v", errCfg)
+				}
+			}
+
+			const model = "gemini-3.6-flash-high"
+			const args = `{"file_path":"/tmp/a"}`
+			payload := []byte(`{"sessionId":"sess-pairing-break-commit-` + mode.name + `","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+			payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+			if err := internalsignature.ValidateGeminiFunctionCallPairing(payload); err != nil {
+				t.Fatalf("original payload pairing invalid: %v", err)
+			}
+
+			badItem := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"call_id":"call_native_1","name":"Read","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+			sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+			if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{badItem}) {
+				t.Fatal("failed to cache bad replay item")
+			}
+
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FromString("claude"),
+				OriginalRequest: []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`),
+			}
+			out, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+				context.Background(),
+				model,
+				cliproxyexecutor.Request{Model: model, Payload: payload},
+				opts,
+				payload,
+			)
+			if errPrepare != nil {
+				t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v, want graceful degradation", errPrepare)
+			}
+			if !bytes.Equal(out, payload) {
+				t.Fatalf("out = %s, want original payload %s", out, payload)
+			}
+			if !scope.valid() {
+				t.Fatalf("returned scope is invalid: %+v", scope)
+			}
+
+			_, foundAfterDegrade, errPeekAfterDegrade := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+			if errPeekAfterDegrade != nil || foundAfterDegrade {
+				t.Fatalf("cache after pairing degradation = (found=%v, err=%v), want (false, nil)", foundAfterDegrade, errPeekAfterDegrade)
+			}
+
+			const newSig = "FreshSignatureAfterPairingDegradation1234567890"
+			responseBody := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"checking next step"},{"thoughtSignature":"` + newSig + `","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},"finishReason":"STOP"}]}}`)
+			cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, out, responseBody)
+
+			committedItems, foundAfterCommit, errPeekAfterCommit := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+			if errPeekAfterCommit != nil || !foundAfterCommit || len(committedItems) == 0 {
+				t.Fatalf("cache after degraded turn commit = (len=%d, found=%v, err=%v), want committed replay items", len(committedItems), foundAfterCommit, errPeekAfterCommit)
+			}
+			hasNewSig := false
+			for _, item := range committedItems {
+				if ojson.GetBytesNoCopy(item, "thoughtSignature").String() == newSig {
+					hasNewSig = true
+					break
+				}
+			}
+			if !hasNewSig {
+				t.Fatalf("committed items missing %q: %q", newSig, committedItems)
+			}
+
+			nextTurnPayload := []byte(`{"sessionId":"sess-pairing-break-commit-` + mode.name + `","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"Grep","response":{"result":"match"}}}]}]}}`)
+			nextTurnPayload = normalizeAntigravityGeminiFunctionResponseRoles(nextTurnPayload)
+			replayedNext, _, errNext := prepareAntigravityGeminiReasoningReplayPayload(
+				context.Background(),
+				model,
+				cliproxyexecutor.Request{Model: model, Payload: nextTurnPayload},
+				opts,
+				nextTurnPayload,
+			)
+			if errNext != nil {
+				t.Fatalf("next turn prepare error: %v", errNext)
+			}
+			if gotSig := ojson.GetBytesNoCopy(replayedNext, "request.contents.2.parts.0.thoughtSignature").String(); gotSig != newSig {
+				t.Fatalf("next turn replayed signature = %q, want %q", gotSig, newSig)
+			}
+		})
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradedCommitDoesNotClobberConcurrentWrite(t *testing.T) {
+	homekv.ClearCurrent()
+	internalcache.ClearAntigravityReasoningReplayCache()
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+	}
+	t.Cleanup(func() {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		homekv.ClearCurrent()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+		}
+	})
+
+	const model = "gemini-3.6-flash-high"
+	const args = `{"file_path":"/tmp/a"}`
+	payload := []byte(`{"sessionId":"sess-pairing-break-concurrent","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+
+	badItem := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"call_id":"call_native_1","name":"Read","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{badItem}) {
+		t.Fatal("failed to cache bad replay item")
+	}
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`),
+	}
+	out, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: payload},
+		opts,
+		payload,
+	)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v", errPrepare)
+	}
+
+	const concurrentSig = "ConcurrentTurnSignatureMustSurvive1234567890"
+	concurrentItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"` + concurrentSig + `"}`)
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{concurrentItem}) {
+		t.Fatal("failed to cache concurrent replay item")
+	}
+
+	responseBody := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"DegradedStaleSignatureShouldDrop1234567890","functionCall":{"name":"Grep","args":{"pattern":"foo"}}}]},"finishReason":"STOP"}]}}`)
+	cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, out, responseBody)
+
+	items, found, errPeek := internalcache.PeekAntigravityReasoningReplayItemsRequired(context.Background(), model, sessionKey)
+	if errPeek != nil || !found || len(items) != 1 || ojson.GetBytesNoCopy(items[0], "thoughtSignature").String() != concurrentSig {
+		t.Fatalf("concurrent replay item was clobbered: items=%q found=%v err=%v", items, found, errPeek)
 	}
 }
 

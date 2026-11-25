@@ -118,6 +118,26 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜中国発の OpenRouter 型サービス。中国・海外の主要 AI モデルを、1つの API で。</strong> <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong> に対応。複数サプライヤーから接続先を自動選択し、障害時は別の接続先へ切り替えます。<strong>失敗したリクエストは課金なし。料金を公開し、請求額の計算も確認できます。</strong> Claude Code、Codex などの開発ツールに対応し、<strong><a href="https://visioncoder.cn/me/keys">CC Switch と WorkBuddy へワンクリックでインポート</a></strong>。企業は一括購入したサブスクリプションをメンバーごとに割り当て、回収・再割り当ても可能。法人名義の銀行振込と請求書発行にも対応します。<strong>サプライヤー募集中：モデルの接続先を登録し、品質に応じてトラフィックを獲得。法人向け月次精算・利用明細の確認に対応し、ユーザーへの課金・請求書発行は VisionCoder が担当します。</strong> <a href="https://visioncoder.cn/challenge">VibeCoding チャレンジ</a>も開催。各回の賞品は <strong>合計2,350元相当の追加利用クレジット</strong>、最優秀賞は <strong>1,000元相当の追加利用クレジット</strong>。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>ひとつのキーで、世界中の AI を呼び出そう！<br>10dian-API は主要な AI モデルとプロトコルをひとつの API にまとめ、一般的なクライアントから利用できます。個人開発者や AI 愛好家もチームと同じ条件で利用でき、多数の同時リクエストでも安定して接続できます。料金は手頃で、課金倍率も公開しています。選んだモデルが別のモデルにすり替わることはありません。複数のチャージ方法に加え、主要な AI サブスクリプションの支払い代行にも対応しています。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">登録はこちら</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 主要 AI モデルをひとつに。登録で 100 万トークンを無料プレゼント！</strong>
+<p>🎁 無料トライアル: <a href="https://subrouter.ai/register?aff=nP93">今すぐ登録</a>すると、テストに使える 100 万トークンをすぐに受け取れます！</p>
+<ul>
+<li>主要モデルをひとつの API キーで：Claude、GPT、Gemini、Grok、DeepSeek を自由に切り替えられます。</li>
+<li>スマートルーティングと自動フェイルオーバー：ノードに障害が発生すると、負荷分散システムが正常なノードに自動で切り替え、リクエストの処理を継続します。</li>
+<li>透明な料金体系：API 呼び出しごとに実際のルーティング経路と料金をリアルタイムで確認できます。</li>
+<li>残高に有効期限なし：使った分だけ支払う従量課金制で、クレジットは月をまたいでも失効しません。</li>
+<li>選べるチャージ方法：USDT、Visa、WeChat Pay、Alipay に対応しています。</li>
+</ul>
+👉 無料の 100 万トークンを受け取る: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
+</tr>
 </tbody>
 </table>
 
