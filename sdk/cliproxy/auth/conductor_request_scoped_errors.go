@@ -422,6 +422,9 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
 		return "", false
 	}
+	if _, rejected := errors.AsType[antigravityTargetRejectedError](err); rejected {
+		return "", false
+	}
 	return MatchRequestScopedErrorRules(extractRequestScopedErrorRules(auth, cfg), err)
 }
 

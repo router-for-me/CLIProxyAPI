@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,7 +27,7 @@ type antigravityAgentSessionKey struct {
 var antigravityAgentSessions = cache.NewBoundedLRU[antigravityAgentSessionKey, *antigravityAgentSession](4096, nil)
 
 // ApplyAntigravityAgentEnvelope correlates request and label IDs within the active credential-scoped session.
-func ApplyAntigravityAgentEnvelope(ctx context.Context, doc *ojson.Doc, auth *cliproxyauth.Auth, sessionID, modelName string) {
+func ApplyAntigravityAgentEnvelope(doc *ojson.Doc, auth *cliproxyauth.Auth, sessionID, modelName, modelEnum string) {
 	key := antigravityAgentSessionKey{sessionID: sessionID}
 	if auth != nil {
 		key.authID = auth.ID
@@ -48,13 +47,20 @@ func ApplyAntigravityAgentEnvelope(ctx context.Context, doc *ojson.Doc, auth *cl
 
 	turns, results := antigravityAgentProgress(doc.Get("request.contents"))
 	lastStep := turns + results
-	_ = doc.Set("requestId", fmt.Sprintf("agent/%s/%d/%s/%d", session.cascade, stamp, session.trajectory, lastStep+1))
-	_ = doc.Set("request.labels.cascade_id", session.cascade)
-	_ = doc.Set("request.labels.root_cascade_id", session.cascade)
-	_ = doc.Set("request.labels.trajectory_id", session.trajectory)
-	_ = doc.Set("request.labels.request_id", session.trajectory+"-"+strconv.Itoa(turns))
-	_ = doc.Set("request.labels.last_step_index", strconv.Itoa(lastStep))
-	if modelEnum, found := cliproxyauth.LookupAntigravityModelEnum(ctx, auth, modelName); found {
+	if strings.TrimSpace(doc.Get("requestId").String()) == "" {
+		_ = doc.Set("requestId", fmt.Sprintf("agent/%s/%d/%s/%d", session.cascade, stamp, session.trajectory, lastStep+1))
+	}
+	setIfEmptyString := func(path, value string) {
+		if strings.TrimSpace(doc.Get(path).String()) == "" {
+			_ = doc.Set(path, value)
+		}
+	}
+	setIfEmptyString("request.labels.cascade_id", session.cascade)
+	setIfEmptyString("request.labels.root_cascade_id", session.cascade)
+	setIfEmptyString("request.labels.trajectory_id", session.trajectory)
+	setIfEmptyString("request.labels.request_id", session.trajectory+"-"+strconv.Itoa(turns))
+	setIfEmptyString("request.labels.last_step_index", strconv.Itoa(lastStep))
+	if modelEnum != "" {
 		_ = doc.Set("request.labels.model_enum", modelEnum)
 	} else {
 		_ = doc.Delete("request.labels.model_enum")

@@ -1023,7 +1023,9 @@ func IsCodexClientUserAgent(userAgent string) bool {
 		strings.Contains(ua, "codex-rs") ||
 		strings.Contains(ua, "codex_cli_rs") ||
 		strings.Contains(ua, "codex-tui") ||
-		strings.Contains(ua, "codex_exec")
+		strings.Contains(ua, "codex_exec") ||
+		strings.Contains(ua, "codex-acp") ||
+		strings.Contains(ua, "codex_acp")
 }
 
 func headerValueFromHTTPHeader(headers http.Header, name string) string {

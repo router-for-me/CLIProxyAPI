@@ -56,8 +56,10 @@ func PrepareAntigravityClaudeStructuredOutputDoc(model string, doc *ojson.Doc) b
 		return false
 	}
 
-	// Wrap the untouched schema as a format, not as format settings themselves.
-	format := ojson.Parse(`{"type":"json_schema","schema":` + schema.Raw + `}`)
+	// Normalize protobuf-encoded numeric constraints/types before embedding as JSON Schema.
+	formatDoc := ojson.NewDocString(`{"type":"json_schema"}`)
+	_ = formatDoc.SetRaw("schema", util.NormalizeJSONSchemaNumericConstraints(schema.Raw))
+	format := ojson.Parse(formatDoc.String())
 	instruction := common.BuildClaudeStructuredOutputInstruction(format)
 	systemPath := "request.systemInstruction"
 	if !doc.Get(systemPath).Exists() && doc.Get("request.system_instruction").Exists() {

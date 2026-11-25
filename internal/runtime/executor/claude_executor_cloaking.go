@@ -969,7 +969,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 		injectClaudeCodeCurrentDateInternalDoc(doc, currentDate, isExplicit)
 		return true
 	}
-	if claudeHistoryHasAdvisorCallOrResultDoc(doc) {
+	if claudeBodyHasAdvisorToolDoc(doc) || claudeHistoryHasAdvisorCallOrResultDoc(doc) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
 		}
@@ -1029,11 +1029,10 @@ func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, stric
 	if len(forwardedSystemBlocks) == 0 {
 		return doc.Delete("system") == nil
 	}
-	if claudeHistoryHasAdvisorCallOrResultDoc(doc) {
-		// When an advisor call or result is present, the Messages path preserves
-		// caller system blocks in top-level system to prevent shifting message
-		// positions. Keep them in top-level system here as well so token counting
-		// remains aligned with the Messages path without splicing messages[].
+	if claudeBodyHasAdvisorToolDoc(doc) || claudeHistoryHasAdvisorCallOrResultDoc(doc) {
+		// When an advisor tool is declared or present in history, the Messages path
+		// preserves caller system blocks in top-level system. Keep the same layout
+		// here so token counting matches without changing message positions.
 		blocks := make([]string, 0, len(forwardedSystemBlocks))
 		for _, block := range forwardedSystemBlocks {
 			blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
