@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	claudeinteractions "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/interactions"
+	openairesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/interactions/responses"
 )
 
 func TestConvertClaudeRequestToInteractionsMapsMessagesToolsAndStream(t *testing.T) {
@@ -798,5 +800,511 @@ func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfig
 		if ojson.GetBytesNoCopy(invalidOut, path).Exists() {
 			t.Fatalf("%s should be omitted for invalid input; out=%s", path, invalidOut)
 		}
+	}
+}
+
+func TestConvertClaudeRequestToInteractions_ToolChoiceNone(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		toolChoice string
+	}{
+		{name: "string_none", toolChoice: `"none"`},
+		{name: "object_none", toolChoice: `{"type":"none"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"model":"gemini-3.5-flash","tool_choice":` + tc.toolChoice + `,"messages":[{"role":"user","content":"hi"}]}`)
+			out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "generation_config.tool_choice").String(); got != "none" {
+				t.Fatalf("generation_config.tool_choice = %q, want none; out=%s", got, out)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToInteractions_SamplingNullAndTopK(t *testing.T) {
+	t.Run("forwards_valid_top_k_and_sampling_numbers", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","temperature":0.7,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.temperature").Raw; got != "0.7" {
+			t.Fatalf("temperature = %q, want 0.7; out=%s", got, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.top_p").Raw; got != "0.9" {
+			t.Fatalf("top_p = %q, want 0.9; out=%s", got, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.top_k").Raw; got != "40" {
+			t.Fatalf("top_k = %q, want 40; out=%s", got, out)
+		}
+	})
+
+	t.Run("skips_null_and_non_number_sampling_fields", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			raw  string
+		}{
+			{
+				name: "null_fields",
+				raw:  `{"model":"gemini-3.5-flash","temperature":null,"top_p":null,"top_k":null,"max_tokens":null,"stop_sequences":null,"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name: "non_number_fields",
+				raw:  `{"model":"gemini-3.5-flash","temperature":"0.7","top_p":true,"top_k":{},"max_tokens":"100","stop_sequences":123,"messages":[{"role":"user","content":"hi"}]}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", []byte(tc.raw), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+				}
+				for _, path := range []string{
+					"generation_config.temperature",
+					"generation_config.top_p",
+					"generation_config.top_k",
+					"generation_config.max_output_tokens",
+					"generation_config.stop_sequences",
+				} {
+					if ojson.GetBytesNoCopy(out, path).Exists() {
+						t.Fatalf("%s should be omitted for %s; out=%s", path, tc.name, out)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestConvertClaudeRequestToInteractions_ThinkingNullBudgetBlankEffortAndOverride(t *testing.T) {
+	t.Run("non_number_budget_tokens_falls_back_to_high_without_writing_budget", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			budget string
+		}{
+			{name: "null", budget: "null"},
+			{name: "string", budget: `"4096"`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"enabled","budget_tokens":` + tc.budget + `},"messages":[{"role":"user","content":"hi"}]}`)
+				out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+				}
+				if ojson.GetBytesNoCopy(out, "generation_config.thinking_config.thinking_budget").Exists() {
+					t.Fatalf("thinking_budget should be omitted when budget_tokens is %s; out=%s", tc.name, out)
+				}
+				if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "high" {
+					t.Fatalf("thinking_level = %q, want high; out=%s", got, out)
+				}
+			})
+		}
+	})
+
+	t.Run("blank_effort_preserves_disabled_thinking_level", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"disabled"},"output_config":{"effort":""},"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "none" {
+			t.Fatalf("thinking_level = %q, want none; out=%s", got, out)
+		}
+	})
+
+	t.Run("blank_effort_does_not_write_empty_thinking_level_or_clear_budget", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"enabled","budget_tokens":2048},"output_config":{"effort":"   "},"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.thinking_level").Exists() {
+			t.Fatalf("thinking_level should be omitted for blank effort; out=%s", out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_config.thinking_budget").Raw; got != "2048" {
+			t.Fatalf("thinking_budget = %q, want 2048; out=%s", got, out)
+		}
+	})
+
+	t.Run("non_empty_effort_clears_thinking_budget_and_empty_thinking_config", func(t *testing.T) {
+		raw := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"enabled","budget_tokens":4096},"output_config":{"effort":" Low "},"messages":[{"role":"user","content":"hi"}]}`)
+		out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.5-flash", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "low" {
+			t.Fatalf("thinking_level = %q, want low; out=%s", got, out)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.thinking_config.thinking_budget").Exists() {
+			t.Fatalf("thinking_budget should be cleared when effort sets thinking_level; out=%s", out)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.thinking_config").Exists() {
+			t.Fatalf("empty thinking_config should be removed after clearing thinking_budget; out=%s", out)
+		}
+	})
+}
+
+func TestConvertClaudeRequestToInteractions_PreservesThinkingAndToolUseSignatures(t *testing.T) {
+	raw := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [
+			{"role": "user", "content": "check weather"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "plan step", "signature": " sig_thought_1 "},
+					{"type": "thinking", "thinking": "", "signature": "sig_only_2"},
+					{"type": "thinking", "thinking": "no sig plan", "signature": "   "},
+					{"type": "thinking", "thinking": "", "signature": "   "},
+					{"type": "thinking", "thinking": "", "signature": 123},
+					{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}, "signature": " sig_tool_1 "},
+					{"type": "tool_use", "id": "toolu_2", "name": "get_time", "input": {"tz": "UTC"}, "signature": "   "},
+					{"type": "tool_use", "id": "toolu_3", "name": "get_locale", "input": {}, "signature": 456}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"},
+					{"type": "tool_result", "tool_use_id": "toolu_2", "content": "12:00"},
+					{"type": "tool_result", "tool_use_id": "toolu_3", "content": "fr-FR"}
+				]
+			}
+		]
+	}`)
+
+	out, errConvert := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
+	}
+
+	// Expected input steps:
+	// 0: user_input
+	// 1: thought (text + signature)
+	// 2: thought (signature-only, no content)
+	// 3: thought (text only, whitespace signature omitted)
+	// (empty thinking + whitespace/non-string signature dropped)
+	// 4: function_call toolu_1 (with signature)
+	// 5: function_call toolu_2 (whitespace signature omitted)
+	// 6: function_call toolu_3 (non-string signature omitted)
+	// 7..9: function_result toolu_1..toolu_3
+	if got := ojson.GetBytesNoCopy(out, "input.#").Int(); got != 10 {
+		t.Fatalf("input.# = %d, want 10; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.type").String(); got != "thought" {
+		t.Fatalf("input.1.type = %q, want thought; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.content.0.text").String(); got != "plan step" {
+		t.Fatalf("input.1.content.0.text = %q, want plan step; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.signature").String(); got != "sig_thought_1" {
+		t.Fatalf("input.1.signature = %q, want sig_thought_1; out=%s", got, out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.2.type").String(); got != "thought" {
+		t.Fatalf("input.2.type = %q, want thought; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.2.signature").String(); got != "sig_only_2" {
+		t.Fatalf("input.2.signature = %q, want sig_only_2; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.2.content").Exists() {
+		t.Fatalf("signature-only thought should omit empty content in default mode; out=%s", out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.3.type").String(); got != "thought" {
+		t.Fatalf("input.3.type = %q, want thought; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.3.content.0.text").String(); got != "no sig plan" {
+		t.Fatalf("input.3.content.0.text = %q, want no sig plan; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.3.signature").Exists() {
+		t.Fatalf("whitespace signature should be omitted on thought; out=%s", out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.4.type").String(); got != "function_call" {
+		t.Fatalf("input.4.type = %q, want function_call; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.4.signature").String(); got != "sig_tool_1" {
+		t.Fatalf("input.4.signature = %q, want sig_tool_1; out=%s", got, out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.5.type").String(); got != "function_call" {
+		t.Fatalf("input.5.type = %q, want function_call; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.5.signature").Exists() {
+		t.Fatalf("whitespace signature should be omitted on function_call; out=%s", out)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "input.6.type").String(); got != "function_call" {
+		t.Fatalf("input.6.type = %q, want function_call; out=%s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "input.6.signature").Exists() {
+		t.Fatalf("non-string signature should be omitted on function_call; out=%s", out)
+	}
+
+	// Compat mode preserves empty content alongside signature on signature-only thinking blocks.
+	sigOnlyPayload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig_compat"}]}]}`)
+	compatOut, errCompat := ConvertClaudeRequestToInteractionsWithCompat("gemini-3.1-flash-lite", sigOnlyPayload, false)
+	if errCompat != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractionsWithCompat() error = %v", errCompat)
+	}
+	if got := ojson.GetBytesNoCopy(compatOut, "input.0.type").String(); got != "thought" {
+		t.Fatalf("compat input.0.type = %q, want thought; out=%s", got, compatOut)
+	}
+	if got := ojson.GetBytesNoCopy(compatOut, "input.0.signature").String(); got != "sig_compat" {
+		t.Fatalf("compat input.0.signature = %q, want sig_compat; out=%s", got, compatOut)
+	}
+	if !ojson.GetBytesNoCopy(compatOut, "input.0.content").IsArray() || ojson.GetBytesNoCopy(compatOut, "input.0.content.0.type").String() != "text" || ojson.GetBytesNoCopy(compatOut, "input.0.content.0.text").String() != "" {
+		t.Fatalf("compat signature-only thought missing empty content text; out=%s", compatOut)
+	}
+}
+
+func TestConvertInteractionsResponseToClaudeNonStream_SignatureOnlyThought(t *testing.T) {
+	raw := []byte(`{"id":"interaction_sig","model":"gemini-3-pro","steps":[{"type":"thought","signature":"sig_only_1"},{"type":"thought","thought_signature":"sig_only_2","content":[]},{"type":"thought","content":[]},{"type":"model_output","content":[{"type":"text","text":"answer"}]}]}`)
+	out := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "gemini-3-pro", nil, nil, raw, nil)
+
+	if got := ojson.GetBytesNoCopy(out, "content.#").Int(); got != 3 {
+		t.Fatalf("content.# = %d, want 3; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "content.0.type").String(); got != "thinking" {
+		t.Fatalf("content.0.type = %q, want thinking; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "content.0.thinking").String(); got != "" {
+		t.Fatalf("content.0.thinking = %q, want empty; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "content.0.signature").String(); got != "sig_only_1" {
+		t.Fatalf("content.0.signature = %q, want sig_only_1; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "content.1.type").String(); got != "thinking" {
+		t.Fatalf("content.1.type = %q, want thinking; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "content.1.signature").String(); got != "sig_only_2" {
+		t.Fatalf("content.1.signature = %q, want sig_only_2; out=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "content.2.type").String(); got != "text" {
+		t.Fatalf("content.2.type = %q, want text; out=%s", got, out)
+	}
+}
+
+func TestConvertInteractionsResponseToClaudeStream_StandaloneThoughtSignature(t *testing.T) {
+	t.Run("standalone_without_step_start", func(t *testing.T) {
+		var param any
+		var out [][]byte
+		chunks := [][]byte{
+			[]byte(`data: {"index":0,"delta":{"type":"thought_signature","signature":"sig_standalone"},"event_type":"step.delta"}`),
+			[]byte(`data: {"index":0,"event_type":"step.stop"}`),
+		}
+		for _, chunk := range chunks {
+			out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, chunk, &param)...)
+		}
+		start := findClaudeEventPayload(out, "content_block_start")
+		if got := ojson.GetBytesNoCopy(start, "content_block.type").String(); got != "thinking" {
+			t.Fatalf("content_block_start type = %q, want thinking; events=%s", got, string(bytes.Join(out, []byte("\n"))))
+		}
+		delta := findClaudeEventPayload(out, "content_block_delta")
+		if got := ojson.GetBytesNoCopy(delta, "delta.type").String(); got != "signature_delta" {
+			t.Fatalf("delta.type = %q, want signature_delta; events=%s", got, string(bytes.Join(out, []byte("\n"))))
+		}
+		if got := ojson.GetBytesNoCopy(delta, "delta.signature").String(); got != "sig_standalone" {
+			t.Fatalf("delta.signature = %q, want sig_standalone; payload=%s", got, delta)
+		}
+	})
+
+	t.Run("alternate_signature_keys", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			payload string
+			want    string
+		}{
+			{
+				name:    "snake_case_thought_signature",
+				payload: `data: {"index":0,"delta":{"type":"thought_signature","thought_signature":"sig_snake"},"event_type":"step.delta"}`,
+				want:    "sig_snake",
+			},
+			{
+				name:    "camelCase_thoughtSignature",
+				payload: `data: {"index":0,"delta":{"type":"thought_signature","thoughtSignature":"sig_camel"},"event_type":"step.delta"}`,
+				want:    "sig_camel",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var param any
+				out := ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, []byte(tc.payload), &param)
+				delta := findClaudeEventPayload(out, "content_block_delta")
+				if got := ojson.GetBytesNoCopy(delta, "delta.signature").String(); got != tc.want {
+					t.Fatalf("delta.signature = %q, want %q; events=%s", got, tc.want, string(bytes.Join(out, []byte("\n"))))
+				}
+			})
+		}
+	})
+
+	t.Run("empty_signature_emits_nothing", func(t *testing.T) {
+		var param any
+		out := ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, []byte(`data: {"index":0,"delta":{"type":"thought_signature","signature":"   "},"event_type":"step.delta"}`), &param)
+		if len(out) != 0 {
+			t.Fatalf("expected no events for empty signature, got %s", string(bytes.Join(out, []byte("\n"))))
+		}
+	})
+}
+
+func TestConvertInteractionsResponseToClaudeStream_IgnoresNonTextDeltas(t *testing.T) {
+	t.Run("non_text_delta_mid_thinking", func(t *testing.T) {
+		var param any
+		var out [][]byte
+		chunks := [][]byte{
+			[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i_nontext","model":"gemini-3-pro"}}`),
+			[]byte(`data: {"index":0,"step":{"type":"thought"},"event_type":"step.start"}`),
+			[]byte(`data: {"index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"thinking"}},"event_type":"step.delta"}`),
+			[]byte(`data: {"index":1,"delta":{"type":"function_result","call_id":"call_1","result":"ok"},"event_type":"step.delta"}`),
+			[]byte(`data: {"index":0,"delta":{"type":"thought_signature","signature":"sig_after"},"event_type":"step.delta"}`),
+			[]byte(`data: {"index":0,"event_type":"step.stop"}`),
+		}
+		for _, chunk := range chunks {
+			out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, chunk, &param)...)
+		}
+
+		var foundSignatureAtZero bool
+		for _, event := range out {
+			if bytes.Contains(event, []byte(`"type":"text"`)) {
+				t.Fatalf("unexpected text content_block_start on non-text delta; events=%s", string(bytes.Join(out, []byte("\n"))))
+			}
+			if bytes.Contains(event, []byte(`"type":"signature_delta"`)) &&
+				bytes.Contains(event, []byte(`"index":0`)) &&
+				bytes.Contains(event, []byte(`"signature":"sig_after"`)) {
+				foundSignatureAtZero = true
+			}
+		}
+		if !foundSignatureAtZero {
+			t.Fatalf("expected signature_delta on still-active thinking block index 0; events=%s", string(bytes.Join(out, []byte("\n"))))
+		}
+	})
+
+	t.Run("full_function_result_step_sequence", func(t *testing.T) {
+		var param any
+		var out [][]byte
+		chunks := [][]byte{
+			[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i_fr_seq","model":"gemini-3-pro"}}`),
+			[]byte(`data: {"index":0,"step":{"type":"function_result","name":"lookup"},"event_type":"step.start"}`),
+			[]byte(`data: {"index":0,"delta":{"type":"function_result","name":"lookup","result":{"ok":true}},"event_type":"step.delta"}`),
+			[]byte(`data: {"index":0,"event_type":"step.stop"}`),
+			[]byte(`data: {"index":1,"step":{"type":"model_output"},"event_type":"step.start"}`),
+			[]byte(`data: {"index":1,"delta":{"type":"text","text":"done"},"event_type":"step.delta"}`),
+			[]byte(`data: {"index":1,"event_type":"step.stop"}`),
+		}
+		for _, chunk := range chunks {
+			out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, chunk, &param)...)
+		}
+
+		textBlockStarts := 0
+		for _, event := range out {
+			if bytes.Contains(event, []byte("event: content_block_start")) {
+				if !bytes.Contains(event, []byte(`"type":"text"`)) || !bytes.Contains(event, []byte(`"index":0`)) {
+					t.Fatalf("unexpected content_block_start; events=%s", string(bytes.Join(out, []byte("\n"))))
+				}
+				textBlockStarts++
+			}
+		}
+		if textBlockStarts != 1 {
+			t.Fatalf("text content_block_start count = %d, want 1; events=%s", textBlockStarts, string(bytes.Join(out, []byte("\n"))))
+		}
+		delta := findClaudeEventPayload(out, "content_block_delta")
+		if got := ojson.GetBytesNoCopy(delta, "delta.text").String(); got != "done" {
+			t.Fatalf("delta.text = %q, want done; events=%s", got, string(bytes.Join(out, []byte("\n"))))
+		}
+	})
+}
+
+func TestConvertInteractionsResponseToClaude_UsageThoughtTokensAndInputCache(t *testing.T) {
+	t.Run("stream_adds_separate_total_thought_tokens_to_output_tokens", func(t *testing.T) {
+		var param any
+		out := ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, []byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i_u1","model":"gemini-3-pro","status":"completed","usage":{"total_input_tokens":123,"total_output_tokens":36,"total_thought_tokens":240,"total_cached_tokens":5,"total_tokens":399}}}`), &param)
+		payload := findClaudeEventPayload(out, "message_delta")
+		if got := ojson.GetBytesNoCopy(payload, "usage.input_tokens").Int(); got != 118 {
+			t.Fatalf("usage.input_tokens = %d, want 118; payload=%s", got, payload)
+		}
+		if got := ojson.GetBytesNoCopy(payload, "usage.output_tokens").Int(); got != 276 {
+			t.Fatalf("usage.output_tokens = %d, want 276; payload=%s", got, payload)
+		}
+		if got := ojson.GetBytesNoCopy(payload, "usage.cache_read_input_tokens").Int(); got != 5 {
+			t.Fatalf("usage.cache_read_input_tokens = %d, want 5; payload=%s", got, payload)
+		}
+	})
+
+	t.Run("nonstream_adds_separate_reasoning_tokens_without_double_counting_inclusive_output", func(t *testing.T) {
+		// Separate reasoning tokens (total_tokens = 1000 + 50 + 120 = 1170): add reasoning_tokens to output_tokens.
+		separateRaw := []byte(`{"id":"i_u2","model":"gemini-3-pro","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_input_tokens":1000,"output_tokens":50,"reasoning_tokens":120,"cached_tokens":800,"cache_write_tokens":100,"total_tokens":1170}}`)
+		separateOut := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "gemini-3-pro", nil, nil, separateRaw, nil)
+		if got := ojson.GetBytesNoCopy(separateOut, "usage.input_tokens").Int(); got != 100 {
+			t.Fatalf("separate usage.input_tokens = %d, want 100; out=%s", got, separateOut)
+		}
+		if got := ojson.GetBytesNoCopy(separateOut, "usage.output_tokens").Int(); got != 170 {
+			t.Fatalf("separate usage.output_tokens = %d, want 170; out=%s", got, separateOut)
+		}
+
+		// Separate native Interactions usage without total_tokens still adds total_thought_tokens.
+		separateNoTotalRaw := []byte(`{"id":"i_u2_nototal","model":"gemini-3-pro","status":"completed","steps":[],"usage":{"total_input_tokens":100,"total_output_tokens":36,"total_thought_tokens":240}}`)
+		separateNoTotalOut := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "gemini-3-pro", nil, nil, separateNoTotalRaw, nil)
+		if got := ojson.GetBytesNoCopy(separateNoTotalOut, "usage.output_tokens").Int(); got != 276 {
+			t.Fatalf("separate without total_tokens usage.output_tokens = %d, want 276; out=%s", got, separateNoTotalOut)
+		}
+
+		// Inclusive reasoning tokens from OpenAI Responses -> Interactions (with and without total_tokens): do not double-count.
+		for _, tc := range []struct {
+			name string
+			raw  string
+		}{
+			{
+				name: "with_total_tokens",
+				raw:  `{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":11,"output_tokens":13,"total_tokens":24,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":7}}}`,
+			},
+			{
+				name: "without_total_tokens",
+				raw:  `{"id":"resp_2","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":11,"output_tokens":13,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":7}}}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				interactionsRaw := openairesponses.ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, []byte(tc.raw), nil)
+				inclusiveOut := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "gpt-test", nil, nil, interactionsRaw, nil)
+				if got := ojson.GetBytesNoCopy(inclusiveOut, "usage.output_tokens").Int(); got != 13 {
+					t.Fatalf("inclusive usage.output_tokens = %d, want 13; interactions=%s out=%s", got, interactionsRaw, inclusiveOut)
+				}
+			})
+		}
+	})
+
+	t.Run("thought_only_usage_sets_output_tokens", func(t *testing.T) {
+		raw := []byte(`{"id":"i_u3","model":"gemini-3-pro","status":"incomplete","steps":[],"usage":{"total_input_tokens":50,"total_thought_tokens":90}}`)
+		out := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "gemini-3-pro", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "usage.output_tokens").Int(); got != 90 {
+			t.Fatalf("usage.output_tokens = %d, want 90; out=%s", got, out)
+		}
+	})
+
+	t.Run("claude_to_interactions_roundtrip_preserves_uncached_input_and_output", func(t *testing.T) {
+		claudeRaw := []byte(`{"id":"msg_1","model":"claude-test","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"ok"},{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"x"}}],"usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":1,"cache_creation_input_tokens":4,"thinking_tokens":5}}`)
+		interactionsRaw := claudeinteractions.ConvertClaudeResponseToInteractionsNonStream(context.Background(), "claude-test", nil, nil, claudeRaw, nil)
+		out := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "claude-test", nil, nil, interactionsRaw, nil)
+		if got := ojson.GetBytesNoCopy(out, "usage.input_tokens").Int(); got != 3 {
+			t.Fatalf("usage.input_tokens = %d, want 3; interactions=%s out=%s", got, interactionsRaw, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "usage.output_tokens").Int(); got != 2 {
+			t.Fatalf("usage.output_tokens = %d, want 2; interactions=%s out=%s", got, interactionsRaw, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "usage.cache_read_input_tokens").Int(); got != 5 {
+			t.Fatalf("usage.cache_read_input_tokens = %d, want 5; interactions=%s out=%s", got, interactionsRaw, out)
+		}
+	})
+}
+
+func TestConvertInteractionsResponseToClaudeStream_MultiLineDataSSE(t *testing.T) {
+	var param any
+	chunk := []byte("data: {\"event_type\":\"step.delta\",\n" +
+		"data: \"index\":0,\n" +
+		"data: \"delta\":{\"type\":\"text\",\"text\":\"hello multi-line\"}}")
+	out := ConvertInteractionsResponseToClaude(context.Background(), "gemini-3-pro", nil, nil, chunk, &param)
+	delta := findClaudeEventPayload(out, "content_block_delta")
+	if got := ojson.GetBytesNoCopy(delta, "delta.text").String(); got != "hello multi-line" {
+		t.Fatalf("delta.text = %q, want hello multi-line; events=%s", got, string(bytes.Join(out, []byte("\n"))))
 	}
 }

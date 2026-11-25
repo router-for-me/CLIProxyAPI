@@ -122,6 +122,18 @@ func TestVertexOpenAPIBaseURLBuilders(t *testing.T) {
 	if got := VertexAPIKeyOpenAPIBaseURL("https://example.com/api", "v1", "", ""); got != "https://example.com/api/v1/endpoints/openapi" {
 		t.Fatalf("VertexAPIKeyOpenAPIBaseURL(relay URL) = %q", got)
 	}
+	if got := VertexAPIKeyOpenAPIBaseURL("http://vertex1", "v1", "", ""); got != "http://vertex1/v1/endpoints/openapi" {
+		t.Fatalf("VertexAPIKeyOpenAPIBaseURL(bare version-like host) = %q", got)
+	}
+	if got := VertexAPIKeyOpenAPIBaseURL("http://v1-gateway", "v1", "", ""); got != "http://v1-gateway/v1/endpoints/openapi" {
+		t.Fatalf("VertexAPIKeyOpenAPIBaseURL(bare hyphenated version-like host) = %q", got)
+	}
+	if got := VertexAPIKeyOpenAPIBaseURL("http://vertex1:8080/v1", "v1", "", ""); got != "http://vertex1:8080/v1/endpoints/openapi" {
+		t.Fatalf("VertexAPIKeyOpenAPIBaseURL(host with port and /v1) = %q", got)
+	}
+	if got := VertexServiceAccountOpenAPIBaseURL("http://vertex1", "v1", "my-proj", "global"); got != "http://vertex1/v1/projects/my-proj/locations/global/endpoints/openapi" {
+		t.Fatalf("VertexServiceAccountOpenAPIBaseURL(bare version-like host) = %q", got)
+	}
 	if !IsGoogleVertexHost("") || !IsGoogleVertexHost("https://aiplatform.googleapis.com/v1") || !IsGoogleVertexHost("https://us-central1-aiplatform.googleapis.com") || !IsGoogleVertexHost("https://aiplatform.us.rep.googleapis.com") || !IsGoogleVertexHost("https://aiplatform.eu.rep.googleapis.com/v1") || !IsGoogleVertexHost("aiplatform.us.rep.googleapis.com/v1") {
 		t.Fatal("expected Google Vertex hosts to be detected")
 	}
