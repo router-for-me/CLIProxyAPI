@@ -290,10 +290,27 @@ func extractSSEDataLine(line []byte) (prefix []byte, jsonData []byte, ok bool) {
 
 func isSSEControlOrCommentLine(line []byte) bool {
 	trimmed := bytes.TrimSpace(line)
-	return bytes.HasPrefix(trimmed, []byte(":")) ||
-		bytes.HasPrefix(trimmed, []byte("event:")) ||
-		bytes.HasPrefix(trimmed, []byte("id:")) ||
-		bytes.HasPrefix(trimmed, []byte("retry:"))
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == ':' {
+		return true
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		return false
+	}
+	colon := bytes.IndexByte(trimmed, ':')
+	if colon <= 0 {
+		return false
+	}
+	for _, b := range trimmed[:colon] {
+		isAlpha := (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+		isDigit := b >= '0' && b <= '9'
+		if !isAlpha && !isDigit && b != '-' && b != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func isSSELineStart(chunk []byte) bool {
