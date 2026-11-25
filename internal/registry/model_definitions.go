@@ -99,45 +99,29 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
-// AntigravityModelInfoFor returns the available Antigravity model that carries
-// the capabilities of modelID. A model published only under OAuth aliases is
-// found through the alias source, because requests reach translation under the
-// upstream ID. It returns nil when modelID is not available.
-func AntigravityModelInfoFor(modelID string) *ModelInfo {
+// AntigravityWebSearchModelFor returns the Antigravity model that should run a
+// native web search request for modelID.
+func AntigravityWebSearchModelFor(modelID string) string {
 	modelID = normalizeAntigravityCapabilityModelID(modelID)
 	if modelID == "" {
-		return nil
+		return ""
 	}
-	var aliased *ModelInfo
 	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
 		if model == nil {
 			continue
 		}
-		if normalizeAntigravityCapabilityModelID(model.ID) == modelID {
-			return model
-		}
-		if normalizeAntigravityCapabilityModelID(model.OAuthAliasSource) != modelID {
+		currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
+		if currentModelID == "" {
 			continue
 		}
-		// Registry iteration order is random; prefer a search-capable alias and
-		// break ties by ID so the result is stable.
-		if aliased == nil || (model.SupportsWebSearch && !aliased.SupportsWebSearch) ||
-			(model.SupportsWebSearch == aliased.SupportsWebSearch && model.ID < aliased.ID) {
-			aliased = model
+		if currentModelID == modelID {
+			if model.SupportsWebSearch {
+				return currentModelID
+			}
+			return ""
 		}
 	}
-	return aliased
-}
-
-// AntigravityWebSearchModelFor returns the Antigravity model that should run a
-// native web search request for modelID. For a model published only under an
-// OAuth alias, the published alias is returned.
-func AntigravityWebSearchModelFor(modelID string) string {
-	model := AntigravityModelInfoFor(modelID)
-	if model == nil || !model.SupportsWebSearch {
-		return ""
-	}
-	return normalizeAntigravityCapabilityModelID(model.ID)
+	return ""
 }
 
 // GetXAIModels returns the standard xAI Grok model definitions.

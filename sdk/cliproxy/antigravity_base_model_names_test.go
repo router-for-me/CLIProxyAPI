@@ -259,28 +259,6 @@ func TestAntigravityBaseModelNames_ListsAndRoutesBaseName(t *testing.T) {
 	}
 }
 
-func TestAntigravityBaseModelNames_BaseOnlyEntryKeepsWebSearchLookup(t *testing.T) {
-	catalog := []*ModelInfo{{
-		ID:                "gemini-9-future-high",
-		Thinking:          &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		SupportsWebSearch: true,
-	}}
-	published := applyOAuthModelAliasEntries(antigravityBaseModelAliases(catalog), catalog)
-	if len(published) != 1 || published[0].ID != "gemini-9-future" {
-		t.Fatalf("expected only the base name to be published, got %+v", published)
-	}
-
-	const authID = "antigravity-base-model-names-web-search"
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(authID, "antigravity", published)
-	t.Cleanup(func() { reg.UnregisterClient(authID) })
-
-	// Requests reach the translator under the catalog ID, which is not published.
-	if got := registry.AntigravityWebSearchModelFor("gemini-9-future-high"); got != "gemini-9-future" {
-		t.Fatalf("web search lookup for the catalog ID = %q, want %q", got, "gemini-9-future")
-	}
-}
-
 func TestRefreshOAuthModelAliasRouting_SerializedWithConfigRuntime(t *testing.T) {
 	const alias = "antigravity-alias-refresh-model"
 	aliasConfig := func(upstream string) *config.Config {

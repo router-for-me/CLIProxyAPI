@@ -2183,33 +2183,3 @@ func TestConvertOpenAIResponsesRequestToAntigravity_DetachedAfterCarrierWithDiff
 		t.Fatalf("unsigned turn A thought must not adopt turn B detached signature. Output: %s", out)
 	}
 }
-
-func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchFromOAuthAliasSource(t *testing.T) {
-	// The request reaches translation under the upstream ID, which is published only under its alias.
-	const upstream, alias = "ag-oauth-alias-search-upstream-high", "ag-oauth-alias-search-upstream"
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("ag-oauth-alias-search-client", "antigravity", []*registry.ModelInfo{
-		{ID: alias, OAuthAlias: alias, OAuthAliasSource: upstream, SupportsWebSearch: true},
-	})
-	t.Cleanup(func() {
-		reg.UnregisterClient("ag-oauth-alias-search-client")
-	})
-
-	input := []byte(`{
-		"model": "` + alias + `",
-		"input": "What is the newest Go release?",
-		"tools": [{"type": "web_search"}]
-	}`)
-
-	out, errConvert := ConvertOpenAIResponsesRequestToAntigravity(upstream, input, false)
-	if errConvert != nil {
-		t.Fatalf("convert error: %v", errConvert)
-	}
-	parsed := util.ParseGJSONBytesNoCopy(out)
-	if got := parsed.Get("requestType").String(); got != "web_search" {
-		t.Fatalf("requestType = %q, want web_search: %s", got, out)
-	}
-	if !parsed.Get("request.tools.0.googleSearch").Exists() {
-		t.Fatalf("expected googleSearch tool to be kept: %s", out)
-	}
-}
