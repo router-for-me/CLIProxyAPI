@@ -1073,12 +1073,14 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 func extractOpenAIConfigFromGetter(get func(string) ojson.Result) ThinkingConfig {
 	if effort := get("reasoning_effort"); effort.Exists() {
 		value := effort.String()
-		if value == "none" {
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		if strings.TrimSpace(value) != "" {
+			if value == "none" {
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			}
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 		}
-		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
-	return ThinkingConfig{}
+	return extractOpenAIGoogleThinkingFallbackConfigFromGetter(get)
 }
 
 func extractKimiConfig(body []byte) ThinkingConfig {

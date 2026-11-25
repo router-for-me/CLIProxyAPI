@@ -1122,3 +1122,121 @@ func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs_MissingRespons
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, out)
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityExtraBodyGoogleThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name              string
+		body              string
+		wantLevel         string
+		wantBudgetExists  bool
+		wantBudget        int64
+		wantIncludeExists bool
+		wantInclude       bool
+	}{
+		{
+			name: "extra_body snake_case thinking_level and include_thoughts",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"Solve a hard math problem."}],
+				"extra_body":{"google":{"thinking_config":{"include_thoughts":true,"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel:         "xhigh",
+			wantIncludeExists: true,
+			wantInclude:       true,
+		},
+		{
+			name: "extra_body camelCase thinkingConfig thinkingLevel",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":" HIGH "}}}
+			}`,
+			wantLevel:         "high",
+			wantIncludeExists: true,
+			wantInclude:       true,
+		},
+		{
+			name: "extra_body thinking_budget",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinking_config":{"thinking_budget":4096}}}
+			}`,
+			wantBudgetExists: true,
+			wantBudget:       4096,
+		},
+		{
+			name: "extra_body thinking_level auto maps to dynamic budget",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"auto"}}}
+			}`,
+			wantBudgetExists: true,
+			wantBudget:       -1,
+		},
+		{
+			name: "top-level reasoning_effort takes precedence over extra_body",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"low",
+				"extra_body":{"google":{"thinking_config":{"include_thoughts":true,"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel:         "low",
+			wantIncludeExists: true,
+			wantInclude:       true,
+		},
+		{
+			name: "generationConfig takes precedence over extra_body",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"hi"}],
+				"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}},
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+		{
+			name: "generation_config thinking_budget takes precedence over extra_body",
+			body: `{
+				"model":"gemini-4-neon-xhigh",
+				"messages":[{"role":"user","content":"hi"}],
+				"generation_config":{"thinking_config":{"thinking_budget":2048}},
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantBudgetExists: true,
+			wantBudget:       2048,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", []byte(tc.body), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToAntigravity() error = %v", errConvert)
+			}
+			level := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.thinkingLevel")
+			if tc.wantLevel != "" {
+				if got := level.String(); got != tc.wantLevel {
+					t.Fatalf("thinkingLevel = %q, want %q; output=%s", got, tc.wantLevel, out)
+				}
+			} else if level.Exists() {
+				t.Fatalf("unexpected thinkingLevel %q; output=%s", level.String(), out)
+			}
+			budget := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.thinkingBudget")
+			if budget.Exists() != tc.wantBudgetExists {
+				t.Fatalf("thinkingBudget exists = %v, want %v; output=%s", budget.Exists(), tc.wantBudgetExists, out)
+			}
+			if tc.wantBudgetExists && budget.Int() != tc.wantBudget {
+				t.Fatalf("thinkingBudget = %d, want %d; output=%s", budget.Int(), tc.wantBudget, out)
+			}
+			if tc.wantIncludeExists {
+				inc := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.includeThoughts")
+				if !inc.Exists() || inc.Bool() != tc.wantInclude {
+					t.Fatalf("includeThoughts = (%v, exists=%v), want %v; output=%s", inc.Bool(), inc.Exists(), tc.wantInclude, out)
+				}
+			}
+		})
+	}
+}

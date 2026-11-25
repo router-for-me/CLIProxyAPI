@@ -7,6 +7,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
@@ -1255,5 +1256,92 @@ func TestConvertOpenAIRequestToGemini_MixedBuiltinToolsAndFunctions(t *testing.T
 	}
 	if ojson.GetBytesNoCopy(out, "toolConfig.includeServerSideToolInvocations").Exists() {
 		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", out)
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiExtraBodyGoogleThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		body             string
+		wantLevel        string
+		wantBudgetExists bool
+		wantBudget       int64
+	}{
+		{
+			name: "extra_body thinking_level",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinking_config":{"include_thoughts":true,"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "xhigh",
+		},
+		{
+			name: "extra_body thinking_budget",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinkingConfig":{"thinkingBudget":4096}}}
+			}`,
+			wantBudgetExists: true,
+			wantBudget:       4096,
+		},
+		{
+			name: "reasoning_effort overrides extra_body",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"low",
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+		{
+			name: "generationConfig overrides extra_body",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}},
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+		{
+			name: "generation_config overrides extra_body consistently with metadata",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"generation_config":{"thinking_config":{"thinking_level":"low"}},
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToGemini("gemini-4-neon", []byte(tc.body), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini() error = %v", errConvert)
+			}
+			level := ojson.GetBytesNoCopy(out, "generationConfig.thinkingConfig.thinkingLevel")
+			if tc.wantLevel != "" {
+				if got := level.String(); got != tc.wantLevel {
+					t.Fatalf("thinkingLevel = %q, want %q; output=%s", got, tc.wantLevel, out)
+				}
+				if gotMeta := thinking.ExtractReasoningEffort([]byte(tc.body), "openai", "gemini-4-neon"); gotMeta != tc.wantLevel {
+					t.Fatalf("ExtractReasoningEffort() = %q, want %q", gotMeta, tc.wantLevel)
+				}
+			} else if level.Exists() {
+				t.Fatalf("unexpected thinkingLevel %q; output=%s", level.String(), out)
+			}
+			budget := ojson.GetBytesNoCopy(out, "generationConfig.thinkingConfig.thinkingBudget")
+			if budget.Exists() != tc.wantBudgetExists {
+				t.Fatalf("thinkingBudget exists = %v, want %v; output=%s", budget.Exists(), tc.wantBudgetExists, out)
+			}
+			if tc.wantBudgetExists && budget.Int() != tc.wantBudget {
+				t.Fatalf("thinkingBudget = %d, want %d; output=%s", budget.Int(), tc.wantBudget, out)
+			}
+		})
 	}
 }

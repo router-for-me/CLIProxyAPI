@@ -188,6 +188,9 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 		}
 	}
 	normalizeAntigravityOpenAIThinkingConfigDoc(outDoc)
+	if thinkingPath := "request.generationConfig.thinkingConfig"; !outDoc.Get(thinkingPath+".thinkingLevel").Exists() && !outDoc.Get(thinkingPath+".thinkingBudget").Exists() {
+		thinking.ApplyOpenAIGoogleThinkingConfigDoc(outDoc, rawJSON, thinkingPath)
+	}
 
 	// Temperature/top_p/top_k/max_tokens/max_completion_tokens
 	if tr := ojson.GetBytesNoCopy(rawJSON, "temperature"); tr.Exists() && tr.Type == ojson.Number {

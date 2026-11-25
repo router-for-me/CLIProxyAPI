@@ -19,6 +19,9 @@ func extractAntigravityOpenAIThinking(body []byte) ThinkingConfig {
 	if explicit := firstThinkingField(generation, "thinkingConfig.thinking_budget", "thinking_config.thinking_budget", "thinking_config.thinkingBudget"); explicit.Exists() {
 		budget = explicit
 	}
+	if !level.Exists() && !budget.Exists() {
+		level, budget = extractOpenAIGoogleThinkingFields(root.Get)
+	}
 	return geminiThinkingConfigFromValues(level, budget)
 }
 
