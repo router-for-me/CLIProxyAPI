@@ -879,8 +879,9 @@ func antigravityAuthID(auth *cliproxyauth.Auth) string {
 }
 
 const (
-	antigravitySignatureGrantScopeMetadataKey   = "cpa_signature_cache_grant"
-	antigravitySignatureGrantBindingMetadataKey = "cpa_signature_cache_grant_binding"
+	antigravitySignatureGrantScopeMetadataKey       = "cpa_signature_cache_grant"
+	antigravitySignatureGrantBindingMetadataKey     = "cpa_signature_cache_grant_binding"
+	antigravitySignatureGrantHomeBindingMetadataKey = "cpa_signature_cache_grant_home_binding"
 )
 
 func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
@@ -895,21 +896,59 @@ func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
 	return antigravityCredentialScope("grant:", refresh+"\x00"+access)
 }
 
+func antigravitySignatureGrantHomeBinding(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Attributes == nil || strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")) != "" {
+		return ""
+	}
+	homeScope := strings.TrimSpace(auth.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute])
+	if homeScope == "" {
+		return ""
+	}
+	return antigravityCredentialScope("home-bind:", homeScope)
+}
+
+func antigravityHasValidSignatureGrant(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+	if retained == "" {
+		return false
+	}
+	tokenBinding := antigravitySignatureGrantBinding(auth)
+	if tokenBinding == "" {
+		return false
+	}
+	binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
+	if binding != "" && binding == tokenBinding {
+		return true
+	}
+	homeBinding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantHomeBindingMetadataKey))
+	if homeBinding != "" {
+		if expected := antigravitySignatureGrantHomeBinding(auth); expected != "" && homeBinding == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func antigravitySignatureGrantIdentity(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Metadata != nil {
-		retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
-		binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
-		if retained != "" && binding != "" && binding == antigravitySignatureGrantBinding(auth) {
-			return retained
-		}
-		if binding := antigravitySignatureGrantBinding(auth); binding != "" {
-			return binding
+	binding := antigravitySignatureGrantBinding(auth)
+	if binding == "" {
+		return ""
+	}
+	if antigravityHasValidSignatureGrant(auth) {
+		return strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+	}
+	if auth.Attributes != nil && strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")) == "" {
+		if homeScope := strings.TrimSpace(auth.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute]); homeScope != "" {
+			return antigravityCredentialScope("home-grant:", homeScope)
 		}
 	}
-	return ""
+	return binding
 }
 
 func antigravitySignatureCacheScope(auth *cliproxyauth.Auth) string {
