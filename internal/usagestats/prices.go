@@ -87,6 +87,19 @@ func (t *PriceTable) Lookup(model string) (Price, bool) {
 		return Price{}, false
 	}
 	model = normalizeModel(model)
+	if price, ok := t.lookup(model); ok {
+		return price, true
+	}
+	// GitHub Copilot spells Claude versions with dots ("claude-opus-5.5")
+	// where Anthropic's price list uses dashes ("claude-opus-5-5").
+	if strings.HasPrefix(model, "claude-") && strings.Contains(model, ".") {
+		return t.lookup(strings.ReplaceAll(model, ".", "-"))
+	}
+	return Price{}, false
+}
+
+// lookup matches a normalized model name exactly or at a separator.
+func (t *PriceTable) lookup(model string) (Price, bool) {
 	if price, ok := t.prices[model]; ok {
 		return price, true
 	}
