@@ -90,13 +90,21 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		scanner.Buffer(nil, 52_428_800)
 		claudeInputTokens := helps.NewClaudeInputTokenState(prepared.from, prepared.to, prepared.responseFormat, prepared.originalPayload)
 		var streamUsage helps.StreamUsageBuffer
-		defer streamUsage.Publish(ctx, reporter)
+		var terminalDelivered bool
+		defer func() {
+			if errCtx := ctx.Err(); errCtx != nil && !terminalDelivered {
+				if !streamUsage.PublishFailure(ctx, reporter, errCtx) {
+					reporter.PublishFailure(ctx, errCtx)
+				}
+				return
+			}
+			streamUsage.Publish(ctx, reporter)
+		}()
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		var outputTracker helps.ResponsesStreamOutputTracker
 		var sawEventHeader bool
-		var terminalDelivered bool
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			lines, errBridge := prepared.applyPatch.Stream(translatedLine)
 			if errBridge != nil {
@@ -298,7 +306,9 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
