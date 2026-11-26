@@ -1201,7 +1201,12 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, guard func(*Aut
 			continue
 		}
 		models = append(models, modelKey)
-		if state != nil && !(preserveDisabled && state.Status == StatusDisabled) {
+		if state == nil {
+			continue
+		}
+		if preserveDisabled {
+			resetModelStateKeepDisabled(state, now)
+		} else {
 			resetModelState(state, now)
 		}
 	}
@@ -1260,6 +1265,25 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, guard func(*Aut
 		return nil, nil, errPersist
 	}
 	return snapshot, models, nil
+}
+
+// resetModelStateKeepDisabled resets state like resetModelState, but keeps a
+// disabled status. Credential-quota propagation can move a disabled state into
+// the shadow, so the shadow status counts too.
+func resetModelStateKeepDisabled(state *ModelState, now time.Time) {
+	if state.Status == StatusDisabled {
+		return
+	}
+	shadow := state.credentialQuotaShadow
+	if shadow == nil || shadow.Status != StatusDisabled {
+		resetModelState(state, now)
+		return
+	}
+	message, unavailable := shadow.StatusMessage, shadow.Unavailable
+	resetModelState(state, now)
+	state.Status = StatusDisabled
+	state.StatusMessage = message
+	state.Unavailable = unavailable
 }
 
 func modelsForRegisteredAuth(authID string) []string {

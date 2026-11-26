@@ -426,3 +426,52 @@ func TestClaudeQuotaProbeStopsWhenCredentialChanges(t *testing.T) {
 		t.Fatalf("usage requests=%d, want 1", calls)
 	}
 }
+
+func TestClaudeQuotaRecoveryIgnoresExpiredErrorUnderModelQuota(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	newModelBlockedClaudeAuth(t, m, t.Name())
+	outage := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: t.Name(), Provider: "claude", Model: "claude-haiku", RetryAfter: &outage, Error: &Error{HTTPStatus: 503, Message: "overloaded"}})
+	expireNonQuotaDeadlines(m, t.Name(), "claude-haiku")
+	snapshot, _ := m.GetByID(t.Name())
+	if snapshot.LastError == nil || snapshot.LastError.HTTPStatus != 503 {
+		t.Fatalf("fixture: auth LastError=%+v, want the old 503", snapshot.LastError)
+	}
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(t.Name())
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); blocked {
+		t.Fatal("an expired 503 under a model quota kept the model blocked")
+	}
+}
+
+func TestClaudeQuotaRecoveryPreservesDisabledShadow(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
+	if _, err := m.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.auths[a.ID].ModelStates = map[string]*ModelState{"claude-retired": {Status: StatusDisabled, StatusMessage: "disabled by operator", Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: time.Now().Add(time.Hour)}}}
+	m.mu.Unlock()
+	quota := 5 * 24 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+	snapshot, _ := m.GetByID(a.ID)
+	retired := snapshot.ModelStates["claude-retired"]
+	if retired.Status == StatusDisabled || retired.credentialQuotaShadow == nil || retired.credentialQuotaShadow.Status != StatusDisabled {
+		t.Fatalf("fixture: want the disabled state inside the shadow, got status=%s shadow=%+v", retired.Status, retired.credentialQuotaShadow)
+	}
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(a.ID)
+	if after.Quota.Exceeded {
+		t.Fatal("fixture: recovery did not run")
+	}
+	if s := after.ModelStates["claude-retired"]; s.Status != StatusDisabled {
+		t.Fatalf("recovery re-enabled a disabled model from its shadow: %+v", s)
+	}
+}

@@ -85,12 +85,11 @@ func claudeQuotaCandidate(a *Auth) bool {
 		return false
 	}
 	now := time.Now()
-	credentialQuota := a.Quota.Exceeded && a.Quota.Reason == "credential_quota"
-	blocked := credentialQuota && a.Quota.NextRecoverAt.After(now)
-	// Under a credential quota, a sibling result can leave an old server error
-	// on the auth. The live deadlines below show whether it still blocks.
-	// Other errors, such as 401 or 403, are about the credential and stay.
-	staleServerError := credentialQuota && a.LastError != nil && a.LastError.HTTPStatus >= http.StatusInternalServerError
+	blocked := a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now)
+	// Under a quota, a sibling result can leave an old server error on the
+	// auth. The live deadlines below show whether it still blocks. Other
+	// errors, such as 401 or 403, are about the credential and stay.
+	staleServerError := a.Quota.Exceeded && (a.Quota.Reason == "quota" || a.Quota.Reason == "credential_quota") && isServerError(a.LastError)
 	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests && !staleServerError {
 		return false
 	}
@@ -110,8 +109,11 @@ func claudeQuotaCandidate(a *Auth) bool {
 		}
 		quota := isQuotaModelState(s)
 		// A quota state can keep an old error from before the quota. The live
-		// deadlines above show whether that error still blocks the model.
-		if !quota && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
+		// deadlines above show whether that error still blocks the model. A
+		// model without quota passes only with a server error whose retry
+		// deadline has expired.
+		expiredServerError := isServerError(s.LastError) && !s.NextRetryAfter.IsZero() && !s.NextRetryAfter.After(now)
+		if !quota && !expiredServerError && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
 			return false
 		}
 		if quota && isModelStateActiveCooldown(s, now) {
@@ -131,6 +133,10 @@ func hasLiveNonQuotaBlock(s *ModelState, now time.Time) bool {
 		return true
 	}
 	return !isQuotaModelState(s) && isModelStateActiveCooldown(s, now)
+}
+
+func isServerError(err *Error) bool {
+	return err != nil && err.HTTPStatus >= http.StatusInternalServerError
 }
 
 func isQuotaModelState(s *ModelState) bool {
