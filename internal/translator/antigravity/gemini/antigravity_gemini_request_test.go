@@ -1708,6 +1708,59 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_CanonicalizesUnchanged
 	}
 }
 
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PrunesEmptyExtraContentShell(t *testing.T) {
+	nativeSig := testAntigravityGeminiClaudeSignature(t)
+	canonicalSig, ok := signature.CompatibleAntigravityClaudeThinkingSignature(nativeSig)
+	if !ok {
+		t.Fatal("test Claude signature should be compatible with Antigravity Claude")
+	}
+
+	t.Run("thinking_part_prunes_empty_extra_content_shell", func(t *testing.T) {
+		inputJSON := []byte(`{"project":"","model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"model","parts":[{"text":"reasoning","thought":true,"extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]}]}}`)
+		output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-opus-4-6-thinking", inputJSON)
+		part := ojson.GetBytesNoCopy(output, "request.contents.0.parts.0")
+
+		if got := part.Get("thoughtSignature").String(); got != canonicalSig {
+			t.Fatalf("thoughtSignature = %q, want %q; part=%s", got, canonicalSig, part.Raw)
+		}
+		if part.Get("extra_content").Exists() {
+			t.Fatalf("empty extra_content shell should be pruned; part=%s", part.Raw)
+		}
+	})
+
+	t.Run("dropped_signature_prunes_empty_extra_content_across_part_kinds", func(t *testing.T) {
+		inputJSON := []byte(`{"project":"","model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"user","parts":[{"text":"hi","extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]},{"role":"model","parts":[{"text":"answer","extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}},"extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]}]}}`)
+		output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-opus-4-6-thinking", inputJSON)
+		for contentIdx := 0; contentIdx < 3; contentIdx++ {
+			part := ojson.GetBytesNoCopy(output, fmt.Sprintf("request.contents.%d.parts.0", contentIdx))
+			if part.Get("extra_content").Exists() {
+				t.Fatalf("content %d part 0 left empty extra_content shell: %s", contentIdx, part.Raw)
+			}
+		}
+	})
+
+	t.Run("preserves_non_empty_sibling_fields", func(t *testing.T) {
+		inputJSON := []byte(`{"project":"","model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"model","parts":[{"text":"r1","thought":true,"extra_content":{"google":{"thought_signature":"` + canonicalSig + `","other":"keep"}}},{"text":"r2","thought":true,"extra_content":{"google":{"thought_signature":"` + canonicalSig + `"},"sibling":"keep"}}]}]}}`)
+		output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-opus-4-6-thinking", inputJSON)
+
+		p0 := ojson.GetBytesNoCopy(output, "request.contents.0.parts.0")
+		if p0.Get("extra_content.google.thought_signature").Exists() {
+			t.Fatalf("p0 thought_signature should be removed; part=%s", p0.Raw)
+		}
+		if got := p0.Get("extra_content.google.other").String(); got != "keep" {
+			t.Fatalf("p0 extra_content.google.other = %q, want keep; part=%s", got, p0.Raw)
+		}
+
+		p1 := ojson.GetBytesNoCopy(output, "request.contents.0.parts.1")
+		if p1.Get("extra_content.google").Exists() {
+			t.Fatalf("p1 empty extra_content.google should be pruned; part=%s", p1.Raw)
+		}
+		if got := p1.Get("extra_content.sibling").String(); got != "keep" {
+			t.Fatalf("p1 extra_content.sibling = %q, want keep; part=%s", got, p1.Raw)
+		}
+	})
+}
+
 func TestSanitizeAntigravityClaudeGeminiRequestSignatures_IgnoresNestedToolArgsAndResponseSignatureKeys(t *testing.T) {
 	inputJSON := []byte(`{
 		"project": "",

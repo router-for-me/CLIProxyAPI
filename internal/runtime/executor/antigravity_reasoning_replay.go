@@ -1206,9 +1206,7 @@ func (b *antigravityReplayBatch) removeThoughtSignatureFromOtherParts(contentInd
 			continue
 		}
 		partDoc := ojson.NewDoc([]byte(part.Raw))
-		for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-			_ = partDoc.Delete(field)
-		}
+		partDoc = deleteAntigravityPartThoughtSignatureFieldsPartDoc(partDoc)
 		changed = b.setPart(key, partDoc.Bytes()) || changed
 	}
 	return changed
@@ -1302,9 +1300,7 @@ func (b *antigravityReplayBatch) applyFunctionCallSignature(itemResult ojson.Res
 	if errSet := partDoc.SetRawBytes("functionCall", nativeCall); errSet != nil {
 		return false
 	}
-	for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		_ = partDoc.Delete(field)
-	}
+	partDoc = deleteAntigravityPartThoughtSignatureFieldsPartDoc(partDoc)
 	if signature != "" {
 		if errSet := partDoc.Set("thoughtSignature", signature); errSet != nil {
 			return false
@@ -1327,9 +1323,7 @@ func (b *antigravityReplayBatch) applyFunctionCallSignature(itemResult ojson.Res
 				continue
 			}
 			otherDoc := ojson.NewDoc([]byte(otherPart.Raw))
-			for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-				_ = otherDoc.Delete(field)
-			}
+			otherDoc = deleteAntigravityPartThoughtSignatureFieldsPartDoc(otherDoc)
 			pending[otherKey] = otherDoc.Bytes()
 		}
 	}
@@ -1960,10 +1954,8 @@ func antigravityRemoveThoughtSignatureFromOtherParts(payload []byte, contentInde
 		if doc == nil {
 			doc = ojson.NewDoc(payload)
 		}
-		for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-			if doc.Delete(partPath+"."+field) == nil {
-				changed = true
-			}
+		if deleteAntigravityPartThoughtSignatureFieldsDoc(doc, partPath) {
+			changed = true
 		}
 	}
 	if !changed || doc == nil {
@@ -2860,9 +2852,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 	if errSet := doc.SetRawBytes(partPath+".functionCall", nativeCall); errSet != nil {
 		return payload, false
 	}
-	for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		_ = doc.Delete(partPath + "." + field)
-	}
+	deleteAntigravityPartThoughtSignatureFieldsDoc(doc, partPath)
 	if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); allowSignature && signature != "" {
 		partsPath := fmt.Sprintf("request.contents.%d.parts", contentIndex)
 		if parts := doc.Get(partsPath); parts.IsArray() {
@@ -2871,9 +2861,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 				if otherPath == partPath || antigravityNativePartThoughtSignature(part) != signature {
 					continue
 				}
-				for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-					_ = doc.Delete(otherPath + "." + field)
-				}
+				deleteAntigravityPartThoughtSignatureFieldsDoc(doc, otherPath)
 			}
 		}
 		_ = doc.Set(partPath+".thoughtSignature", signature)
@@ -2996,9 +2984,7 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(index *antigravityReplayR
 				if otherPath == partPath || antigravityNativePartThoughtSignature(part) != sig {
 					continue
 				}
-				for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-					_ = doc.Delete(otherPath + "." + field)
-				}
+				deleteAntigravityPartThoughtSignatureFieldsDoc(doc, otherPath)
 			}
 		}
 		if errSet := doc.Set(pathSig, sig); errSet == nil {
@@ -3758,10 +3744,55 @@ func antigravityUsesReasoningReplayCache(modelName string) bool {
 }
 
 func antigravityNativePartThoughtSignature(part ojson.Result) string {
-	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
+	for _, path := range []string{"thoughtSignature", "thought_signature"} {
 		if signature := strings.TrimSpace(part.Get(path).String()); signature != "" {
 			return strings.Clone(signature)
 		}
 	}
+	if signature, exists := internalsignature.ExtraContentGoogleThoughtSignature(part); exists {
+		if trimmed := strings.TrimSpace(signature); trimmed != "" {
+			return strings.Clone(trimmed)
+		}
+	}
 	return ""
+}
+
+func deleteAntigravityPartThoughtSignatureFieldsDoc(doc *ojson.Doc, partPath string) bool {
+	if doc == nil || partPath == "" {
+		return false
+	}
+	prefix := partPath + "."
+	changed := false
+	for _, field := range []string{"thoughtSignature", "thought_signature"} {
+		path := prefix + field
+		for doc.Get(path).Exists() {
+			beforeLen := doc.Len()
+			if errDelete := doc.Delete(path); errDelete != nil || doc.Len() >= beforeLen {
+				break
+			}
+			changed = true
+		}
+	}
+	if internalsignature.StripExtraContentGoogleThoughtSignatureDoc(doc, partPath) {
+		changed = true
+	}
+	return changed
+}
+
+func deleteAntigravityPartThoughtSignatureFieldsPartDoc(doc *ojson.Doc) *ojson.Doc {
+	if doc == nil {
+		return nil
+	}
+	for _, field := range []string{"thoughtSignature", "thought_signature"} {
+		for doc.Get(field).Exists() {
+			beforeLen := doc.Len()
+			if errDelete := doc.Delete(field); errDelete != nil || doc.Len() >= beforeLen {
+				break
+			}
+		}
+	}
+	if updated, changed := internalsignature.StripExtraContentGoogleThoughtSignaturePartDoc(doc); changed {
+		return updated
+	}
+	return doc
 }

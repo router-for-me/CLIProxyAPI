@@ -818,6 +818,20 @@ func deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part map[string]any
 	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		deleteAtPath(part, path...)
 	}
+	pruneEmptyExtraContentGoogle(part)
+}
+
+func pruneEmptyExtraContentGoogle(part map[string]any) {
+	extraContent, ok := part["extra_content"].(map[string]any)
+	if !ok {
+		return
+	}
+	if google, okGoogle := extraContent["google"].(map[string]any); okGoogle && len(google) == 0 {
+		delete(extraContent, "google")
+	}
+	if len(extraContent) == 0 {
+		delete(part, "extra_content")
+	}
 }
 
 func hasFunctionResponsePart(part map[string]any) bool {
