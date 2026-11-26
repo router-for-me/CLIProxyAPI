@@ -7,7 +7,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var modelFieldPaths = []string{"model", "modelVersion", "response.model", "response.modelVersion", "message.model"}
+var modelFieldPaths = [...]string{"model", "modelVersion", "response.model", "response.modelVersion", "message.model", "interaction.model"}
 
 const maxPendingBufSize = 1 << 20 // 1MB limit for pending buffer
 
@@ -36,8 +36,8 @@ func rewriteModelInResponse(data []byte, targetModel string) []byte {
 	if targetModel == "" || len(data) == 0 {
 		return data
 	}
-	var resultsBuf [5]ojson.Result
-	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths...)
+	var resultsBuf [len(modelFieldPaths)]ojson.Result
+	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths[:]...)
 	var doc *ojson.Doc
 	for i, path := range modelFieldPaths {
 		if i < len(results) && results[i].Exists() {
@@ -81,8 +81,8 @@ func (r *StreamRewriter) rewriteModel(data []byte) []byte {
 		return data
 	}
 	targetModel := r.options.RewriteModel
-	var resultsBuf [5]ojson.Result
-	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths...)
+	var resultsBuf [len(modelFieldPaths)]ojson.Result
+	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths[:]...)
 	var doc *ojson.Doc
 	for i, path := range modelFieldPaths {
 		if i < len(results) && results[i].Exists() {
@@ -142,9 +142,14 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	}
 
 	if len(r.pendingBuf) > 0 {
-		combined := make([]byte, 0, len(r.pendingBuf)+1+len(chunk))
+		insertNewline := shouldInsertNewlineBetweenPendingAndChunk(r.pendingBuf, chunk)
+		extra := 0
+		if insertNewline {
+			extra = 1
+		}
+		combined := make([]byte, 0, len(r.pendingBuf)+extra+len(chunk))
 		combined = append(combined, r.pendingBuf...)
-		if combined[len(combined)-1] != '\n' {
+		if insertNewline {
 			combined = append(combined, '\n')
 		}
 		combined = append(combined, chunk...)
@@ -152,10 +157,6 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 		r.pendingBuf = nil
 	}
 	chunk = normalizeGluedSSEEvents(chunk)
-
-	if len(chunk) > maxPendingBufSize {
-		return chunk
-	}
 
 	// Handle raw JSON chunks (Gemini/OpenAI format without SSE "data:" prefix)
 	trimmed := bytes.TrimSpace(chunk)
@@ -172,7 +173,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	var processChunk []byte
 	if lastDoubleNewline >= 0 {
 		afterComplete := chunk[lastDoubleNewline+2:]
-		if len(afterComplete) > 0 && !bytes.Equal(afterComplete, []byte("\n")) {
+		if len(afterComplete) > 0 && !bytes.Equal(afterComplete, []byte("\n")) && len(afterComplete) <= maxPendingBufSize {
 			processChunk = chunk[:lastDoubleNewline+2]
 			r.pendingBuf = make([]byte, len(afterComplete))
 			copy(r.pendingBuf, afterComplete)
@@ -184,6 +185,13 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	} else if len(bytes.TrimSpace(chunk)) == 0 {
 		return chunk
 	} else if len(chunk) > 0 {
+		if len(chunk) > maxPendingBufSize {
+			rewritten := r.rewriteSSELines(chunk)
+			if bytes.Contains(chunk, []byte("[DONE]")) {
+				r.logStreamFinishedOnce()
+			}
+			return rewritten
+		}
 		r.pendingBuf = make([]byte, len(chunk))
 		copy(r.pendingBuf, chunk)
 		return nil
@@ -194,34 +202,15 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	lines := bytes.Split(processChunk, []byte("\n"))
 	var result [][]byte
 	var pendingEvent []byte
-	skipBlanks := false
 
 	for _, line := range lines {
-		if len(line) == 0 && skipBlanks {
-			continue
-		}
-		if len(line) != 0 && skipBlanks {
-			skipBlanks = false
-		}
-
 		if bytes.HasPrefix(line, []byte("event:")) {
 			pendingEvent = line
 			continue
 		}
 
 		dataPrefix, jsonData, found := extractSSEDataLine(line)
-		if found && len(jsonData) > 0 && jsonData[0] == '{' {
-			if !ojson.ValidBytes(jsonData) {
-				if pendingEvent != nil {
-					r.pendingBuf = append(pendingEvent, '\n')
-					r.pendingBuf = append(r.pendingBuf, line...)
-					pendingEvent = nil
-				} else {
-					r.pendingBuf = append(r.pendingBuf, line...)
-				}
-				continue
-			}
-
+		if found && len(jsonData) > 0 && jsonData[0] == '{' && ojson.ValidBytes(jsonData) {
 			if pendingEvent != nil {
 				result = append(result, pendingEvent)
 				pendingEvent = nil
@@ -254,6 +243,25 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 		r.logStreamFinishedOnce()
 	}
 	return joined
+}
+
+func isSSEMetadataLine(line []byte) bool {
+	return bytes.HasPrefix(line, []byte("event:")) ||
+		bytes.HasPrefix(line, []byte("id:")) ||
+		bytes.HasPrefix(line, []byte("retry:")) ||
+		bytes.HasPrefix(line, []byte(":"))
+}
+
+func shouldInsertNewlineBetweenPendingAndChunk(pending, chunk []byte) bool {
+	if len(pending) == 0 || len(chunk) == 0 || pending[len(pending)-1] == '\n' || chunk[0] == '\n' || chunk[0] == '\r' {
+		return false
+	}
+	lastLine := pending
+	if idx := bytes.LastIndexByte(pending, '\n'); idx >= 0 {
+		lastLine = pending[idx+1:]
+	}
+	return isSSEMetadataLine(lastLine) &&
+		(bytes.HasPrefix(chunk, []byte("data:")) || isSSEMetadataLine(chunk))
 }
 
 func extractLastDataPayload(chunk []byte) []byte {

@@ -138,11 +138,12 @@ func TestHomeExecutorDispatchLifecycleRejections(t *testing.T) {
 				manager.SetHomePluginExecutorResolver(host)
 				manager.SetRetryConfig(2, 0, 2)
 				auth := homeExecutorTestAuth("selected-token", "existing-project", time.Now().Add(time.Hour))
+				auth.ID = fmt.Sprintf("%s-%d", t.Name(), testUsageBarrierID.Add(1))
 				dispatcher := &homeExecutorTestDispatcher{payload: homeExecutorDispatchJSON(t, auth, homePluginID)}
 				registry := executionregistry.New()
 				var releases int
 				registry.SetReleaseSink(func(group executionregistry.ReleaseGroup, _ int64) {
-					if group.CredentialID != homePluginAuth || group.Model != homePluginModel {
+					if group.CredentialID != auth.ID || group.Model != homePluginModel {
 						t.Errorf("unexpected release group: %+v", group)
 					}
 					releases++
@@ -202,7 +203,7 @@ func TestHomeExecutorDispatchLifecycleRejections(t *testing.T) {
 					if record.Provider == t.Name() {
 						break
 					}
-					if record.AuthID == homePluginAuth {
+					if record.AuthID == auth.ID {
 						t.Errorf("unexpected account usage from lifecycle rejection: %+v", record)
 					}
 				}

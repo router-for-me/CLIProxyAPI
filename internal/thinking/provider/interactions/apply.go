@@ -108,6 +108,11 @@ func stripInteractionsThinkingFieldsDoc(doc *ojson.Doc) {
 		"generation_config.thinkingSummaries",
 		"generation_config.thinking_config",
 		"generation_config.thinkingConfig",
+	} {
+		_ = util.DeleteJSONDocIfExists(doc, path)
+	}
+	deletedCamelGenConfig := false
+	for _, path := range []string{
 		"generationConfig.thinkingLevel",
 		"generationConfig.thinking_level",
 		"generationConfig.thinkingBudget",
@@ -115,8 +120,16 @@ func stripInteractionsThinkingFieldsDoc(doc *ojson.Doc) {
 		"generationConfig.thinkingSummaries",
 		"generationConfig.thinking_summaries",
 		"generationConfig.thinkingConfig",
+		"generationConfig.thinking_config",
 	} {
-		_ = util.DeleteJSONDocIfExists(doc, path)
+		if doc.Get(path).Exists() && util.DeleteJSONDocIfExists(doc, path) == nil {
+			deletedCamelGenConfig = true
+		}
+	}
+	if deletedCamelGenConfig {
+		if gc := doc.Get("generationConfig"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
+			_ = util.DeleteJSONDocIfExists(doc, "generationConfig")
+		}
 	}
 }
 
@@ -138,6 +151,8 @@ func originalInteractionsThinkingSummariesDoc(doc *ojson.Doc) (string, bool) {
 	for _, path := range []string{
 		"generation_config.thinking_summaries",
 		"generation_config.thinkingSummaries",
+		"generationConfig.thinking_summaries",
+		"generationConfig.thinkingSummaries",
 	} {
 		value := doc.Get(path)
 		if value.Type != ojson.String {
@@ -157,6 +172,10 @@ func originalInteractionsIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 		"generation_config.thinking_config.includeThoughts",
 		"generation_config.thinkingConfig.include_thoughts",
 		"generation_config.thinkingConfig.includeThoughts",
+		"generationConfig.thinking_config.include_thoughts",
+		"generationConfig.thinking_config.includeThoughts",
+		"generationConfig.thinkingConfig.include_thoughts",
+		"generationConfig.thinkingConfig.includeThoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:
