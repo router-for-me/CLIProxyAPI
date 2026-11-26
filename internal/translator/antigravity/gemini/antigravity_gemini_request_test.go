@@ -1958,3 +1958,234 @@ func TestConvertGeminiRequestToAntigravity_NormalizesSnakeCaseFunctionResponsePa
 		t.Errorf("parts[1].file_data should be removed; part=%s", parts[1].Raw)
 	}
 }
+
+func TestConvertGeminiRequestToAntigravity_PreservesMixedSnakeCaseFunctionCallAndCamelCaseResponse(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "read file"}]},
+			{"role": "model", "parts": [{"function_call": {"id": "call_1", "name": "read", "args": {}}}]},
+			{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "read", "response": {"content": "ok"}}}]}
+		]
+	}`)
+
+	out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+	}
+
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 content turns, got %d; out=%s", len(contents), out)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Errorf("contents[2].role = %q, want user; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.functionResponse.id").String(); got != "call_1" {
+		t.Errorf("contents[2].parts[0].functionResponse.id = %q, want call_1; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read" {
+		t.Errorf("contents[2].parts[0].functionResponse.name = %q, want read; out=%s", got, out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesOmittedRoleFunctionCallWithSnakeCaseResponse(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "read file"}]},
+			{"parts": [{"functionCall": {"id": "call_1", "name": "read", "args": {}}}]},
+			{"role": "user", "parts": [{"function_response": {"id": "call_1", "name": "read", "response": {"content": "ok"}}}]}
+		]
+	}`)
+
+	out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+	}
+
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 content turns, got %d; out=%s", len(contents), out)
+	}
+	if got := contents[1].Get("role").String(); got != "model" {
+		t.Errorf("contents[1].role = %q, want model; out=%s", got, out)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Errorf("contents[2].role = %q, want user; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.function_response.id").String(); got != "call_1" {
+		t.Errorf("contents[2].parts[0].function_response.id = %q, want call_1; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.function_response.name").String(); got != "read" {
+		t.Errorf("contents[2].parts[0].function_response.name = %q, want read; out=%s", got, out)
+	}
+}
+
+func TestFixCLIToolResponse_SnakeCaseAndMixedCasing(t *testing.T) {
+	t.Run("mixed_function_call_and_functionResponse", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "user", "parts": [{"text": "read file"}]},
+					{"role": "model", "parts": [{"function_call": {"id": "call_1", "name": "read", "args": {}}}]},
+					{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "read", "response": {"content": "ok"}}}]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 3 {
+			t.Fatalf("expected 3 contents, got %d; out=%s", len(contents), out)
+		}
+		if got := contents[2].Get("role").String(); got != "function" {
+			t.Errorf("contents[2].role = %q, want function; out=%s", got, out)
+		}
+		if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read" {
+			t.Errorf("contents[2].parts[0].functionResponse.name = %q, want read; out=%s", got, out)
+		}
+	})
+
+	t.Run("mixed_functionCall_and_function_response_with_sibling_inline_data_and_empty_name", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [{"functionCall": {"id": "c1", "name": "screenshot", "args": {}}}]},
+					{"role": "user", "parts": [
+						{"function_response": {"id": "c1", "name": "", "response": {"ok": true}}},
+						{"inline_data": {"mime_type": "image/png", "data": "QUJD"}}
+					]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 2 {
+			t.Fatalf("expected 2 contents, got %d; out=%s", len(contents), out)
+		}
+		if got := contents[1].Get("role").String(); got != "function" {
+			t.Errorf("contents[1].role = %q, want function; out=%s", got, out)
+		}
+		part := contents[1].Get("parts.0")
+		if part.Get("functionResponse").Exists() {
+			t.Errorf("unexpected sibling camelCase functionResponse injected into snake_case part: %s", part.Raw)
+		}
+		if got := part.Get("function_response.name").String(); got != "screenshot" {
+			t.Errorf("function_response.name = %q, want screenshot; part=%s", got, part.Raw)
+		}
+		if got := part.Get("function_response.parts.0.inlineData.data").String(); got != "QUJD" {
+			t.Errorf("function_response.parts[0].inlineData.data = %q, want QUJD; part=%s", got, part.Raw)
+		}
+	})
+
+	t.Run("snake_case_parallel_calls_select_by_id_and_drop_excess", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [
+						{"function_call": {"id": "c1", "name": "a", "args": {}}},
+						{"function_call": {"id": "c2", "name": "b", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"function_response": {"id": "c3", "name": "extra", "response": {"v": 3}}},
+						{"function_response": {"id": "c2", "name": "b", "response": {"v": 2}}},
+						{"function_response": {"id": "c1", "name": "a", "response": {"v": 1}}}
+					]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.1.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 matched function_response parts, got %d; out=%s", len(parts), out)
+		}
+		if parts[0].Get("functionResponse").Exists() || parts[1].Get("functionResponse").Exists() {
+			t.Errorf("unexpected sibling camelCase functionResponse injected; out=%s", out)
+		}
+		if got := parts[0].Get("function_response.id").String(); got != "c1" {
+			t.Errorf("parts[0].function_response.id = %q, want c1; out=%s", got, out)
+		}
+		if got := parts[1].Get("function_response.id").String(); got != "c2" {
+			t.Errorf("parts[1].function_response.id = %q, want c2; out=%s", got, out)
+		}
+	})
+
+	t.Run("snake_case_consecutive_function_response_turns_grouped", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [
+						{"function_call": {"id": "c1", "name": "a", "args": {}}},
+						{"function_call": {"id": "c2", "name": "b", "args": {}}}
+					]},
+					{"role": "user", "parts": [{"function_response": {"id": "c1", "name": "a", "response": {"v": 1}}}]},
+					{"role": "user", "parts": [{"function_response": {"id": "c2", "name": "b", "response": {"v": 2}}}]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 2 {
+			t.Fatalf("expected 2 contents after grouping, got %d; out=%s", len(contents), out)
+		}
+		parts := contents[1].Get("parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 grouped parts, got %d; out=%s", len(parts), out)
+		}
+		if got := parts[0].Get("function_response.id").String(); got != "c1" {
+			t.Errorf("parts[0].function_response.id = %q, want c1; out=%s", got, out)
+		}
+		if got := parts[1].Get("function_response.id").String(); got != "c2" {
+			t.Errorf("parts[1].function_response.id = %q, want c2; out=%s", got, out)
+		}
+	})
+
+	t.Run("snake_case_equal_count_out_of_order_backfills_name_by_id", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [
+						{"function_call": {"id": "c1", "name": "read", "args": {}}},
+						{"function_call": {"id": "c2", "name": "write", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"function_response": {"id": "c2", "name": "", "response": {"v": 2}}},
+						{"function_response": {"id": "c1", "name": "", "response": {"v": 1}}}
+					]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.1.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 function_response parts, got %d; out=%s", len(parts), out)
+		}
+		if parts[0].Get("functionResponse").Exists() || parts[1].Get("functionResponse").Exists() {
+			t.Errorf("unexpected sibling camelCase functionResponse injected; out=%s", out)
+		}
+		if gotID, gotName := parts[0].Get("function_response.id").String(), parts[0].Get("function_response.name").String(); gotID != "c2" || gotName != "write" {
+			t.Errorf("parts[0] = (%q, %q), want (c2, write); out=%s", gotID, gotName, out)
+		}
+		if gotID, gotName := parts[1].Get("function_response.id").String(), parts[1].Get("function_response.name").String(); gotID != "c1" || gotName != "read" {
+			t.Errorf("parts[1] = (%q, %q), want (c1, read); out=%s", gotID, gotName, out)
+		}
+	})
+}
