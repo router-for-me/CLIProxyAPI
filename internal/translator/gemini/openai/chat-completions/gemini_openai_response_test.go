@@ -131,6 +131,32 @@ func TestConvertGeminiResponseToOpenAINonStream_TextPrecedenceOverAudioTranscrip
 	}
 }
 
+func TestConvertGeminiResponseToOpenAINonStream_SnakeCaseAudioTranscriptionProducesContent(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"parts":[{"audio_transcription":{"text":"hello"}}]},"finishReason":"MALFORMED_RESPONSE"}]}`)
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+
+	content := ojson.GetBytesNoCopy(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "hello" {
+		t.Fatalf("expected content to carry snake_case transcript, got %v. Output: %s", content.Raw, result)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAI_SnakeCaseAudioTranscriptionStreamsContent(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"audio_transcription":{"text":"hello"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}`)
+	result := ConvertGeminiResponseToOpenAI(ctx, "model", nil, nil, chunk, &param)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 results (payload + terminal), got %d", len(result))
+	}
+
+	content := ojson.GetBytesNoCopy(result[0], "choices.0.delta.content")
+	if !content.Exists() || content.String() != "hello" {
+		t.Fatalf("expected delta.content to carry snake_case transcript, got %v. Output: %s", content.Raw, result[0])
+	}
+}
+
 func TestConvertGeminiResponseToOpenAI_PinsSanitizedNameMapPerStream(t *testing.T) {
 	ctx := context.Background()
 
