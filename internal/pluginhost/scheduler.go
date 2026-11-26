@@ -147,22 +147,13 @@ func (h *Host) callSchedulerContinuity(ctx context.Context, record capabilityRec
 	return resp, true, nil
 }
 
-// SchedulerWantsQuotaSignals reports whether any active scheduler opted into quota snapshots.
-// The manager then attaches them to the candidates, and buildSchedulerSubRequest strips them
-// again for every scheduler in the chain that did not opt in.
+// SchedulerWantsQuotaSignals reports whether pick requests should carry candidates' quota
+// snapshots. While any scheduler is active the answer is yes: buildSchedulerSubRequest
+// removes them for every scheduler that did not opt in, and attaching them up front keeps
+// them available when a pick waits for, or retries against, a hot-reloaded replacement
+// whose opt-in differs from the instance that was active when the request was built.
 func (h *Host) SchedulerWantsQuotaSignals() bool {
-	if h == nil {
-		return false
-	}
-	for _, record := range h.activeRecords() {
-		if h.isPluginFused(record.id) || record.plugin.Capabilities.Scheduler == nil {
-			continue
-		}
-		if schedulerWantsQuotaSignals(record.plugin.Capabilities) {
-			return true
-		}
-	}
-	return false
+	return h.HasScheduler()
 }
 
 func (h *Host) schedulerRecord() *capabilityRecord {

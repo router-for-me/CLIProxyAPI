@@ -74,8 +74,9 @@ func TestHostSchedulerWantsQuotaSignals(t *testing.T) {
 		priority: 1,
 		plugin:   pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: noopScheduler()}},
 	})
-	if hostDefault.SchedulerWantsQuotaSignals() {
-		t.Fatal("hostDefault.SchedulerWantsQuotaSignals() = true, want false")
+	// The host asks for snapshots whenever a scheduler is active and strips them per plugin.
+	if !hostDefault.SchedulerWantsQuotaSignals() {
+		t.Fatal("hostDefault.SchedulerWantsQuotaSignals() = false, want true")
 	}
 
 	hostQuota := newHostWithRecords(capabilityRecord{
@@ -88,6 +89,10 @@ func TestHostSchedulerWantsQuotaSignals(t *testing.T) {
 	})
 	if !hostQuota.SchedulerWantsQuotaSignals() {
 		t.Fatal("hostQuota.SchedulerWantsQuotaSignals() = false, want true")
+	}
+
+	if New().SchedulerWantsQuotaSignals() {
+		t.Fatal("host without schedulers: SchedulerWantsQuotaSignals() = true, want false")
 	}
 
 	var nilHost *Host
@@ -185,5 +190,33 @@ func TestSchedulerQuotaSignals_OnlyOptedInSchedulersInChainSeeQuota(t *testing.T
 	quotaReq.Candidates[0].Quota.Signals["X-Codex-Secondary-Reset-At"] = "0"
 	if signals["X-Codex-Secondary-Reset-At"] != "1794130700" {
 		t.Fatal("scheduler mutation leaked into the host's quota signals")
+	}
+}
+
+// A pick built while a non-opted-in scheduler was active must still give quota to an
+// opted-in replacement it waits for or retries against after a hot reload.
+func TestSchedulerQuotaSignals_SubRequestFollowsRecordOptIn(t *testing.T) {
+	req := pluginapi.SchedulerPickRequest{
+		Provider: "codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{{
+			ID:       "auth-a",
+			Provider: "codex",
+			Quota:    &pluginapi.SchedulerQuotaSnapshot{Signals: map[string]string{"X-Codex-Secondary-Reset-At": "1794130700"}},
+		}},
+	}
+	before := capabilityRecord{id: "sched", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: noopScheduler()}}}
+	after := capabilityRecord{id: "sched", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+		Scheduler:             noopScheduler(),
+		SchedulerQuotaSignals: true,
+	}}}
+	if got := buildSchedulerSubRequest(before, req, req.Candidates); got.Candidates[0].Quota != nil {
+		t.Fatalf("non-opted-in scheduler sub-request quota = %+v, want nil", got.Candidates[0].Quota)
+	}
+	got := buildSchedulerSubRequest(after, req, req.Candidates)
+	if got.Candidates[0].Quota == nil || got.Candidates[0].Quota.Signals["X-Codex-Secondary-Reset-At"] != "1794130700" {
+		t.Fatalf("opted-in replacement sub-request quota = %+v, want the host snapshot", got.Candidates[0].Quota)
+	}
+	if req.Candidates[0].Quota == nil {
+		t.Fatal("building a sub-request cleared the host request's snapshot")
 	}
 }
