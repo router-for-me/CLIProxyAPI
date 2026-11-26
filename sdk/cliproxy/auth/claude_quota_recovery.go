@@ -113,7 +113,7 @@ func claudeQuotaCandidate(a *Auth) bool {
 	// Under a quota, a sibling result can leave an old transient error on the
 	// auth. The live deadlines below show whether it still blocks. Other
 	// errors, such as 401 or 403, are about the credential and stay.
-	staleTransientError := a.Quota.Exceeded && (a.Quota.Reason == "quota" || a.Quota.Reason == "credential_quota") && isTransientError(a.LastError)
+	staleTransientError := isQuotaCooldown(a.Quota) && isTransientError(a.LastError)
 	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests && !staleTransientError {
 		return false
 	}
@@ -131,7 +131,7 @@ func claudeQuotaCandidate(a *Auth) bool {
 		if hasLiveNonQuotaBlock(s, now) || hasLiveNonQuotaBlock(s.credentialQuotaShadow, now) {
 			return false
 		}
-		quota := isQuotaModelState(s)
+		quota := isQuotaCooldown(s.Quota)
 		// A quota state can keep an old error from before the quota. The live
 		// deadlines above show whether that error still blocks the model. A
 		// model without quota passes only with a transient error whose retry
@@ -158,7 +158,7 @@ func hasLiveNonQuotaBlock(s *ModelState, now time.Time) bool {
 		return true
 	}
 	// The reset keeps a disabled status, so it is not a block here.
-	return s.Status != StatusDisabled && !isQuotaModelState(s) && isModelStateActiveCooldown(s, now)
+	return s.Status != StatusDisabled && !isQuotaCooldown(s.Quota) && isModelStateActiveCooldown(s, now)
 }
 
 // isTransientError matches the statuses that MarkResult cools down as
@@ -167,8 +167,8 @@ func isTransientError(err *Error) bool {
 	return err != nil && (err.HTTPStatus == http.StatusRequestTimeout || err.HTTPStatus >= http.StatusInternalServerError)
 }
 
-func isQuotaModelState(s *ModelState) bool {
-	return s.Quota.Exceeded && (s.Quota.Reason == "quota" || s.Quota.Reason == "credential_quota")
+func isQuotaCooldown(q QuotaState) bool {
+	return q.Exceeded && (q.Reason == "quota" || q.Reason == "credential_quota")
 }
 
 func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
@@ -226,10 +226,7 @@ func (m *Manager) runClaudeQuotaProbe(ctx context.Context, a *Auth, changes, epo
 }
 
 func (m *Manager) probeClaudeQuota(ctx context.Context, a *Auth) {
-	probeCtx := ctx
-	if rt := m.roundTripperFor(a); rt != nil {
-		probeCtx = context.WithValue(probeCtx, "cliproxy.roundtripper", rt)
-	}
+	probeCtx := m.WithAuthTransport(ctx, a)
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, claudeUsageURL, nil)
 	if err != nil {
 		return
