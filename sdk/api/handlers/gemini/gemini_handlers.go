@@ -145,8 +145,9 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		})
 		return
 	}
-	action := strings.Split(strings.TrimPrefix(request.Action, "/"), ":")
-	if len(action) != 2 || action[1] == "" {
+	trimmedAction := strings.TrimPrefix(request.Action, "/")
+	colonIdx := strings.LastIndex(trimmedAction, ":")
+	if colonIdx <= 0 || colonIdx == len(trimmedAction)-1 {
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("%s not found.", c.Request.URL.Path),
@@ -156,7 +157,8 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		return
 	}
 
-	method := action[1]
+	modelName := trimmedAction[:colonIdx]
+	method := trimmedAction[colonIdx+1:]
 	rawJSON, errRead := c.GetRawData()
 	if errRead != nil && c.Request != nil && c.Request.Body != nil {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), handlers.ErrorResponse{
@@ -170,11 +172,11 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 
 	switch method {
 	case "generateContent":
-		h.handleGenerateContent(c, action[0], rawJSON)
+		h.handleGenerateContent(c, modelName, rawJSON)
 	case "streamGenerateContent":
-		h.handleStreamGenerateContent(c, action[0], rawJSON)
+		h.handleStreamGenerateContent(c, modelName, rawJSON)
 	case "countTokens":
-		h.handleCountTokens(c, action[0], rawJSON)
+		h.handleCountTokens(c, modelName, rawJSON)
 	default:
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
