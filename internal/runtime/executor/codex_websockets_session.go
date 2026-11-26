@@ -96,6 +96,10 @@ type codexWebsocketSession struct {
 	// active response. An empty id means no response.created was seen yet.
 	activeResponseID       string
 	activeResponseTerminal bool
+	duplexPendingCreates   int
+	duplexUnackSteers      int
+	duplexAcceptedSteers   map[string]codexDuplexAcceptedSteer
+	duplexWaitingParent    string
 
 	readerConn *websocket.Conn
 
@@ -108,6 +112,11 @@ type codexWebsocketSession struct {
 	lastEventMu   sync.Mutex
 	lastEventConn *websocket.Conn
 	lastEventType string
+}
+
+type codexDuplexAcceptedSteer struct {
+	parent      string
+	successorID string
 }
 
 type codexWebsocketRead struct {
@@ -136,6 +145,10 @@ func (s *codexWebsocketSession) setActiveLocked(conn *websocket.Conn, ch chan co
 	s.activeCh = ch
 	s.activeResponseID = ""
 	s.activeResponseTerminal = false
+	s.duplexPendingCreates = 0
+	s.duplexUnackSteers = 0
+	s.duplexAcceptedSteers = nil
+	s.duplexWaitingParent = ""
 	if conn != nil && ch != nil {
 		activeCtx, activeCancel := context.WithCancel(context.Background())
 		s.activeDone = activeCtx.Done()
@@ -149,14 +162,81 @@ func (s *codexWebsocketSession) activate(conn *websocket.Conn) chan codexWebsock
 	}
 	ch := make(chan codexWebsocketRead, 4096)
 	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
 	if s.terminalConn == conn && s.terminalErr != nil {
-		ch <- codexWebsocketRead{conn: conn, err: s.terminalErr}
+		errTerminal := s.terminalErr
+		s.activeMu.Unlock()
+		ch <- codexWebsocketRead{conn: conn, err: errTerminal}
 		close(ch)
 		return ch
 	}
 	s.setActiveLocked(conn, ch)
+	s.activeMu.Unlock()
+	extendCodexWebsocketReadDeadline(conn)
 	return ch
+}
+
+func (s *codexWebsocketSession) hasActiveTurnLocked(conn *websocket.Conn) bool {
+	if s.activeConn != conn || s.activeCh == nil {
+		return false
+	}
+	if !s.activeResponseTerminal {
+		return true
+	}
+	if s.duplexPendingCreates > 0 || s.duplexUnackSteers > 0 {
+		return true
+	}
+	for _, accepted := range s.duplexAcceptedSteers {
+		if accepted.successorID == "" && accepted.parent != s.duplexWaitingParent {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *codexWebsocketSession) hasActiveTurn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	return s.hasActiveTurnLocked(conn)
+}
+
+func (s *codexWebsocketSession) beginDuplexCreate(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return true
+	}
+	s.activeMu.Lock()
+	wasActive := s.hasActiveTurnLocked(conn)
+	if s.activeConn == conn && s.activeCh != nil {
+		s.duplexPendingCreates++
+	}
+	s.activeMu.Unlock()
+	return wasActive
+}
+
+func (s *codexWebsocketSession) beginDuplexSteer(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return true
+	}
+	s.activeMu.Lock()
+	wasActive := s.hasActiveTurnLocked(conn)
+	if s.activeConn == conn && s.activeCh != nil {
+		s.duplexUnackSteers++
+	}
+	s.activeMu.Unlock()
+	return wasActive
+}
+
+func (s *codexWebsocketSession) clearDuplexWaitingParent(conn *websocket.Conn) {
+	if s == nil || conn == nil {
+		return
+	}
+	s.activeMu.Lock()
+	if s.activeConn == conn && s.activeCh != nil {
+		s.duplexWaitingParent = ""
+	}
+	s.activeMu.Unlock()
 }
 
 func (s *codexWebsocketSession) resetTerminalError(conn *websocket.Conn) {
@@ -222,6 +302,10 @@ func (s *codexWebsocketSession) clearActive(conn *websocket.Conn, ch chan codexW
 	s.activeCh = nil
 	s.activeResponseID = ""
 	s.activeResponseTerminal = false
+	s.duplexPendingCreates = 0
+	s.duplexUnackSteers = 0
+	s.duplexAcceptedSteers = nil
+	s.duplexWaitingParent = ""
 	if s.activeCancel != nil {
 		s.activeCancel()
 	}
@@ -333,6 +417,9 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 		sessionKind := sessionObjectKind(s)
 		log.Debugf("codex websockets: upstream ping received session=%s session_object=%s ping_bytes=%d", sessionID, sessionKind, len(appData))
 		log.Debugf("codex websockets: upstream pong write started session=%s session_object=%s", sessionID, sessionKind)
+		if s.hasActiveTurn(conn) {
+			extendCodexWebsocketReadDeadline(conn)
+		}
 		start := time.Now()
 		// Gorilla websocket allows concurrent WriteControl with WriteMessage.
 		// Avoid writeMu here so keepalive pongs are not starved by long payload writes.
@@ -343,6 +430,12 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 			log.Debugf("codex websockets: upstream pong replied session=%s session_object=%s duration=%v", sessionID, sessionKind, time.Since(start))
 		}
 		return errPong
+	})
+	conn.SetPongHandler(func(string) error {
+		if s.hasActiveTurn(conn) {
+			extendCodexWebsocketReadDeadline(conn)
+		}
+		return nil
 	})
 	defaultCloseHandler := conn.CloseHandler()
 	conn.SetCloseHandler(func(code int, text string) error {
@@ -554,6 +647,7 @@ func configureRawCodexWebsocketConn(conn *websocket.Conn, authID string, wsURL s
 	conn.SetPingHandler(func(appData string) error {
 		log.Debugf("codex websockets: upstream ping received session= session_object=none ping_bytes=%d", len(appData))
 		log.Debugf("codex websockets: upstream pong write started session= session_object=none")
+		extendCodexWebsocketReadDeadline(conn)
 		start := time.Now()
 		errPong := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
 		if errPong != nil {
@@ -562,6 +656,10 @@ func configureRawCodexWebsocketConn(conn *websocket.Conn, authID string, wsURL s
 			log.Debugf("codex websockets: upstream pong replied session= session_object=none duration=%v", time.Since(start))
 		}
 		return errPong
+	})
+	conn.SetPongHandler(func(string) error {
+		extendCodexWebsocketReadDeadline(conn)
+		return nil
 	})
 }
 
@@ -793,7 +891,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		return
 	}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		extendCodexWebsocketReadDeadline(conn)
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			sess.connMu.Lock()
@@ -868,36 +966,96 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			// id-less failure ends the running one. Success terminals only
 			// carry response.id, and one without an id is left unattributed,
 			// as before.
+			effectiveEventType := eventType
+			if effectiveEventType == "" {
+				effectiveEventType = helps.CodexResponseEventType(payload)
+			}
 			responseID := strings.Clone(ojson.GetBytesNoCopy(payload, "response.id").String())
-			if eventType == "response.created" {
-				if responseID != "" {
-					sess.activeMu.Lock()
-					if sess.responseStateConn == conn && sess.activeConn == conn && sess.activeCh != nil {
+			if effectiveEventType == "response.created" {
+				parent := strings.Clone(ojson.GetBytesNoCopy(payload, "response.previous_response_id").String())
+				sess.activeMu.Lock()
+				if sess.responseStateConn == conn && sess.activeConn == conn && sess.activeCh != nil {
+					if parent == "" {
+						parent = sess.activeResponseID
+					}
+					if responseID != "" {
 						sess.activeResponseID = responseID
 						sess.activeResponseTerminal = false
 					}
-					sess.activeMu.Unlock()
+					if sess.duplexPendingCreates > 0 {
+						sess.duplexPendingCreates--
+					}
+					sess.duplexWaitingParent = ""
+					for id, accepted := range sess.duplexAcceptedSteers {
+						if accepted.parent == parent && accepted.successorID == "" {
+							accepted.successorID = responseID
+							sess.duplexAcceptedSteers[id] = accepted
+						}
+					}
 				}
-			} else if isTerminalEvent(eventType) {
-				failure := eventType == "error" || eventType == "response.failed"
+				sess.activeMu.Unlock()
+			} else if strings.HasPrefix(effectiveEventType, "response.steer.") {
+				steerID := strings.Clone(ojson.GetBytesNoCopy(payload, "steer.id").String())
+				steerParent := strings.Clone(ojson.GetBytesNoCopy(payload, "steer.previous_response_id").String())
+				sess.activeMu.Lock()
+				if sess.responseStateConn == conn && sess.activeConn == conn && sess.activeCh != nil {
+					if steerParent == "" {
+						steerParent = sess.activeResponseID
+					}
+					switch effectiveEventType {
+					case "response.steer.accepted":
+						if sess.duplexUnackSteers > 0 {
+							sess.duplexUnackSteers--
+						}
+						if sess.duplexAcceptedSteers == nil {
+							sess.duplexAcceptedSteers = make(map[string]codexDuplexAcceptedSteer)
+						}
+						sess.duplexAcceptedSteers[steerID] = codexDuplexAcceptedSteer{parent: steerParent}
+					case "response.steer.failed":
+						if _, accepted := sess.duplexAcceptedSteers[steerID]; accepted {
+							delete(sess.duplexAcceptedSteers, steerID)
+						} else if sess.duplexUnackSteers > 0 {
+							sess.duplexUnackSteers--
+						}
+					case "response.steer.pending":
+						sess.duplexWaitingParent = steerParent
+					}
+				}
+				sess.activeMu.Unlock()
+			} else if isTerminalEvent(effectiveEventType) {
+				failure := effectiveEventType == "error" || effectiveEventType == "response.failed"
 				if failure && responseID == "" {
 					responseID = strings.Clone(ojson.GetBytesNoCopy(payload, "response_id").String())
 				}
 				if responseID != "" || failure {
 					sess.activeMu.Lock()
 					if sess.responseStateConn == conn {
+						runningActive := sess.activeResponseID != "" && !sess.activeResponseTerminal
 						terminalID := responseID
-						if terminalID == "" {
+						if terminalID == "" && runningActive {
 							// Id-less failure: the running response ended.
 							terminalID = sess.activeResponseID
 						}
-						if terminalID != "" && eventType != "error" {
+						if terminalID != "" && effectiveEventType != "error" {
 							// Match the pre-existing terminal-ID recording,
 							// which never covered error events.
 							sess.terminalResponseIDs[terminalID] = struct{}{}
 						}
-						if terminalID != "" && sess.activeResponseID == terminalID {
+						if runningActive && terminalID != "" && sess.activeResponseID == terminalID {
 							sess.activeResponseTerminal = true
+						} else if failure {
+							if sess.duplexPendingCreates > 0 {
+								sess.duplexPendingCreates--
+							} else if sess.activeResponseID == "" {
+								sess.activeResponseTerminal = true
+							}
+						}
+						if terminalID != "" {
+							for id, accepted := range sess.duplexAcceptedSteers {
+								if accepted.successorID == terminalID {
+									delete(sess.duplexAcceptedSteers, id)
+								}
+							}
 						}
 					}
 					sess.activeMu.Unlock()

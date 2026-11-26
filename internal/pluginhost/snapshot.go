@@ -54,16 +54,30 @@ func emptySnapshot() *Snapshot {
 }
 
 func (h *Host) activeRecords() []capabilityRecord {
-	return h.activeRecordsFromSnapshot(h.Snapshot())
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.activeRecordsFromSnapshotLocked(h.Snapshot())
 }
 
 func (h *Host) activeRecordsFromSnapshot(snap *Snapshot) []capabilityRecord {
+	if h == nil || snap == nil || len(snap.records) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.activeRecordsFromSnapshotLocked(snap)
+}
+
+func (h *Host) activeRecordsFromSnapshotLocked(snap *Snapshot) []capabilityRecord {
 	if snap == nil || len(snap.records) == 0 {
 		return nil
 	}
 	out := make([]capabilityRecord, 0, len(snap.records))
 	for _, record := range snap.records {
-		if h.recordCurrent(record) {
+		if h.recordCurrentLocked(record) {
 			out = append(out, record)
 		}
 	}

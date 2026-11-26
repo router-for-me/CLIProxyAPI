@@ -3,14 +3,22 @@ package pluginhost
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
+
+// HomeLocalExecutorFence captures the host snapshot before asking Home for a grant.
+func (h *Host) HomeLocalExecutorFence() func() bool {
+	snapshot := h.Snapshot()
+	return func() bool { return snapshot.enabled && h.Snapshot() == snapshot }
+}
 
 // executorPluginReady reports whether the named plugin can actually execute a
 // request right now: it must declare an executor capability AND resolve a
@@ -75,7 +83,7 @@ func (a *executorAdapter) supportsExecutorFormats(req coreexecutor.Request, opts
 
 // PluginExecutorRequestToFormat reports the executor input format selected for a direct plugin executor route.
 func (h *Host) PluginExecutorRequestToFormat(pluginID string, req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
-	adapter, errAdapter := h.executorAdapterForPlugin(pluginID, "")
+	adapter, errAdapter := h.executorAdapterForPlugin(nil, pluginID, "")
 	if errAdapter != nil {
 		return ""
 	}
@@ -90,7 +98,7 @@ func (h *Host) ExecutePluginExecutor(ctx context.Context, pluginID string, req c
 
 // ExecutePluginExecutorWithAttribution executes a request with the named plugin executor and returns optional plugin attribution.
 func (h *Host) ExecutePluginExecutorWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, *pluginapi.UsageAttribution, error) {
-	adapter, errAdapter := h.executorAdapterForPlugin(pluginID, "")
+	adapter, errAdapter := h.executorAdapterForPlugin(ctx, pluginID, "")
 	if errAdapter != nil {
 		return coreexecutor.Response{}, nil, errAdapter
 	}
@@ -105,7 +113,7 @@ func (h *Host) ExecutePluginExecutorStream(ctx context.Context, pluginID string,
 
 // ExecutePluginExecutorStreamWithAttribution executes a streaming request with the named plugin executor and returns optional plugin attribution.
 func (h *Host) ExecutePluginExecutorStreamWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, *pluginapi.UsageAttribution, error) {
-	adapter, errAdapter := h.executorAdapterForPlugin(pluginID, "")
+	adapter, errAdapter := h.executorAdapterForPlugin(ctx, pluginID, "")
 	if errAdapter != nil {
 		return nil, nil, errAdapter
 	}
@@ -114,7 +122,7 @@ func (h *Host) ExecutePluginExecutorStreamWithAttribution(ctx context.Context, p
 
 // CountPluginExecutor executes a count-tokens request with the named plugin executor without changing the requested model.
 func (h *Host) CountPluginExecutor(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
-	adapter, errAdapter := h.executorAdapterForPlugin(pluginID, "")
+	adapter, errAdapter := h.executorAdapterForPlugin(ctx, pluginID, "")
 	if errAdapter != nil {
 		return coreexecutor.Response{}, errAdapter
 	}
@@ -153,14 +161,15 @@ func (h *Host) ResolveHomePluginExecutor(pluginID, authProvider string) (coreaut
 	if authProvider == "" {
 		return nil, fmt.Errorf("Home credential provider is required for plugin executor %q", pluginID)
 	}
-	adapter, errAdapter := h.executorAdapterForPlugin(pluginID, authProvider)
+	adapter, errAdapter := h.executorAdapterForPlugin(nil, pluginID, authProvider)
 	if errAdapter != nil {
 		return nil, errAdapter
 	}
 	return adapter, nil
 }
 
-func (h *Host) executorAdapterForPlugin(pluginID, authProvider string) (*executorAdapter, error) {
+func (h *Host) executorAdapterForPlugin(ctx context.Context, pluginID, authProvider string) (*executorAdapter, error) {
+	grant, local := homeplugins.ExecutorGrant(ctx)
 	if h == nil {
 		return nil, fmt.Errorf("plugin host is unavailable")
 	}
@@ -169,12 +178,31 @@ func (h *Host) executorAdapterForPlugin(pluginID, authProvider string) (*executo
 		return nil, fmt.Errorf("target executor plugin id is required")
 	}
 	snapshot := h.Snapshot()
-	if authProvider != "" && !snapshot.enabled {
+	if !local && authProvider != "" && !snapshot.enabled {
 		return nil, fmt.Errorf("plugin executor %q is disabled", pluginID)
 	}
 	for _, record := range h.activeRecordsFromSnapshot(snapshot) {
-		if record.id == pluginID {
-			return h.executorAdapterForRecord(record, authProvider)
+		if record.id != pluginID {
+			continue
+		}
+		if local && (grant.Plugin != pluginID || grant.Version != record.version || !grant.Valid() ||
+			!executorScopeAllowsStaticModels(record.plugin.Capabilities)) {
+			break
+		}
+		adapter, errAdapter := h.executorAdapterForRecord(record, authProvider)
+		if local && (errAdapter != nil || len(adapter.inputFormats) == 0 || len(adapter.outputFormats) == 0) {
+			break
+		}
+		if local {
+			adapter.homePlugin = record.loaded
+		}
+		return adapter, errAdapter
+	}
+	if local {
+		return nil, &coreauth.Error{
+			Code:       coreauth.ErrorCodeHomeExecutorPluginUnavailable,
+			Message:    fmt.Sprintf("plugin executor %q is unavailable", pluginID),
+			HTTPStatus: http.StatusServiceUnavailable,
 		}
 	}
 	return nil, fmt.Errorf("plugin executor %q is missing or disabled", pluginID)
