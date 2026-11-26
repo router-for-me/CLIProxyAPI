@@ -3161,3 +3161,241 @@ func TestConvertAntigravityResponseToClaudeNonStream_UniqueFallbackToolUseIDsAcr
 		})
 	}
 }
+
+func TestConvertAntigravityResponseToClaudeStream_UsageCachedTokensAndCpaUsageMetadata(t *testing.T) {
+	ctx := context.Background()
+	requestJSON := []byte(`{"model":"claude-opus-5-5"}`)
+
+	t.Run("cpaUsageMetadata_subtracts_cached_in_message_start_and_retained_on_DONE", func(t *testing.T) {
+		chunk1 := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": "hello"}]}}],
+				"cpaUsageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 10, "totalTokenCount": 1010},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-1"
+			}
+		}`)
+		chunk2 := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": " world"}]}}],
+				"cpaUsageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 22, "thoughtsTokenCount": 3, "totalTokenCount": 1025},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-1"
+			}
+		}`)
+
+		var param any
+		out := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk1, &param), nil)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk2, &param), nil)...)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+		outText := string(out)
+
+		messageStart := sseDataForEvent(t, outText, "message_start")
+		if got := ojson.Get(messageStart, "message.usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_start input_tokens = %d, want 200: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_start cache_read_input_tokens = %d, want 800: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.output_tokens").Int(); got != 10 {
+			t.Fatalf("message_start output_tokens = %d, want 10: %s", got, messageStart)
+		}
+
+		messageDelta := sseDataForEvent(t, outText, "message_delta")
+		if got := ojson.Get(messageDelta, "usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_delta input_tokens = %d, want 200: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_delta cache_read_input_tokens = %d, want 800: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.output_tokens").Int(); got != 25 {
+			t.Fatalf("message_delta output_tokens = %d, want 25: %s", got, messageDelta)
+		}
+	})
+
+	t.Run("single_chunk_terminal_usageMetadata_populates_message_start", func(t *testing.T) {
+		terminalChunk := []byte(`{
+			"response": {
+				"candidates": [{
+					"content": {"role": "model", "parts": [{"text": "done"}]},
+					"finishReason": "STOP"
+				}],
+				"usageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 12, "thoughtsTokenCount": 3, "totalTokenCount": 1015},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-single"
+			}
+		}`)
+
+		var param any
+		out := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, terminalChunk, &param), nil)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+		outText := string(out)
+
+		messageStart := sseDataForEvent(t, outText, "message_start")
+		if got := ojson.Get(messageStart, "message.usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_start input_tokens = %d, want 200: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_start cache_read_input_tokens = %d, want 800: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.output_tokens").Int(); got != 15 {
+			t.Fatalf("message_start output_tokens = %d, want 15: %s", got, messageStart)
+		}
+
+		messageDelta := sseDataForEvent(t, outText, "message_delta")
+		if got := ojson.Get(messageDelta, "usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_delta input_tokens = %d, want 200: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_delta cache_read_input_tokens = %d, want 800: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.output_tokens").Int(); got != 15 {
+			t.Fatalf("message_delta output_tokens = %d, want 15: %s", got, messageDelta)
+		}
+	})
+
+	t.Run("split_terminal_usage_waits_for_authoritative_usageMetadata", func(t *testing.T) {
+		chunk1 := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": "hello"}]}}],
+				"cpaUsageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 4, "totalTokenCount": 1004},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-split"
+			}
+		}`)
+		chunk2FinishNoUsage := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": " world"}]}, "finishReason": "STOP"}],
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-split"
+			}
+		}`)
+		chunk3FinalUsage := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": []}}],
+				"usageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 25, "thoughtsTokenCount": 5, "totalTokenCount": 1030},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-split"
+			}
+		}`)
+
+		var param any
+		out1 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk1, &param), nil)
+		out2 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk2FinishNoUsage, &param), nil)
+		if strings.Contains(string(out2), "event: message_delta") {
+			t.Fatalf("finish chunk without usageMetadata must defer message_delta until authoritative usage or [DONE]: %s", string(out2))
+		}
+		out3 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk3FinalUsage, &param), nil)
+		out4 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)
+
+		fullText := string(out1) + string(out2) + string(out3) + string(out4)
+		if got := strings.Count(fullText, "event: message_delta\n"); got != 1 {
+			t.Fatalf("message_delta count = %d, want 1:\n%s", got, fullText)
+		}
+		messageDelta := sseDataForEvent(t, fullText, "message_delta")
+		if got := ojson.Get(messageDelta, "usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_delta input_tokens = %d, want 200: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_delta cache_read_input_tokens = %d, want 800: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.output_tokens").Int(); got != 30 {
+			t.Fatalf("message_delta output_tokens = %d, want 30: %s", got, messageDelta)
+		}
+	})
+
+	t.Run("finish_chunk_without_usage_falls_back_to_prior_cpaUsageMetadata_on_DONE", func(t *testing.T) {
+		chunk1 := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": "hello"}]}}],
+				"cpaUsageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 10, "thoughtsTokenCount": 5, "totalTokenCount": 1015},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-fallback"
+			}
+		}`)
+		chunk2FinishNoUsage := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": "!"}]}, "finishReason": "STOP"}],
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-fallback"
+			}
+		}`)
+
+		var param any
+		out := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk1, &param), nil)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk2FinishNoUsage, &param), nil)...)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+		messageDelta := sseDataForEvent(t, string(out), "message_delta")
+		if got := ojson.Get(messageDelta, "usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_delta input_tokens = %d, want 200: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_delta cache_read_input_tokens = %d, want 800: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.output_tokens").Int(); got != 15 {
+			t.Fatalf("message_delta output_tokens = %d, want 15: %s", got, messageDelta)
+		}
+	})
+
+	t.Run("web_search_mode_keeps_message_start_output_tokens_zero_with_cached_input", func(t *testing.T) {
+		wsRequest := []byte(`{"model":"gemini-3.1-flash-lite","tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
+		wsTranslated := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+		chunk := []byte(`{
+			"response": {
+				"modelVersion": "gemini-3.1-flash-lite",
+				"responseId": "r-usage-ws",
+				"candidates": [{"content": {"parts": [{"text": "weather"}]}}],
+				"cpaUsageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 43}
+			}
+		}`)
+
+		var param any
+		out := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3.1-flash-lite", wsRequest, wsTranslated, chunk, &param), nil)
+		messageStart := sseDataForEvent(t, string(out), "message_start")
+		if got := ojson.Get(messageStart, "message.usage.input_tokens").Int(); got != 200 {
+			t.Fatalf("message_start input_tokens = %d, want 200: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_start cache_read_input_tokens = %d, want 800: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.output_tokens").Int(); got != 0 {
+			t.Fatalf("message_start output_tokens = %d, want 0: %s", got, messageStart)
+		}
+	})
+
+	t.Run("cached_exceeds_prompt_clamps_input_tokens_to_zero", func(t *testing.T) {
+		chunk := []byte(`{
+			"response": {
+				"candidates": [{"content": {"role": "model", "parts": [{"text": "ok"}]}}],
+				"cpaUsageMetadata": {"promptTokenCount": 500, "cachedContentTokenCount": 800, "candidatesTokenCount": 7},
+				"modelVersion": "claude-opus-5-5",
+				"responseId": "r-usage-clamp"
+			}
+		}`)
+
+		var param any
+		out := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk, &param), nil)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+		outText := string(out)
+
+		messageStart := sseDataForEvent(t, outText, "message_start")
+		if got := ojson.Get(messageStart, "message.usage.input_tokens").Int(); got != 0 {
+			t.Fatalf("message_start input_tokens = %d, want 0: %s", got, messageStart)
+		}
+		if got := ojson.Get(messageStart, "message.usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_start cache_read_input_tokens = %d, want 800: %s", got, messageStart)
+		}
+
+		messageDelta := sseDataForEvent(t, outText, "message_delta")
+		if got := ojson.Get(messageDelta, "usage.input_tokens").Int(); got != 0 {
+			t.Fatalf("message_delta input_tokens = %d, want 0: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 800 {
+			t.Fatalf("message_delta cache_read_input_tokens = %d, want 800: %s", got, messageDelta)
+		}
+		if got := ojson.Get(messageDelta, "usage.output_tokens").Int(); got != 7 {
+			t.Fatalf("message_delta output_tokens = %d, want 7: %s", got, messageDelta)
+		}
+	})
+}

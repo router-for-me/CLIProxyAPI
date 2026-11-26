@@ -365,12 +365,18 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		// This follows the Claude Code API specification for streaming message initialization
 		messageStartDoc := ojson.NewDoc([]byte(`{"type": "message_start", "message": {"id": "", "type": "message", "role": "assistant", "content": [], "model": "claude-3-5-sonnet-20241022", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}`))
 
-		// Use cpaUsageMetadata within the message_start event for Claude.
-		if promptTokenCount := ojson.GetBytesNoCopy(rawJSON, "response.cpaUsageMetadata.promptTokenCount"); promptTokenCount.Exists() {
-			_ = messageStartDoc.Set("message.usage.input_tokens", promptTokenCount.Int())
-		}
-		if candidatesTokenCount := ojson.GetBytesNoCopy(rawJSON, "response.cpaUsageMetadata.candidatesTokenCount"); candidatesTokenCount.Exists() && !webSearchStreamMode {
-			_ = messageStartDoc.Set("message.usage.output_tokens", candidatesTokenCount.Int())
+		// Populate initial usage from usageMetadata (single-chunk terminal) or cpaUsageMetadata (non-terminal).
+		if startUsageResult, _ := extractAntigravityChunkUsage(rawJSON); startUsageResult.Exists() {
+			startUsage := parseAntigravityClaudeUsage(startUsageResult)
+			_ = messageStartDoc.Set("message.usage.input_tokens", startUsage.InputTokens)
+			if !webSearchStreamMode {
+				_ = messageStartDoc.Set("message.usage.output_tokens", startUsage.OutputTokens)
+			}
+			if startUsage.CachedTokenCount > 0 {
+				if errSet := messageStartDoc.Set("message.usage.cache_read_input_tokens", startUsage.CachedTokenCount); errSet != nil {
+					log.Warnf("antigravity claude response: failed to set message_start cache_read_input_tokens: %v", errSet)
+				}
+			}
 		}
 
 		// Override default values with actual response metadata if available from the Antigravity response
@@ -602,24 +608,17 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		}
 	}
 
-	if usageResult := ojson.GetBytesNoCopy(rawJSON, "response.usageMetadata"); usageResult.Exists() {
-		params.HasUsageMetadata = true
-		rawPromptTokenCount := usageResult.Get("promptTokenCount").Int()
-		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
-		params.PromptTokenCount = rawPromptTokenCount - params.CachedTokenCount
-		if params.PromptTokenCount < 0 {
-			params.PromptTokenCount = 0
-		}
-		params.CandidatesTokenCount = usageResult.Get("candidatesTokenCount").Int()
-		params.ThoughtsTokenCount = usageResult.Get("thoughtsTokenCount").Int()
-		params.TotalTokenCount = usageResult.Get("totalTokenCount").Int()
-		if params.CandidatesTokenCount == 0 && params.TotalTokenCount > 0 {
-			// totalTokenCount includes the cached part of promptTokenCount, so the
-			// fallback must use the raw prompt count, not the cache-reduced one.
-			params.CandidatesTokenCount = params.TotalTokenCount - rawPromptTokenCount - params.ThoughtsTokenCount
-			if params.CandidatesTokenCount < 0 {
-				params.CandidatesTokenCount = 0
+	if usageResult, isTerminalUsage := extractAntigravityChunkUsage(rawJSON); usageResult.Exists() {
+		if isTerminalUsage || !params.HasUsageMetadata {
+			if isTerminalUsage {
+				params.HasUsageMetadata = true
 			}
+			parsedUsage := parseAntigravityClaudeUsage(usageResult)
+			params.CachedTokenCount = parsedUsage.CachedTokenCount
+			params.PromptTokenCount = parsedUsage.InputTokens
+			params.CandidatesTokenCount = parsedUsage.CandidatesTokenCount
+			params.ThoughtsTokenCount = parsedUsage.ThoughtsTokenCount
+			params.TotalTokenCount = parsedUsage.TotalTokenCount
 		}
 	}
 
@@ -644,6 +643,54 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	}
 
 	return [][]byte{output}
+}
+
+type antigravityClaudeUsage struct {
+	InputTokens          int64
+	CachedTokenCount     int64
+	CandidatesTokenCount int64
+	ThoughtsTokenCount   int64
+	TotalTokenCount      int64
+	OutputTokens         int64
+}
+
+func extractAntigravityChunkUsage(rawJSON []byte) (ojson.Result, bool) {
+	if usageResult := ojson.GetBytesNoCopy(rawJSON, "response.usageMetadata"); usageResult.IsObject() {
+		return usageResult, true
+	}
+	if cpaUsageResult := ojson.GetBytesNoCopy(rawJSON, "response.cpaUsageMetadata"); cpaUsageResult.IsObject() {
+		return cpaUsageResult, false
+	}
+	return ojson.Result{}, false
+}
+
+func parseAntigravityClaudeUsage(usageResult ojson.Result) antigravityClaudeUsage {
+	rawPromptTokenCount := usageResult.Get("promptTokenCount").Int()
+	cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+	inputTokens := rawPromptTokenCount - cachedTokenCount
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	candidatesTokenCount := usageResult.Get("candidatesTokenCount").Int()
+	thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+	totalTokenCount := usageResult.Get("totalTokenCount").Int()
+	if candidatesTokenCount == 0 && totalTokenCount > 0 {
+		// totalTokenCount includes the cached part of promptTokenCount, so the
+		// fallback must use the raw prompt count, not the cache-reduced one.
+		candidatesTokenCount = totalTokenCount - rawPromptTokenCount - thoughtsTokenCount
+		if candidatesTokenCount < 0 {
+			candidatesTokenCount = 0
+		}
+	}
+	outputTokens := candidatesTokenCount + thoughtsTokenCount
+	return antigravityClaudeUsage{
+		InputTokens:          inputTokens,
+		CachedTokenCount:     cachedTokenCount,
+		CandidatesTokenCount: candidatesTokenCount,
+		ThoughtsTokenCount:   thoughtsTokenCount,
+		TotalTokenCount:      totalTokenCount,
+		OutputTokens:         outputTokens,
+	}
 }
 
 func appendWebSearchBufferedText(partsResult ojson.Result, buffer *strings.Builder) {
