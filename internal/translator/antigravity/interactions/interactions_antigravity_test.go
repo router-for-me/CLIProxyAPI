@@ -6,9 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testing.T) {
@@ -1566,4 +1568,244 @@ func TestConvertInteractionsRequestToAntigravityReasoningClearsConflictingThinki
 			}
 		})
 	}
+}
+
+func testAntigravityInteractionsClaudeNativeSignature(t *testing.T) string {
+	t.Helper()
+	channelBlock := []byte{}
+	channelBlock = protowire.AppendTag(channelBlock, 1, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 12)
+	channelBlock = protowire.AppendTag(channelBlock, 2, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 2)
+	channelBlock = protowire.AppendTag(channelBlock, 6, protowire.BytesType)
+	channelBlock = protowire.AppendString(channelBlock, "claude-sonnet-4-6")
+
+	container := []byte{}
+	container = protowire.AppendTag(container, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channelBlock)
+
+	payload := []byte{}
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func TestConvertInteractionsRequestToAntigravity_ClaudeThoughtSignatureInlineAndSanitized(t *testing.T) {
+	nativeSig := testAntigravityInteractionsClaudeNativeSignature(t)
+	expectedSig, ok := signature.CompatibleAntigravityClaudeThinkingSignature(nativeSig)
+	if !ok {
+		t.Fatal("test Claude signature should be compatible with Antigravity Claude")
+	}
+
+	t.Run("attaches_claude_thought_signature_inline_without_detached_carrier", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "thinking"}], "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]},
+				{"type": "user_input", "content": [{"type": "text", "text": "next"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (signed thought + answer, no detached empty carrier), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "thinking" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to carry inline thoughtSignature=%q, got: %s", expectedSig, parts[0].Raw)
+		}
+		if parts[1].Get("thought").Bool() || parts[1].Get("text").String() != "answer" || parts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected parts[1] to be plain answer text without signature, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("normalizes_native_claude_signature_inline", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-4-6-thinking",
+			"input": [
+				{"type": "thought", "content": [{"type": "text", "text": "internal reasoning"}], "signature": "` + nativeSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "visible answer"}]},
+				{"type": "user_input", "content": [{"type": "text", "text": "continue"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts, got %d: %s", len(parts), string(out))
+		}
+		if gotSig := parts[0].Get("thoughtSignature").String(); gotSig != expectedSig {
+			t.Fatalf("expected normalized inline thoughtSignature %q, got %q (part=%s)", expectedSig, gotSig, parts[0].Raw)
+		}
+	})
+
+	t.Run("strips_foreign_gemini_signature_and_drops_incompatible_thought_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "gemini thinking"}], "signature": "EggKBgEMOdbHNA=="},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]},
+				{"type": "user_input", "content": [{"type": "text", "text": "next"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		if bytes.Contains(out, []byte("thoughtSignature")) || bytes.Contains(out, []byte("EggKBgEMOdbHNA==")) {
+			t.Fatalf("foreign Gemini thoughtSignature leaked into Claude request: %s", string(out))
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 1 || parts[0].Get("text").String() != "answer" || parts[0].Get("thought").Bool() {
+			t.Fatalf("expected only plain answer part after dropping incompatible thought, got: %s", string(out))
+		}
+	})
+
+	t.Run("signature_only_thought_never_emits_empty_carrier_or_function_call_signature_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-sonnet-5-5-thinking",
+			"input": [
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]},
+				{"type": "thought", "signature": "EggKBgEMOdbHNA=="},
+				{"type": "function_call", "name": "lookup", "call_id": "call_1", "arguments": {"q": "x"}, "signature": "EggKBgEMOdbHNA=="},
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "function_result", "name": "lookup", "call_id": "call_1", "result": {"ok": true}}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-sonnet-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		if bytes.Contains(out, []byte("thoughtSignature")) {
+			t.Fatalf("unexpected thoughtSignature in Claude request: %s", string(out))
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected exactly 2 model parts (answer + functionCall, no empty carrier), got %d: %s", len(parts), string(out))
+		}
+		if parts[0].Get("text").String() != "answer" {
+			t.Fatalf("expected parts[0] to be answer, got: %s", parts[0].Raw)
+		}
+		if parts[1].Get("functionCall.name").String() != "lookup" {
+			t.Fatalf("expected parts[1] to be functionCall lookup, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("adjacent_text_thought_and_signature_only_thought_attach_inline_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "content": [{"type": "text", "text": "step reasoning"}]},
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "done"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (signed thought + done), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "step reasoning" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to attach signature inline, got: %s", parts[0].Raw)
+		}
+		if parts[1].Get("text").String() != "done" || parts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected parts[1] to be plain text done, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("adjacent_multi_text_thought_and_signature_only_thought_merge_and_attach_inline_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "part 1 "}, {"type": "text", "text": "part 2"}]},
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "done"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (merged signed thought + done), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "part 1 part 2" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to merge multi-part thought text and attach delayed signature inline, got: %s", parts[0].Raw)
+		}
+		if parts[1].Get("text").String() != "done" || parts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected parts[1] to be plain text done, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("multi_text_thought_summary_merges_with_inline_signature_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "part 1 "}, {"type": "text", "text": "part 2"}], "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (merged signed thought + answer), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "part 1 part 2" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to merge thought text with inline signature, got: %s", parts[0].Raw)
+		}
+	})
+
+	t.Run("claude_response_to_request_round_trip_preserves_inline_thought_signature", func(t *testing.T) {
+		upstreamResponse := []byte(`{
+			"response": {
+				"candidates": [{
+					"content": {
+						"role": "model",
+						"parts": [
+							{"text": "thinking", "thought": true, "thoughtSignature": "` + expectedSig + `"},
+							{"text": "answer"}
+						]
+					}
+				}]
+			}
+		}`)
+		respOut := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "claude-opus-5-5-thinking", nil, nil, upstreamResponse, nil)
+		steps := ojson.GetBytesNoCopy(respOut, "steps").Raw
+
+		turn2Input := `{"model":"claude-opus-5-5-thinking","input":[{"type":"user_input","content":[{"type":"text","text":"hello"}]}`
+		for _, s := range ojson.Get(steps, "@this").Array() {
+			turn2Input += "," + s.Raw
+		}
+		turn2Input += `,{"type":"user_input","content":[{"type":"text","text":"next"}]}]}`
+
+		reqOut, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", []byte(turn2Input), true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		modelParts := ojson.GetBytesNoCopy(reqOut, "request.contents.1.parts").Array()
+		if len(modelParts) != 2 {
+			t.Fatalf("expected 2 model parts after round-trip, got %d: %s", len(modelParts), string(reqOut))
+		}
+		if !modelParts[0].Get("thought").Bool() || modelParts[0].Get("text").String() != "thinking" || modelParts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected round-tripped thought part with inline signature, got: %s", modelParts[0].Raw)
+		}
+		if modelParts[1].Get("text").String() != "answer" || modelParts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected round-tripped answer part without signature, got: %s", modelParts[1].Raw)
+		}
+	})
 }
