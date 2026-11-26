@@ -132,6 +132,9 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
 	}
 
+	// Claude Code subscription usage, served from recorded quota snapshots.
+	s.engine.GET("/api/oauth/usage", AuthMiddleware(s.accessManager), s.handleOAuthUsage)
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
