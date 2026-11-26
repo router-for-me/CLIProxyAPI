@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1524,6 +1525,85 @@ func TestAntigravityCreditsExecute_401ExplicitRequestStopDoesNotRefreshAndRetry(
 			}
 			if calls := exec.CreditsCalls(); len(calls) != 1 || calls[0] != authIDs[0] {
 				t.Fatalf("creditsCalls = %v, want [%s] (must not refresh-retry or rotate)", calls, authIDs[0])
+			}
+		})
+	}
+}
+
+func TestShouldAttemptAntigravityCreditsFallback_SwitchedVariantRemainingCooldown(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+	})
+
+	now := time.Now()
+	remaining := 3 * time.Minute
+	deadline := now.Add(remaining)
+	auth := &Auth{
+		ID:       "ag-issue8181-switched",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"claude-opus-5-5-low": {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: deadline,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: deadline,
+				},
+				LastError: &Error{
+					HTTPStatus: http.StatusTooManyRequests,
+					Message:    `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exhausted","details":[{"reason":"QUOTA_EXHAUSTED"}]}}`,
+					Metadata: map[string]string{
+						antigravityCreditsRetryHintKey: strconv.FormatInt(int64(5*time.Hour), 10),
+					},
+				},
+			},
+		},
+	}
+
+	errTarget := CheckAntigravityTargetModel(context.Background(), auth, "claude-opus-5-5-low", now, false)
+	if errTarget == nil {
+		t.Fatal("CheckAntigravityTargetModel() = nil, want cooldown error")
+	}
+	rejectedErr := RejectAntigravityTarget(errTarget)
+	if !shouldAttemptAntigravityCreditsFallback(manager, rejectedErr, []string{"antigravity"}) {
+		t.Fatalf("shouldAttemptAntigravityCreditsFallback(%v) = false during final 3m of 5h quota cooldown, want true", rejectedErr)
+	}
+
+	shortRetry := 30 * time.Second
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "direct_model_cooldown_with_waf_html_cause",
+			err: newModelCooldownErrorWithCause(
+				"claude-sonnet-4-6",
+				"antigravity",
+				remaining,
+				&Error{HTTPStatus: http.StatusTooManyRequests, Message: `<!DOCTYPE html><html><title>Error 429</title></html>`},
+			),
+		},
+		{
+			name: "direct_model_cooldown_with_short_rate_limit_cause",
+			err: newModelCooldownErrorWithCause(
+				"claude-sonnet-4-6",
+				"antigravity",
+				remaining,
+				issue7658StatusErr{
+					status:     http.StatusTooManyRequests,
+					msg:        `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}`,
+					retryAfter: &shortRetry,
+				},
+			),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if shouldAttemptAntigravityCreditsFallback(manager, tc.err, []string{"antigravity"}) {
+				t.Fatalf("shouldAttemptAntigravityCreditsFallback(%v) = true, want false for non-quota cause", tc.err)
 			}
 		})
 	}

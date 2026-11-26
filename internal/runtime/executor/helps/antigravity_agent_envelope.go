@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,8 +22,8 @@ type antigravityAgentSession struct {
 }
 
 type antigravityAgentSessionKey struct {
-	authID, sessionID, homeScope string
-	epoch                        uint64
+	authID, sessionID, homeScope, grantScope string
+	epoch                                    uint64
 }
 
 var antigravityAgentSessions = cache.NewBoundedLRU[antigravityAgentSessionKey, *antigravityAgentSession](4096, nil)
@@ -31,9 +33,12 @@ func ApplyAntigravityAgentEnvelope(doc *ojson.Doc, auth *cliproxyauth.Auth, sess
 	key := antigravityAgentSessionKey{sessionID: sessionID}
 	if auth != nil {
 		key.authID = auth.ID
-		key.homeScope = auth.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute]
+		key.homeScope = strings.TrimSpace(auth.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute])
 		if key.homeScope == "" {
 			key.epoch = auth.RegistrationEpoch
+			if key.epoch == 0 {
+				key.grantScope = antigravityAgentGrantScope(auth)
+			}
 		}
 	}
 	session := antigravityAgentSessions.GetOrAdd(key, func() *antigravityAgentSession {
@@ -69,6 +74,63 @@ func ApplyAntigravityAgentEnvelope(doc *ojson.Doc, auth *cliproxyauth.Auth, sess
 	_ = doc.Set("request.labels.used_claude", strconv.FormatBool(strings.Contains(model, "claude")))
 	_ = doc.Set("request.labels.used_claude_conservative", "false")
 	_ = doc.Set("request.labels.used_non_gemini_model", strconv.FormatBool(!strings.Contains(model, "gemini")))
+}
+
+// antigravityAgentGrantScope derives a hashed, refresh-stable credential scope
+// for Home-mode auths (RegistrationEpoch == 0) that lack antigravity_model_enum_scope.
+func antigravityAgentGrantScope(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	refreshToken := antigravityAuthMetaString(auth, "refresh_token")
+	if refreshToken == "" {
+		refreshToken = antigravityAuthMetaString(auth, "refreshToken")
+	}
+	projectID := antigravityAuthMetaString(auth, "project_id")
+	email := antigravityAuthMetaString(auth, "email")
+	if email == "" {
+		email = antigravityAuthAttrString(auth, "email")
+	}
+	email = strings.ToLower(email)
+	accountID := antigravityAuthMetaString(auth, "account_id")
+	if accountID == "" {
+		accountID = antigravityAuthAttrString(auth, "account_id")
+	}
+	accountID = strings.ToLower(accountID)
+	// Require an account-level identifier before omitting ephemeral tokens;
+	// project_id alone can be shared across distinct Google accounts.
+	if refreshToken != "" || email != "" || accountID != "" {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("stable:%q/%q/%q/%q", refreshToken, projectID, email, accountID)))
+		return "stable:" + hex.EncodeToString(sum[:])
+	}
+	accessToken := antigravityAuthMetaString(auth, "access_token")
+	if accessToken == "" {
+		accessToken = antigravityAuthMetaString(auth, "accessToken")
+	}
+	apiKey := antigravityAuthAttrString(auth, cliproxyauth.AttributeAPIKey)
+	if apiKey == "" {
+		apiKey = antigravityAuthMetaString(auth, "api_key")
+	}
+	if accessToken != "" || apiKey != "" || projectID != "" {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("ephemeral:%q/%q/%q", projectID, accessToken, apiKey)))
+		return "ephemeral:" + hex.EncodeToString(sum[:])
+	}
+	return ""
+}
+
+func antigravityAuthMetaString(auth *cliproxyauth.Auth, key string) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	value, _ := auth.Metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func antigravityAuthAttrString(auth *cliproxyauth.Auth, key string) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes[key])
 }
 
 func antigravityAgentProgress(contents ojson.Result) (turns, results int) {

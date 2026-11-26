@@ -283,7 +283,7 @@ func normalizeGeminiGenerationConfigResponseSchemaDocAt(doc *ojson.Doc, prefix s
 			oldPath := container + "." + schemaKey
 			if schema := doc.Get(oldPath); schema.Exists() {
 				targetPath := container + ".responseSchema"
-				if !doc.Get(targetPath).Exists() {
+				if !doc.Get(targetPath).Exists() && !doc.Get(container+".response_schema").Exists() {
 					_ = doc.SetRaw(targetPath, schema.Raw)
 				}
 				_ = doc.Delete(oldPath)
@@ -818,6 +818,20 @@ func deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part map[string]any
 	for _, path := range antigravityClaudeGeminiThoughtSignaturePaths {
 		deleteAtPath(part, path...)
 	}
+	pruneEmptyExtraContentGoogle(part)
+}
+
+func pruneEmptyExtraContentGoogle(part map[string]any) {
+	extraContent, ok := part["extra_content"].(map[string]any)
+	if !ok {
+		return
+	}
+	if google, okGoogle := extraContent["google"].(map[string]any); okGoogle && len(google) == 0 {
+		delete(extraContent, "google")
+	}
+	if len(extraContent) == 0 {
+		delete(part, "extra_content")
+	}
 }
 
 func hasFunctionResponsePart(part map[string]any) bool {
@@ -905,7 +919,7 @@ func selectGroupResponses(collected []ojson.Result, group *FunctionCallGroup) ([
 	byName := make(map[string][]int, len(collected))
 	var emptyNameIdxs []int
 	for idx, resp := range collected {
-		funcResp := resp.Get("functionResponse")
+		funcResp := translatorcommon.GeminiPartFunctionResponse(resp)
 		if id := funcResp.Get("id").String(); id != "" {
 			byID[id] = append(byID[id], idx)
 		}
@@ -1019,13 +1033,27 @@ func normalizeAntigravityInlineDataPart(part ojson.Result) ([]byte, bool) {
 	return outDoc.Bytes(), true
 }
 
+func functionResponseFieldKey(part ojson.Result) string {
+	if part.Get("functionResponse").Exists() {
+		return "functionResponse"
+	}
+	if part.Get("function_response").Exists() {
+		return "function_response"
+	}
+	return ""
+}
+
 func attachInlineDataToFunctionResponse(response ojson.Result, images [][]byte) ojson.Result {
 	if len(images) == 0 {
 		return response
 	}
+	key := functionResponseFieldKey(response)
+	if key == "" {
+		key = "functionResponse"
+	}
 	targetDoc := ojson.NewDocString(response.Raw)
 	for _, img := range images {
-		_ = targetDoc.SetRawBytes("functionResponse.parts.-1", img)
+		_ = targetDoc.SetRawBytes(key+".parts.-1", img)
 	}
 	return util.ParseGJSONBytesNoCopy(targetDoc.Bytes())
 }
@@ -1040,7 +1068,7 @@ func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) ([]ojson.
 	leadingImages := make([][]byte, 0)
 	current := -1
 	parts.ForEach(func(_, part ojson.Result) bool {
-		if part.Get("functionResponse").Exists() {
+		if translatorcommon.GeminiPartFunctionResponse(part).Exists() {
 			responses = append(responses, part)
 			current = len(responses) - 1
 			if len(leadingImages) > 0 {
@@ -1070,16 +1098,21 @@ func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) ([]ojson.
 func parseFunctionResponseRaw(response ojson.Result, fallbackName string) string {
 	if response.IsObject() && ojson.Valid(response.Raw) {
 		raw := response.Raw
-		name := response.Get("functionResponse.name").String()
+		key := functionResponseFieldKey(response)
+		if key == "" {
+			key = "functionResponse"
+		}
+		name := response.Get(key + ".name").String()
 		if strings.TrimSpace(name) == "" && fallbackName != "" {
-			updated, _ := ojson.SetBytes([]byte(raw), "functionResponse.name", fallbackName)
-			raw = string(updated)
+			frDoc := ojson.NewDocString(raw)
+			_ = frDoc.Set(key+".name", fallbackName)
+			raw = frDoc.String()
 		}
 		return raw
 	}
 
 	log.Debugf("parse function response failed, using fallback")
-	funcResp := response.Get("functionResponse")
+	funcResp := translatorcommon.GeminiPartFunctionResponse(response)
 	if funcResp.Exists() {
 		frDoc := ojson.NewDoc([]byte(`{"functionResponse":{"name":"","response":{"result":""}}}`))
 		name := funcResp.Get("name").String()
@@ -1148,13 +1181,9 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 			allContentsAreObjects = false
 			return true
 		}
-		content.Get("parts").ForEach(func(_, part ojson.Result) bool {
-			if part.Get("functionResponse").Exists() {
-				needsGrouping = true
-				return false
-			}
-			return true
-		})
+		if translatorcommon.GeminiPartsHaveFunctionResponse(content.Get("parts")) {
+			needsGrouping = true
+		}
 		return !needsGrouping
 	})
 	if contents.IsArray() && allContentsAreObjects && !needsGrouping {
@@ -1170,10 +1199,31 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 		contentItems = append(contentItems, deferredOtherContents...)
 		deferredOtherContents = nil
 	}
-	appendFunctionResponses := func(responses []ojson.Result, callNames []string) {
+	appendFunctionResponses := func(responses []ojson.Result, group *FunctionCallGroup) {
+		var callNameByID map[string]string
+		for idx, id := range group.CallIDs {
+			if id == "" || idx >= len(group.CallNames) {
+				continue
+			}
+			if callNameByID == nil {
+				callNameByID = make(map[string]string, len(group.CallIDs))
+			}
+			if _, exists := callNameByID[id]; !exists {
+				callNameByID[id] = group.CallNames[idx]
+			}
+		}
 		partItems := make([][]byte, 0, len(responses))
 		for responseIndex, response := range responses {
-			partRaw := parseFunctionResponseRaw(response, callNames[responseIndex])
+			fallbackName := ""
+			if callNameByID != nil {
+				if id := translatorcommon.GeminiPartFunctionResponse(response).Get("id").String(); id != "" {
+					fallbackName = callNameByID[id]
+				}
+			}
+			if fallbackName == "" && responseIndex < len(group.CallNames) {
+				fallbackName = group.CallNames[responseIndex]
+			}
+			partRaw := parseFunctionResponseRaw(response, fallbackName)
 			if partRaw != "" {
 				partItems = append(partItems, []byte(partRaw))
 			}
@@ -1210,7 +1260,7 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 				var groupResponses []ojson.Result
 				groupResponses, collectedResponses = selectGroupResponses(collectedResponses, group)
 
-				appendFunctionResponses(groupResponses, group.CallNames)
+				appendFunctionResponses(groupResponses, group)
 			}
 			if len(pendingGroups) == 0 {
 				// Any remaining responses in this turn have no preceding functionCall group
@@ -1233,14 +1283,14 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 			return true // Skip adding the original content; responses are merged and other parts preserved.
 		}
 
-		// If this is a model with function calls, create a new group
-		if role == "model" {
+		// If this is a model turn (or an untagged/non-user turn carrying function calls), create a new group
+		if role == "model" || (role != "user" && translatorcommon.GeminiPartsHaveFunctionCall(parts)) {
 			var callIDs []string
 			var callNames []string
 			parts.ForEach(func(_, part ojson.Result) bool {
-				if part.Get("functionCall").Exists() {
-					callIDs = append(callIDs, part.Get("functionCall.id").String())
-					callNames = append(callNames, part.Get("functionCall.name").String())
+				if fc := translatorcommon.GeminiPartFunctionCall(part); fc.Exists() {
+					callIDs = append(callIDs, fc.Get("id").String())
+					callNames = append(callNames, fc.Get("name").String())
 				}
 				return true
 			})
@@ -1287,10 +1337,10 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 	// Handle any remaining pending groups with remaining responses
 	for _, group := range pendingGroups {
 		if len(collectedResponses) >= group.ResponsesNeeded {
-			groupResponses := collectedResponses[:group.ResponsesNeeded]
-			collectedResponses = collectedResponses[group.ResponsesNeeded:]
+			groupResponses, remaining := selectGroupResponses(collectedResponses, group)
+			collectedResponses = remaining
 
-			appendFunctionResponses(groupResponses, group.CallNames)
+			appendFunctionResponses(groupResponses, group)
 		}
 	}
 	flushDeferredOtherContents()

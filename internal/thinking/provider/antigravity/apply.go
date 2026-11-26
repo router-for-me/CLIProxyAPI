@@ -215,8 +215,26 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 }
 
 func (a *Applier) effectiveMaxTokensDoc(doc *ojson.Doc, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
-	if maxTok := doc.Get("request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
-		return int(maxTok.Int()), false
+	callerMax := 0
+	for _, path := range []string{
+		"request.generationConfig.maxOutputTokens",
+		"request.generationConfig.max_output_tokens",
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
+	} {
+		maxTok := doc.Get(path)
+		if maxTok.Exists() && maxTok.Type == ojson.Number && maxTok.Int() > 0 {
+			val := int(maxTok.Int())
+			if callerMax == 0 || val < callerMax {
+				callerMax = val
+			}
+		}
+	}
+	if callerMax > 0 {
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 && callerMax > modelInfo.MaxCompletionTokens {
+			return modelInfo.MaxCompletionTokens, false
+		}
+		return callerMax, false
 	}
 	if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 		return modelInfo.MaxCompletionTokens, true
