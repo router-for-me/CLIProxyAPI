@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"fmt"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internalpluginhost "github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -149,6 +150,14 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 		Handled:  result.Handled,
 		Err:      result.Err,
 	}
+}
+
+// StaticExecutorModels reads a plugin's static catalog without registering request routes.
+func (h *Host) StaticExecutorModels(ctx context.Context, id, version string) ([]ModelInfo, error) {
+	if h == nil || h.inner == nil {
+		return nil, fmt.Errorf("plugin host is unavailable")
+	}
+	return h.inner.StaticExecutorModels(ctx, id, version)
 }
 
 // ModelsForProvider returns static models registered for a provider by plugins.

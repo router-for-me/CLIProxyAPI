@@ -210,7 +210,10 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningBeforeVisibleContentAndTo
 	if got := parts[2].Get("thoughtSignature").String(); got != geminiFunctionThoughtSignature {
 		t.Fatalf("functionCall thoughtSignature = %q, want bypass sentinel. Output: %s", got, result)
 	}
-	if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read_file" {
+	if got := contents[2].Get("parts.0.text").String(); got != "say ok" {
+		t.Fatalf("follow-up user text = %q, want say ok. Output: %s", got, result)
+	}
+	if got := contents[2].Get("parts.1.functionResponse.name").String(); got != "read_file" {
 		t.Fatalf("functionResponse.name = %q, want read_file. Output: %s", got, result)
 	}
 }
@@ -604,10 +607,14 @@ func TestConvertOpenAIRequestToGemini_MultiTurnRepeatedToolCallID_Issue5933(t *t
 
 	out, _ := ConvertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), false)
 
-	// Turn 1 appends the subsequent user prompt after the function response.
+	// Turn 1 places the subsequent user prompt before the function response.
 	call1Name := ojson.GetBytesNoCopy(out, "contents.1.parts.0.functionCall.name").String()
-	resp1Name := ojson.GetBytesNoCopy(out, "contents.2.parts.0.functionResponse.name").String()
-	resp1Result := ojson.GetBytesNoCopy(out, "contents.2.parts.0.functionResponse.response.result").String()
+	resp1Prompt := ojson.GetBytesNoCopy(out, "contents.2.parts.0.text").String()
+	resp1Name := ojson.GetBytesNoCopy(out, "contents.2.parts.1.functionResponse.name").String()
+	resp1Result := ojson.GetBytesNoCopy(out, "contents.2.parts.1.functionResponse.response.result").String()
+	if resp1Prompt != "read main.go" {
+		t.Fatalf("turn 1 follow-up text = %q, want %q", resp1Prompt, "read main.go")
+	}
 
 	if call1Name != "glob" {
 		t.Fatalf("turn 1 functionCall.name = %q, want glob", call1Name)
@@ -1373,14 +1380,14 @@ func TestConvertOpenAIRequestToGemini_AdjacentUserTurns(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("contents[2].parts length = %d, want 2. Output: %s", len(parts), result)
 	}
-	if gotName := parts[0].Get("functionResponse.name").String(); gotName != "test_tool" {
+	if gotText := parts[0].Get("text").String(); gotText != "now explain it" {
+		t.Fatalf("merged prompt text = %q, want now explain it. Output: %s", gotText, result)
+	}
+	if gotName := parts[1].Get("functionResponse.name").String(); gotName != "test_tool" {
 		t.Fatalf("merged functionResponse.name = %q, want test_tool. Output: %s", gotName, result)
 	}
-	if gotResponse := parts[0].Get("functionResponse.response.result").String(); gotResponse != `"tool output"` {
+	if gotResponse := parts[1].Get("functionResponse.response.result").String(); gotResponse != `"tool output"` {
 		t.Fatalf("merged tool result = %q, want %q. Output: %s", gotResponse, `"tool output"`, result)
-	}
-	if gotText := parts[1].Get("text").String(); gotText != "now explain it" {
-		t.Fatalf("merged prompt text = %q, want now explain it. Output: %s", gotText, result)
 	}
 	if errPairing := signature.ValidateGeminiFunctionCallPairing(result); errPairing != nil {
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, result)
@@ -1412,11 +1419,11 @@ func TestConvertOpenAIRequestToGemini_PreservesMergedUserPartOrder(t *testing.T)
 		t.Fatalf("merged parts length = %d, want 5. Output: %s", len(parts), result)
 	}
 	want := []string{
-		`"ok"`,
 		"image-1",
 		"first",
 		"image-2",
 		"second",
+		`"ok"`,
 	}
 	for i, part := range parts {
 		got := part.Get("functionResponse.response.result").String()
@@ -1426,7 +1433,7 @@ func TestConvertOpenAIRequestToGemini_PreservesMergedUserPartOrder(t *testing.T)
 				got = decoded
 			}
 		}
-		if i > 0 && got == "" {
+		if got == "" {
 			got = part.Get("text").String()
 		}
 		if got != want[i] {
@@ -1615,4 +1622,107 @@ func TestConvertOpenAIRequestToGeminiMapsStopSequences(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvertOpenAIRequestToGemini_FollowUpUserPrecedesFunctionResponse_Issue8520(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"max_tokens": 1500,
+		"messages": [
+			{"role": "user", "content": "What is the weather in Beijing and Shanghai?"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Shanghai\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "sunny, 20C"},
+			{"role": "tool", "tool_call_id": "call_2", "content": "cloudy, 22C"},
+			{"role": "user", "content": "Please answer in French."}
+		],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "get_weather",
+				"description": "Get weather",
+				"parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+			}
+		}]
+	}`
+
+	result, errConvert := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+	}
+
+	contents := ojson.GetBytesNoCopy(result, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3. Output: %s", len(contents), result)
+	}
+
+	parts := contents[2].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("contents[2].parts length = %d, want 3. Output: %s", len(parts), result)
+	}
+
+	// Follow-up user text must precede functionResponse parts so Vertex AI does not
+	// reject the turn with HTTP 400 "Requests ending with a model turn are not supported."
+	if gotText := parts[0].Get("text").String(); gotText != "Please answer in French." {
+		t.Fatalf("parts[0].text = %q, want %q. Output: %s", gotText, "Please answer in French.", result)
+	}
+	if gotName := parts[1].Get("functionResponse.name").String(); gotName != "get_weather" {
+		t.Fatalf("parts[1].functionResponse.name = %q, want get_weather. Output: %s", gotName, result)
+	}
+	if gotResult := parts[1].Get("functionResponse.response.result").String(); gotResult != `"sunny, 20C"` {
+		t.Fatalf("parts[1].functionResponse.response.result = %q, want %q. Output: %s", gotResult, `"sunny, 20C"`, result)
+	}
+	if gotName := parts[2].Get("functionResponse.name").String(); gotName != "get_weather" {
+		t.Fatalf("parts[2].functionResponse.name = %q, want get_weather. Output: %s", gotName, result)
+	}
+	if gotResult := parts[2].Get("functionResponse.response.result").String(); gotResult != `"cloudy, 22C"` {
+		t.Fatalf("parts[2].functionResponse.response.result = %q, want %q. Output: %s", gotResult, `"cloudy, 22C"`, result)
+	}
+
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(result); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, result)
+	}
+
+	t.Run("multiple consecutive follow-up user turns preserve relative order before functionResponse", func(t *testing.T) {
+		multiFollowUp := `{
+			"model": "gemini-3.8-flash",
+			"messages": [
+				{"role": "user", "content": "check weather"},
+				{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]},
+				{"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+				{"role": "user", "content": "First instruction."},
+				{"role": "user", "content": "Second instruction."}
+			]
+		}`
+		out, errMulti := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(multiFollowUp), false)
+		if errMulti != nil {
+			t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errMulti)
+		}
+		multiContents := ojson.GetBytesNoCopy(out, "contents").Array()
+		if len(multiContents) != 3 {
+			t.Fatalf("contents length = %d, want 3. Output: %s", len(multiContents), out)
+		}
+		multiParts := multiContents[2].Get("parts").Array()
+		if len(multiParts) != 3 {
+			t.Fatalf("contents[2].parts length = %d, want 3. Output: %s", len(multiParts), out)
+		}
+		if got := multiParts[0].Get("text").String(); got != "First instruction." {
+			t.Fatalf("parts[0].text = %q, want %q. Output: %s", got, "First instruction.", out)
+		}
+		if got := multiParts[1].Get("text").String(); got != "Second instruction." {
+			t.Fatalf("parts[1].text = %q, want %q. Output: %s", got, "Second instruction.", out)
+		}
+		if got := multiParts[2].Get("functionResponse.name").String(); got != "get_weather" {
+			t.Fatalf("parts[2].functionResponse.name = %q, want get_weather. Output: %s", got, out)
+		}
+		if errMultiPairing := signature.ValidateGeminiFunctionCallPairing(out); errMultiPairing != nil {
+			t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errMultiPairing, out)
+		}
+	})
 }
