@@ -98,6 +98,14 @@ func isValidGeminiCodeExecutionResultPart(cer ojson.Result) bool {
 	return cer.IsObject() && (strings.TrimSpace(cer.Get("output").String()) != "" || strings.TrimSpace(cer.Get("outcome").String()) != "")
 }
 
+func isValidGeminiAudioTranscriptionPart(at ojson.Result) bool {
+	if !at.IsObject() {
+		return false
+	}
+	text := at.Get("text")
+	return text.Type == ojson.String && strings.TrimSpace(text.String()) != ""
+}
+
 // InspectGeminiZeroOutputPayload inspects a Gemini or Antigravity JSON/SSE payload without modifying it.
 func InspectGeminiZeroOutputPayload(payload []byte, allowResponseWrapper bool) GeminiPayloadInspection {
 	var out GeminiPayloadInspection
@@ -164,7 +172,8 @@ func InspectGeminiZeroOutputPayload(payload []byte, allowResponseWrapper bool) G
 				isValidGeminiInlineDataPart(part.Get("inlineData")) || isValidGeminiInlineDataPart(part.Get("inline_data")) ||
 				isValidGeminiFileDataPart(part.Get("fileData")) || isValidGeminiFileDataPart(part.Get("file_data")) ||
 				isValidGeminiExecutableCodePart(part.Get("executableCode")) || isValidGeminiExecutableCodePart(part.Get("executable_code")) ||
-				isValidGeminiCodeExecutionResultPart(part.Get("codeExecutionResult")) || isValidGeminiCodeExecutionResultPart(part.Get("code_execution_result"))
+				isValidGeminiCodeExecutionResultPart(part.Get("codeExecutionResult")) || isValidGeminiCodeExecutionResultPart(part.Get("code_execution_result")) ||
+				isValidGeminiAudioTranscriptionPart(part.Get("audioTranscription")) || isValidGeminiAudioTranscriptionPart(part.Get("audio_transcription"))
 			text := part.Get("text").String()
 			if part.Get("thought").Bool() {
 				if text != "" || hasMediaOrTool {

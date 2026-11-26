@@ -253,8 +253,8 @@ type Manager struct {
 	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
 	apiKeyModelRouting atomic.Value
 
-	// modelPoolOffsets tracks per-auth alias pool rotation state.
-	modelPoolOffsets map[string]int
+	// modelPoolOffsets tracks per-auth alias pool rotation state keyed by auth ID and pool key.
+	modelPoolOffsets map[string]map[string]int
 
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
@@ -311,7 +311,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		homePrepareFlights:    make(map[string]*homeAuthPrepareFlight),
 		providerOffsets:       make(map[string]int),
-		modelPoolOffsets:      make(map[string]int),
+		modelPoolOffsets:      make(map[string]map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

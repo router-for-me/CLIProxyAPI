@@ -870,7 +870,6 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			registry.GetGlobalRegistry().RegisterClient(authID, "antigravity", []*registry.ModelInfo{{ID: model}})
 			t.Cleanup(func() {
 				registry.GetGlobalRegistry().UnregisterClient(authID)
-				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
 			})
 
 			registered, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
@@ -888,6 +887,10 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			if errRegister != nil {
 				t.Fatalf("register auth: %v", errRegister)
 			}
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{}, registered.RegistrationEpoch)
+			})
+			refreshKey := antigravityCreditsRefreshKey(registered)
 
 			req := cliproxyexecutor.Request{
 				Model:   model,
@@ -915,7 +918,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 					t.Fatal("initial Execute() succeeded, want 429 after quota and credits exhaustion")
 				}
 			}
-			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+			if value, ok := antigravityCreditsHintRefreshByID.Load(refreshKey); ok {
 				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
 					waitForAntigravityCreditsRefresh(t, state)
 				}
@@ -931,7 +934,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			// Step 2: Top up credits and expire the cached hint/throttle window while model remains in 1h quota cooldown.
 			toppedUp.Store(true)
 			callsBeforeTopUp := loadCodeAssistCalls.Load()
-			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+			if value, ok := antigravityCreditsHintRefreshByID.Load(refreshKey); ok {
 				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
 					state.mu.Lock()
 					state.lastAttempt = time.Now().Add(-antigravityCreditsHintRefreshInterval - time.Second)
@@ -972,11 +975,15 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 				}
 			}
 
-			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
-				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
-					waitForAntigravityCreditsRefresh(t, state)
-				}
+			refreshValue, okRefresh := antigravityCreditsHintRefreshByID.Load(refreshKey)
+			if !okRefresh {
+				t.Fatalf("expected credits refresh state under key %q after top-up recovery", refreshKey)
 			}
+			refreshState, okState := refreshValue.(*antigravityCreditsHintRefreshState)
+			if !okState || refreshState == nil {
+				t.Fatalf("unexpected credits refresh state type %T under key %q", refreshValue, refreshKey)
+			}
+			waitForAntigravityCreditsRefresh(t, refreshState)
 			if loadCodeAssistCalls.Load() <= callsBeforeTopUp {
 				t.Fatalf("loadCodeAssist calls after top-up = %d, want > %d", loadCodeAssistCalls.Load(), callsBeforeTopUp)
 			}
@@ -1979,4 +1986,49 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 			t.Fatal("antigravityInTOSPause() = true when direct call context was canceled, want false")
 		}
 	})
+}
+
+func TestClearAntigravityCreditsFailureState_DoesNotClobberConcurrentAvailableHint(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	auth := &cliproxyauth.Auth{
+		ID:                fmt.Sprintf("ag-clear-race-%d", time.Now().UnixNano()),
+		Provider:          "antigravity",
+		RegistrationEpoch: 1,
+	}
+	t.Cleanup(func() {
+		cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{})
+	})
+
+	for i := 0; i < 1000; i++ {
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			clearAntigravityCreditsFailureState(auth)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       true,
+				CreditAmount:    2516,
+				MinCreditAmount: 50,
+				PaidTierID:      "tier-1",
+				UpdatedAt:       time.Now(),
+			})
+		}()
+		close(start)
+		wg.Wait()
+
+		hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth)
+		if !ok || !hint.Known || !hint.Available || hint.CreditAmount != 2516 {
+			t.Fatalf("iteration %d: hint = %#v (ok=%v), want Known=true Available=true CreditAmount=2516", i, hint, ok)
+		}
+	}
 }
