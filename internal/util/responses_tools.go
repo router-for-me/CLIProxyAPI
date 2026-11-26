@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 )
@@ -32,6 +33,10 @@ const (
 	// client-executed tool_search shim. The leading NUL byte cannot appear in a
 	// JSON identifier, preventing collisions with user-declared tool names.
 	ResponsesClientToolSearchKey = "\x00client_tool_search"
+	// responsesForwardMapIdentitiesKey is an internal forwardMap key carrying ordered
+	// winning declaration identities so ConvertResponsesToolChoiceToGemini shares the
+	// exact identity-based resolution used by FilterGeminiFunctionDeclarationsByResponsesToolChoice.
+	responsesForwardMapIdentitiesKey = "\x00responses_tool_identities"
 	// ResponsesToolSearchCallType is the Responses item type for a tool_search invocation.
 	ResponsesToolSearchCallType = "tool_search_call"
 	// ResponsesToolSearchOutputType is the Responses input item carrying discovered tools.
@@ -481,6 +486,10 @@ func buildGeminiFunctionDeclarations(root ojson.Result, withDeclarations bool) (
 		}
 	}
 	var declarations [][]byte
+	var declaredIdentities []responsesDeclaredToolIdentity
+	if withDeclarations {
+		declaredIdentities = make([]responsesDeclaredToolIdentity, 0, len(winningList))
+	}
 
 	for _, desc := range winningList {
 		geminiName := desc.Name
@@ -532,6 +541,13 @@ func buildGeminiFunctionDeclarations(root ojson.Result, withDeclarations bool) (
 			}
 		}
 		declarations = append(declarations, funcDeclDoc.Bytes())
+		declaredIdentities = append(declaredIdentities, responsesDeclaredToolIdentity{
+			GeminiName: geminiName,
+			Name:       identity.Name,
+			Namespace:  identity.Namespace,
+			Custom:     identity.Custom,
+			ToolSearch: identity.ToolSearch,
+		})
 	}
 
 	// Populate local-name aliases after all direct/qualified names are registered
@@ -541,6 +557,12 @@ func buildGeminiFunctionDeclarations(root ojson.Result, withDeclarations bool) (
 			if _, exists := forwardMap[desc.LocalName]; !exists {
 				forwardMap[desc.LocalName] = forwardMap[desc.Name]
 			}
+		}
+	}
+
+	if withDeclarations && len(declaredIdentities) > 0 {
+		if encoded, errMarshal := json.Marshal(declaredIdentities); errMarshal == nil {
+			forwardMap[responsesForwardMapIdentitiesKey] = string(encoded)
 		}
 	}
 
@@ -587,6 +609,254 @@ func MapResponsesClientToolSearchName(forwardMap map[string]string) string {
 	return ResponsesToolSearchFunctionName
 }
 
+func extractResponsesToolChoiceParts(item ojson.Result) (effectiveType, rawName, namespace, qualifiedName string) {
+	effectiveType = strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+	rawName = strings.TrimSpace(item.Get("name").String())
+	namespace = strings.TrimSpace(item.Get("namespace").String())
+
+	switch effectiveType {
+	case "function":
+		if rawName == "" {
+			rawName = strings.TrimSpace(item.Get("function.name").String())
+		}
+		if namespace == "" {
+			namespace = strings.TrimSpace(item.Get("function.namespace").String())
+		}
+	case "custom":
+		if rawName == "" {
+			rawName = strings.TrimSpace(item.Get("custom.name").String())
+		}
+		if namespace == "" {
+			namespace = strings.TrimSpace(item.Get("custom.namespace").String())
+		}
+	case "", "tool":
+		hasFnObj := item.Get("function").IsObject()
+		hasCustomObj := item.Get("custom").IsObject()
+		if hasFnObj && !hasCustomObj {
+			effectiveType = "function"
+			if rawName == "" {
+				rawName = strings.TrimSpace(item.Get("function.name").String())
+			}
+			if namespace == "" {
+				namespace = strings.TrimSpace(item.Get("function.namespace").String())
+			}
+		} else if hasCustomObj && !hasFnObj {
+			effectiveType = "custom"
+			if rawName == "" {
+				rawName = strings.TrimSpace(item.Get("custom.name").String())
+			}
+			if namespace == "" {
+				namespace = strings.TrimSpace(item.Get("custom.namespace").String())
+			}
+		}
+	}
+
+	qualifiedName = rawName
+	if namespace != "" && rawName != "" {
+		qualifiedName = QualifyResponsesNamespaceToolName(namespace, rawName)
+	}
+	return effectiveType, rawName, namespace, qualifiedName
+}
+
+type responsesDeclaredToolIdentity struct {
+	GeminiName string `json:"g"`
+	Name       string `json:"n,omitempty"`
+	Namespace  string `json:"ns,omitempty"`
+	Custom     bool   `json:"c,omitempty"`
+	ToolSearch bool   `json:"ts,omitempty"`
+}
+
+func extractIdentitiesFromForwardMap(forwardMap map[string]string) ([]string, map[string]ResponsesToolIdentity, bool) {
+	if len(forwardMap) == 0 {
+		return nil, nil, false
+	}
+	raw, ok := forwardMap[responsesForwardMapIdentitiesKey]
+	if !ok || raw == "" {
+		return nil, nil, false
+	}
+	var entries []responsesDeclaredToolIdentity
+	if errUnmarshal := json.Unmarshal([]byte(raw), &entries); errUnmarshal != nil {
+		return nil, nil, false
+	}
+	declaredNames := make([]string, 0, len(entries))
+	identities := make(map[string]ResponsesToolIdentity, len(entries))
+	for _, entry := range entries {
+		if entry.GeminiName == "" {
+			continue
+		}
+		declaredNames = append(declaredNames, entry.GeminiName)
+		identities[entry.GeminiName] = ResponsesToolIdentity{
+			Name:       entry.Name,
+			Namespace:  entry.Namespace,
+			Custom:     entry.Custom,
+			ToolSearch: entry.ToolSearch,
+		}
+	}
+	return declaredNames, identities, true
+}
+
+func matchesResponsesToolIdentity(effectiveType, rawName, namespace string, identity ResponsesToolIdentity) bool {
+	if identity.ToolSearch {
+		return false
+	}
+	switch effectiveType {
+	case "function", "tool", "":
+		if identity.Custom {
+			return false
+		}
+	case "custom":
+		if !identity.Custom {
+			return false
+		}
+	default:
+		return false
+	}
+	return identity.Namespace == namespace && identity.Name == rawName
+}
+
+func extractResponsesAllowedToolsSpec(toolChoice ojson.Result) (string, ojson.Result) {
+	rawMode := strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
+	if rawMode == "" {
+		rawMode = strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
+	}
+	toolsArr := toolChoice.Get("tools")
+	if !toolsArr.IsArray() {
+		toolsArr = toolChoice.Get("allowed_tools.tools")
+	}
+	return rawMode, toolsArr
+}
+
+func buildGeminiFunctionCallingConfigJSON(mode string, allowedNames []string) []byte {
+	cfgDoc := ojson.NewDoc([]byte(`{"mode":""}`))
+	_ = cfgDoc.Set("mode", mode)
+	if len(allowedNames) > 0 {
+		_ = cfgDoc.Set("allowedFunctionNames", allowedNames)
+	}
+	return cfgDoc.Bytes()
+}
+
+// resolveResponsesAllowedToolNames resolves allowed Gemini function names for an
+// "allowed_tools" tool_choice strictly against declared tool identities.
+// When no declaration identities are available, it fails closed and returns nil.
+func resolveResponsesAllowedToolNames(
+	toolsArr ojson.Result,
+	forwardMap map[string]string,
+	reverseMap map[string]ResponsesToolIdentity,
+	declaredNames []string,
+) []string {
+	if !toolsArr.IsArray() || len(reverseMap) == 0 {
+		return nil
+	}
+
+	var candidates []string
+	var candidateSet map[string]struct{}
+	if len(declaredNames) > 0 {
+		candidates = declaredNames
+		candidateSet = make(map[string]struct{}, len(declaredNames))
+		for _, name := range declaredNames {
+			if name != "" {
+				candidateSet[name] = struct{}{}
+			}
+		}
+	} else {
+		candidateSet = make(map[string]struct{}, len(reverseMap))
+		for key := range reverseMap {
+			if len(forwardMap) > 0 {
+				if mapped, ok := forwardMap[key]; !ok || mapped != key {
+					continue
+				}
+			}
+			candidateSet[key] = struct{}{}
+			candidates = append(candidates, key)
+		}
+		sort.Strings(candidates)
+	}
+
+	allowedSet := make(map[string]struct{})
+	for _, item := range toolsArr.Array() {
+		itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+		switch itemType {
+		case ResponsesToolSearchType:
+			for _, declName := range candidates {
+				if identity, ok := reverseMap[declName]; ok && identity.ToolSearch {
+					allowedSet[declName] = struct{}{}
+				}
+			}
+		case "namespace":
+			ns := strings.TrimSpace(item.Get("name").String())
+			if ns == "" {
+				ns = strings.TrimSpace(item.Get("namespace").String())
+			}
+			if ns != "" {
+				for _, declName := range candidates {
+					if identity, ok := reverseMap[declName]; ok && identity.Namespace == ns {
+						allowedSet[declName] = struct{}{}
+					}
+				}
+			}
+		case "function", "custom", "tool", "":
+			effectiveType, rawName, namespace, qualifiedName := extractResponsesToolChoiceParts(item)
+			if qualifiedName == "" {
+				continue
+			}
+			if len(forwardMap) > 0 {
+				if mapped, ok := forwardMap[qualifiedName]; ok {
+					if _, declared := candidateSet[mapped]; declared {
+						if identity, hasIdentity := reverseMap[mapped]; hasIdentity && matchesResponsesToolIdentity(effectiveType, rawName, namespace, identity) {
+							allowedSet[mapped] = struct{}{}
+						}
+					}
+				}
+				continue
+			}
+			for _, declName := range candidates {
+				if identity, ok := reverseMap[declName]; ok && matchesResponsesToolIdentity(effectiveType, rawName, namespace, identity) {
+					allowedSet[declName] = struct{}{}
+				}
+			}
+		}
+	}
+
+	allowedNames := make([]string, 0, len(allowedSet))
+	seen := make(map[string]struct{}, len(allowedSet))
+	for _, declName := range candidates {
+		if _, ok := allowedSet[declName]; !ok {
+			continue
+		}
+		if _, dup := seen[declName]; dup {
+			continue
+		}
+		seen[declName] = struct{}{}
+		allowedNames = append(allowedNames, declName)
+	}
+	return allowedNames
+}
+
+func resolveResponsesAllowedTools(
+	toolChoice ojson.Result,
+	forwardMap map[string]string,
+	reverseMap map[string]ResponsesToolIdentity,
+	declaredNames []string,
+) (mode string, allowedNames []string, keepAllDecls bool) {
+	rawMode, toolsArr := extractResponsesAllowedToolsSpec(toolChoice)
+	switch rawMode {
+	case "none":
+		return "NONE", nil, true
+	case "", "auto", "required", "any":
+	default:
+		return "NONE", nil, false
+	}
+
+	allowedNames = resolveResponsesAllowedToolNames(toolsArr, forwardMap, reverseMap, declaredNames)
+	if len(allowedNames) == 0 {
+		return "NONE", nil, false
+	}
+	if rawMode == "required" || rawMode == "any" {
+		return "ANY", allowedNames, false
+	}
+	return "AUTO", allowedNames, false
+}
+
 // ConvertResponsesToolChoiceToGemini translates Responses tool_choice into Gemini functionCallingConfig JSON.
 func ConvertResponsesToolChoiceToGemini(toolChoice ojson.Result, forwardMap map[string]string) ([]byte, bool) {
 	if !toolChoice.Exists() {
@@ -615,27 +885,16 @@ func ConvertResponsesToolChoiceToGemini(toolChoice ojson.Result, forwardMap map[
 		case ResponsesToolSearchType:
 			mode = "ANY"
 			allowedNames = append(allowedNames, MapResponsesClientToolSearchName(forwardMap))
+		case "allowed_tools":
+			declaredNames, identityMap, _ := extractIdentitiesFromForwardMap(forwardMap)
+			mode, allowedNames, _ = resolveResponsesAllowedTools(toolChoice, forwardMap, identityMap, declaredNames)
+			if mode != "ANY" {
+				allowedNames = nil
+			}
 		case "function", "custom", "tool", "":
 			mode = "ANY"
-			name := strings.TrimSpace(toolChoice.Get("name").String())
-			if name == "" {
-				name = strings.TrimSpace(toolChoice.Get("function.name").String())
-			}
-			if name == "" {
-				name = strings.TrimSpace(toolChoice.Get("custom.name").String())
-			}
-			namespace := strings.TrimSpace(toolChoice.Get("namespace").String())
-			if namespace == "" {
-				namespace = strings.TrimSpace(toolChoice.Get("function.namespace").String())
-			}
-			if namespace == "" {
-				namespace = strings.TrimSpace(toolChoice.Get("custom.namespace").String())
-			}
-			if namespace != "" {
-				name = QualifyResponsesNamespaceToolName(namespace, name)
-			}
-			if name != "" {
-				geminiName := MapResponsesToolName(forwardMap, name)
+			if _, _, _, qualifiedName := extractResponsesToolChoiceParts(toolChoice); qualifiedName != "" {
+				geminiName := MapResponsesToolName(forwardMap, qualifiedName)
 				allowedNames = append(allowedNames, geminiName)
 			}
 		}
@@ -643,12 +902,52 @@ func ConvertResponsesToolChoiceToGemini(toolChoice ojson.Result, forwardMap map[
 	if mode == "" {
 		return nil, false
 	}
-	cfgDoc := ojson.NewDoc([]byte(`{"mode":""}`))
-	_ = cfgDoc.Set("mode", mode)
-	if len(allowedNames) > 0 {
-		_ = cfgDoc.Set("allowedFunctionNames", allowedNames)
+	return buildGeminiFunctionCallingConfigJSON(mode, allowedNames), true
+}
+
+// FilterGeminiFunctionDeclarationsByResponsesToolChoice filters Gemini functionDeclarations
+// when tool_choice.type == "allowed_tools" and builds the matching functionCallingConfig JSON.
+// It returns handled=false when tool_choice is not an "allowed_tools" object.
+func FilterGeminiFunctionDeclarationsByResponsesToolChoice(
+	toolChoice ojson.Result,
+	functionDeclarations [][]byte,
+	forwardMap map[string]string,
+	reverseMap map[string]ResponsesToolIdentity,
+) ([][]byte, []byte, bool) {
+	if !toolChoice.Exists() || !toolChoice.IsObject() {
+		return functionDeclarations, nil, false
 	}
-	return cfgDoc.Bytes(), true
+	if strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String())) != "allowed_tools" {
+		return functionDeclarations, nil, false
+	}
+
+	declaredNames := make([]string, len(functionDeclarations))
+	for i, decl := range functionDeclarations {
+		declaredNames[i] = ojson.GetBytesNoCopy(decl, "name").String()
+	}
+
+	mode, allowedNames, keepAllDecls := resolveResponsesAllowedTools(toolChoice, forwardMap, reverseMap, declaredNames)
+	if keepAllDecls {
+		return functionDeclarations, buildGeminiFunctionCallingConfigJSON(mode, nil), true
+	}
+	if len(allowedNames) == 0 {
+		return nil, buildGeminiFunctionCallingConfigJSON(mode, nil), true
+	}
+
+	allowedSet := make(map[string]struct{}, len(allowedNames))
+	for _, name := range allowedNames {
+		allowedSet[name] = struct{}{}
+	}
+	filtered := make([][]byte, 0, len(allowedNames))
+	for i, decl := range functionDeclarations {
+		if _, ok := allowedSet[declaredNames[i]]; ok {
+			filtered = append(filtered, decl)
+		}
+	}
+	if mode == "ANY" {
+		return filtered, buildGeminiFunctionCallingConfigJSON(mode, allowedNames), true
+	}
+	return filtered, buildGeminiFunctionCallingConfigJSON(mode, nil), true
 }
 
 // UnwrapResponsesCustomToolInput extracts the raw input string from custom tool arguments JSON or plain string.

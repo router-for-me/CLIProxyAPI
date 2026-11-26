@@ -250,6 +250,40 @@ func testIssue6332LifecycleNextTurn(t *testing.T, split bool) {
 }
 
 func TestIssue6332Review7PartialEOFDoesNotCommitReplay(t *testing.T) {
+	t.Cleanup(cache.ClearAntigravityReasoningReplayCache)
+	cache.ClearAntigravityReasoningReplayCache()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Replace(issue6332ToolFrame(), `,"finishReason":"STOP"`, "", 1))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if hijacker, ok := w.(http.Hijacker); ok {
+			if conn, _, errHijack := hijacker.Hijack(); errHijack == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer server.Close()
+	base, _ := issue6332ReviewBase(t, server.URL)
+	router := gin.New()
+	router.POST("/v1/responses", NewOpenAIResponsesAPIHandler(base).Responses)
+	writer := httptest.NewRecorder()
+	router.ServeHTTP(writer, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(issue6332ReviewBody(t)))))
+	if strings.Contains(writer.Body.String(), "response.completed") {
+		t.Fatalf("truncated upstream stream must not emit synthetic completion: %s", writer.Body.String())
+	}
+	items, ok := cache.GetAntigravityReasoningReplayItems(issue6332ReviewModel, "responses:"+t.Name())
+	if ok || len(items) != 0 {
+		t.Fatal("truncated upstream stream without finishReason committed replay items")
+	}
+}
+
+func TestIssue6332Review7CleanEOFNoFinishReasonCommitsReplay(t *testing.T) {
+	t.Cleanup(cache.ClearAntigravityReasoningReplayCache)
+	cache.ClearAntigravityReasoningReplayCache()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, strings.Replace(issue6332ToolFrame(), `,"finishReason":"STOP"`, "", 1))
@@ -264,7 +298,7 @@ func TestIssue6332Review7PartialEOFDoesNotCommitReplay(t *testing.T) {
 		t.Fatalf("expected synthetic EOF completion: %s", writer.Body.String())
 	}
 	items, ok := cache.GetAntigravityReasoningReplayItems(issue6332ReviewModel, "responses:"+t.Name())
-	if ok || len(items) != 0 {
-		t.Fatal("synthetic completion committed partial upstream output without finishReason")
+	if !ok || len(items) == 0 {
+		t.Fatalf("clean-EOF tool stream without finishReason did not commit replay items (ok=%v)", ok)
 	}
 }

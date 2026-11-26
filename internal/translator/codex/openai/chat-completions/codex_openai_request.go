@@ -61,8 +61,8 @@ func convertOpenAIRequestToResponses(modelName string, inputRawJSON []byte, stre
 	}
 
 	// Map reasoning effort
-	if v := root.Get("reasoning_effort"); v.Exists() {
-		_ = outDoc.Set("reasoning.effort", v.Value())
+	if v := root.Get("reasoning_effort"); v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+		_ = outDoc.Set("reasoning.effort", strings.TrimSpace(v.String()))
 	} else if codex {
 		_ = outDoc.Set("reasoning.effort", "medium")
 	}

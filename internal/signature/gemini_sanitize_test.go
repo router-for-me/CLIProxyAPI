@@ -893,3 +893,66 @@ func TestSanitizeGeminiRequestThoughtSignatures_AllEmptySignaturePaths(t *testin
 		}
 	})
 }
+
+func TestSanitizeGeminiRequestThoughtSignatures_PrunesEmptyExtraContentShell(t *testing.T) {
+	sig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+
+	t.Run("function_call_prunes_empty_extra_content_shell", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{}},"extra_content":{"google":{"thought_signature":"` + sig + `"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+		part := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if got := part.Get("thoughtSignature").String(); got != sig {
+			t.Fatalf("thoughtSignature = %q, want %q; part=%s", got, sig, part.Raw)
+		}
+		if part.Get("extra_content").Exists() {
+			t.Fatalf("empty extra_content shell should be pruned; part=%s", part.Raw)
+		}
+	})
+
+	t.Run("function_response_prunes_empty_extra_content_shell", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"}},"extra_content":{"google":{"thought_signature":"` + sig + `"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+		part := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if part.Get("extra_content").Exists() {
+			t.Fatalf("empty extra_content shell on functionResponse should be pruned; part=%s", part.Raw)
+		}
+	})
+
+	t.Run("preserves_non_empty_sibling_fields", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"text":"a","extra_content":{"google":{"thought_signature":"` + sig + `","keep":"yes"}}},{"text":"b","extra_content":{"google":{"thought_signature":"` + sig + `"},"keep":"yes"}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		p0 := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if p0.Get("extra_content.google.thought_signature").Exists() || p0.Get("extra_content.google.keep").String() != "yes" {
+			t.Fatalf("p0 should strip signature but preserve non-empty extra_content.google sibling: %s", p0.Raw)
+		}
+		p1 := ojson.GetBytesNoCopy(out, "contents.0.parts.1")
+		if p1.Get("extra_content.google").Exists() || p1.Get("extra_content.keep").String() != "yes" {
+			t.Fatalf("p1 should prune empty google but preserve extra_content sibling: %s", p1.Raw)
+		}
+	})
+
+	t.Run("duplicate_google_and_extra_content_wrappers_pruned_and_siblings_preserved", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{}},"extra_content":{"google":{"thought_signature":"` + sig + `"},"google":{}}},{"text":"two-google-sigs","extra_content":{"google":{"thought_signature":"` + sig + `"},"google":{"thought_signature":"` + sig + `"}}},{"text":"google-keep-and-sig","extra_content":{"google":{"keep":"yes"},"google":{"thought_signature":"` + sig + `"}}},{"text":"two-extra-sigs","extra_content":{"google":{"thought_signature":"` + sig + `"}},"extra_content":{"google":{"thought_signature":"` + sig + `"}}},{"text":"extra-keep-and-sig","extra_content":{"google":{"thought_signature":"` + sig + `"},"keep":"yes"},"extra_content":{"google":{"thought_signature":"` + sig + `"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		p0 := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if p0.Get("thoughtSignature").String() != sig || p0.Get("extra_content").Exists() || strings.Contains(p0.Raw, "thought_signature") {
+			t.Fatalf("p0 should normalize signature and prune duplicate empty google wrapper: %s", p0.Raw)
+		}
+		for _, idx := range []int{1, 3} {
+			p := ojson.GetBytesNoCopy(out, fmt.Sprintf("contents.0.parts.%d", idx))
+			if p.Get("thoughtSignature").String() != sig || p.Get("extra_content").Exists() || strings.Contains(p.Raw, "thought_signature") {
+				t.Fatalf("p%d left extra_content or thought_signature: %s", idx, p.Raw)
+			}
+		}
+		p2 := ojson.GetBytesNoCopy(out, "contents.0.parts.2")
+		if p2.Get("thoughtSignature").String() != sig || strings.Contains(p2.Raw, "thought_signature") || p2.Get("extra_content.google.keep").String() != "yes" || strings.Count(p2.Raw, `"google"`) != 1 {
+			t.Fatalf("p2 should strip duplicate google sig and keep non-empty google sibling: %s", p2.Raw)
+		}
+		p4 := ojson.GetBytesNoCopy(out, "contents.0.parts.4")
+		if p4.Get("thoughtSignature").String() != sig || strings.Contains(p4.Raw, "thought_signature") || strings.Contains(p4.Raw, `"google"`) || p4.Get("extra_content.keep").String() != "yes" || strings.Count(p4.Raw, `"extra_content"`) != 1 {
+			t.Fatalf("p4 should prune empty duplicate extra_content and keep sibling: %s", p4.Raw)
+		}
+	})
+}

@@ -234,7 +234,6 @@ func interactionsStepDeltaToClaude(modelName string, root ojson.Result, st *inte
 		out = ensureClaudeContentBlock(out, "text", st)
 		return appendClaudeContentDelta(out, "text_delta", "text", text, st)
 	}
-	return nil
 }
 
 func appendClaudeMessageStart(out [][]byte, st *interactionsToClaudeStreamState) [][]byte {

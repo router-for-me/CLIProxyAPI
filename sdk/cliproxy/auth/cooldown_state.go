@@ -79,6 +79,13 @@ type CooldownStateRecord struct {
 	// IndependentNonQuotaCooldownUntil persists NonQuotaCooldownUntil for
 	// IndependentState beneath a credential_quota wrap.
 	IndependentNonQuotaCooldownUntil time.Time `json:"independent_non_quota_cooldown_until,omitempty"`
+	// NonCapacityCooldownUntil persists the deadline of any active non-quota
+	// cooldown layer other than non-forced 503 capacity exhaustion so a
+	// subsequent capacity 503 cannot mask it across restarts.
+	NonCapacityCooldownUntil time.Time `json:"non_capacity_cooldown_until,omitempty"`
+	// IndependentNonCapacityCooldownUntil persists NonCapacityCooldownUntil for
+	// IndependentState beneath a credential_quota wrap.
+	IndependentNonCapacityCooldownUntil time.Time `json:"independent_non_capacity_cooldown_until,omitempty"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.
