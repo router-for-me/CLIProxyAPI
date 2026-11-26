@@ -56,8 +56,12 @@ func homeExecutorTestAuth(token, project string, expiry time.Time) coreauth.Auth
 
 func homeExecutorDispatchJSON(t *testing.T, auth coreauth.Auth, pluginID string) []byte {
 	t.Helper()
+	authIndex := auth.ID
+	if authIndex == "" {
+		authIndex = homePluginIndex
+	}
 	response := map[string]any{
-		"model": homePluginModel, "provider": auth.Provider, "auth_index": homePluginIndex, "auth": auth,
+		"model": homePluginModel, "provider": auth.Provider, "auth_index": authIndex, "auth": auth,
 		"request_retry": 0, "concurrency": map[string]any{"accounted": true, "credential_id": auth.ID, "model": homePluginModel},
 	}
 	if pluginID != "" {
@@ -772,6 +776,8 @@ func TestHomePluginDispatchReleasesOnStreamCancellation(t *testing.T) {
 	released := make(chan executionregistry.ReleaseGroup, 1)
 	registry.SetReleaseSink(func(group executionregistry.ReleaseGroup, _ int64) { released <- group })
 	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	capture := newTestUsageCapturePlugin("antigravity")
+	registerTestUsagePlugin(t, t.Name(), capture)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	result, errStream := manager.ExecuteStream(ctx, []string{"home"}, coreexecutor.Request{Model: homePluginAlias}, coreexecutor.Options{
@@ -807,6 +813,10 @@ func TestHomePluginDispatchReleasesOnStreamCancellation(t *testing.T) {
 	}
 	if snapshot := registry.FreezeInFlight(time.Now()); len(snapshot.Executions) != 0 {
 		t.Fatalf("Home stream execution leaked: %+v", snapshot.Executions)
+	}
+	record := capture.waitRecord(t, 5*time.Second)
+	if record.AuthID != homePluginAuth || !record.Failed {
+		t.Errorf("unexpected cancellation usage record: %+v", record)
 	}
 }
 

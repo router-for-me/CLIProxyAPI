@@ -26,8 +26,8 @@ func EnsureGeminiLeadingUserContentDoc(doc *ojson.Doc, path string) bool {
 	if doc == nil || doc.Len() == 0 {
 		return false
 	}
-	firstRole := doc.Get(path + ".0.role")
-	if firstRole.String() != "model" {
+	firstRole := doc.Get(path + ".0.role").String()
+	if firstRole != "model" && firstRole != "assistant" {
 		return false
 	}
 	contents := doc.Get(path)
@@ -54,25 +54,27 @@ func contentHasFunctionResponse(content ojson.Result) bool {
 		return false
 	}
 	for _, part := range parts.Array() {
-		if part.Get("functionResponse").Exists() {
+		if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
 			return true
 		}
 	}
 	return false
 }
 
-// contentHasFunctionResponseMedia reports whether any functionResponse in the
-// content carries nested media parts (inlineData/fileData).
+// contentHasFunctionResponseMedia reports whether any functionResponse or
+// function_response in the content carries nested media parts (inlineData/fileData).
 func contentHasFunctionResponseMedia(content ojson.Result) bool {
 	parts := content.Get("parts")
 	if !parts.IsArray() {
 		return false
 	}
 	for _, part := range parts.Array() {
-		for _, nested := range part.Get("functionResponse.parts").Array() {
-			if nested.Get("inlineData").Exists() || nested.Get("inline_data").Exists() ||
-				nested.Get("fileData").Exists() || nested.Get("file_data").Exists() {
-				return true
+		for _, nestedPath := range [2]string{"functionResponse.parts", "function_response.parts"} {
+			for _, nested := range part.Get(nestedPath).Array() {
+				if nested.Get("inlineData").Exists() || nested.Get("inline_data").Exists() ||
+					nested.Get("fileData").Exists() || nested.Get("file_data").Exists() {
+					return true
+				}
 			}
 		}
 	}
@@ -180,7 +182,9 @@ func contentIsThoughtOnlyModelTurn(content ojson.Result) bool {
 		return false
 	}
 	for _, part := range parts {
-		if !part.Get("thought").Bool() || part.Get("functionCall").Exists() || part.Get("functionResponse").Exists() {
+		if !part.Get("thought").Bool() ||
+			part.Get("functionCall").Exists() || part.Get("function_call").Exists() ||
+			part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
 			return false
 		}
 	}
