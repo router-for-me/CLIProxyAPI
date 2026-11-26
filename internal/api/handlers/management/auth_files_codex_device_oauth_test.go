@@ -27,7 +27,8 @@ func TestCodexV8DeviceOAuth(t *testing.T) {
 		{name: "authorized", method: http.MethodGet, pollCode: http.StatusOK, poll: `{"authorization_code":"code-fixture","code_verifier":"verifier-fixture","code_challenge":"challenge-fixture"}`, wantStatus: "ok"},
 		{name: "denied", method: http.MethodPost, pollCode: http.StatusBadRequest, poll: `{"error":"access_denied"}`, wantStatus: "error"},
 		{name: "cancelled", method: http.MethodGet, pollCode: http.StatusForbidden, poll: `{}`, wantStatus: "error", cancel: true},
-		{name: "invalid flow", method: http.MethodPost, wantStatus: "invalid"},
+		{name: "invalid flow", method: http.MethodPost, wantStatus: "invalid", poll: `{"provider":"codex","flow":"devcie"}`},
+		{name: "non-string flow", method: http.MethodPost, wantStatus: "invalid", poll: `{"provider":"codex","flow":true}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -64,7 +65,7 @@ func TestCodexV8DeviceOAuth(t *testing.T) {
 					body = strings.NewReader(`{"provider":"codex","flow":"device"}`)
 				}
 				if tt.wantStatus == "invalid" {
-					body = strings.NewReader(`{"provider":"codex","flow":"devcie"}`)
+					body = strings.NewReader(tt.poll)
 				}
 				rec := httptest.NewRecorder()
 				router.ServeHTTP(rec, httptest.NewRequest(tt.method, path, body))

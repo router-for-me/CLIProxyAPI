@@ -146,6 +146,7 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 	verifyAfterLogin := strings.EqualFold(strings.TrimSpace(c.Query("verify")), "true") || strings.TrimSpace(c.Query("verify")) == "1"
 	verifyModel := strings.TrimSpace(c.Query("verify_model"))
 	flow := strings.TrimSpace(c.Query("flow"))
+	invalidFlow := false
 	if c.Request != nil && c.Request.Body != nil {
 		rawBody, errRead := io.ReadAll(c.Request.Body)
 		if errRead != nil {
@@ -201,8 +202,13 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 				}
 			}
 
-			if flowStr, ok := bodyMap["flow"].(string); ok && flow == "" {
-				flow = strings.TrimSpace(flowStr)
+			if rawFlow, exists := bodyMap["flow"]; exists && rawFlow != nil {
+				// Non-string values stay in plugin metadata; only Codex rejects them below.
+				if flowStr, ok := rawFlow.(string); !ok {
+					invalidFlow = true
+				} else if flow == "" {
+					flow = strings.TrimSpace(flowStr)
+				}
 			}
 
 			var rawProxySnake, rawProxyKebab string
@@ -411,10 +417,12 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 	case "claude":
 		h.RequestAnthropicToken(c)
 	case "codex":
-		switch strings.ToLower(flow) {
-		case "":
+		switch {
+		case invalidFlow:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid flow"})
+		case flow == "":
 			h.RequestCodexToken(c)
-		case "device":
+		case strings.EqualFold(flow, "device"):
 			h.requestCodexDeviceToken(c)
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid flow"})
