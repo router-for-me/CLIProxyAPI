@@ -97,19 +97,15 @@ PackyCode provides special discounts for our software users: register using <a h
 <td>kedaya.ai is a stable and efficient AI model API relay service provider, covering leading models including Claude, GPT, Gemini, Grok, Antigravity, and DeepSeek. It supports native OpenAI (including Responses), Anthropic, and Gemini protocols, enabling seamless integration with clients such as CLIProxyAPI, Claude Code, Codex, Gemini CLI, and Grok CLI. OpenAI and Grok model prices can be as low as 0.1% of official rates! <a href="https://kedaya.ai/register?aff=824X8RAHCYXM">Exclusive registration link</a>.</td>
 </tr>
 <tr>
-<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>
-    🥚 <b>[Freebie Alert!] Register & submit a ticket with code to grab $5 free credit + 15% OFF first top-up!</b><br>
-    🚀 <b>More than just API routing — an all-in-one Web workspace:</b> Enjoy Web chat, AI image generation, video creation, and automated workflows right out of the box without any frontend setup.<br>
-    ⚡ <b>All mainstream models supported:</b> High-speed routing for Claude, GPT, Gemini, DeepSeek, and more.<br>
-    🛡️ <b>Reliable guarantees:</b> Hassle-free refunds | Official invoicing | B2B & individual billing | High-availability customer support ready to help!<br><br>
-    👉 Xcode VIP Portal: <a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a><br>
-    💬 Ticket Code: <code>CLIProxyAPI</code> (Submit a ticket to claim your credits instantly)
+  <td width="180"><a href="https://apipdx.com"><img src="./assets/paidaxing.gif" alt="Paidaxing" width="150"></a></td>
+  <td>
+    🎁 <b>[5 free credits on sign-up!]</b> Promo code <code>CLIPROXYAPI</code> — enter it and it lands instantly, no ticket required!<br>
+    🚀 <b>One-stop AI gateway:</b> Claude, GPT, Gemini, DeepSeek, KIMI, GLM and other mainstream models all in one place — one key gets you the whole lineup.<br>
+    💰 <b>Cheap:</b> GPT as low as <b>0.06折</b> (0.6% of list price), DeepSeek / KIMI / GLM as low as <b>4折</b> (40% of list price) — the more you run, the more you save; heavy daily calls won't hurt a bit.<br>
+    🛡️ <b>Stable:</b> High-availability lines stay online around the clock, compatible with Claude Code, Codex and other common clients — it won't drop when it matters.<br><br>
+    👉 Paidaxing VIP portal: <a href="https://apipdx.com">https://apipdx.com</a><br>
+    💬 Promo code: <code>CLIPROXYAPI</code> (enter it at sign-up and 5 credits are added directly)
   </td>
-</tr>
-<tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
-<td>Thanks to <a href="https://x.com/chenju_ai">陈局 (Chenju)</a> for sponsoring this project! Probably the only slot here that won't ask you to sign up — no signup link, no promo code. Just raising a glass to the maintainers, because good open source deserves to be paid for. Come shoot the breeze on X: <a href="https://x.com/chenju_ai">@chenju_ai</a></td>
 </tr>
 <tr>
 <td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
