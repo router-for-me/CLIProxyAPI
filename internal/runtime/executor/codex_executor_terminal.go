@@ -506,13 +506,15 @@ func codexErrorCodeOf(errorBody []byte) string {
 	return ""
 }
 
+// isCodexAPIBillingError covers every error layout buildCodexWebsocketErrorPayload unwraps,
+// because the WebSocket parser classifies the raw event before building its payload.
 func isCodexAPIBillingError(body []byte) bool {
-	switch strings.ToLower(codexErrorCodeOf(body)) {
-	case "credit_balance_exhausted", "billing_hard_limit_reached", "insufficient_quota":
-		return true
-	}
-	for _, path := range []string{"error.type", "type", "body.error.type"} {
-		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(body, path).String()), "insufficient_quota") {
+	for _, prefix := range []string{"", "error.", "body.error.", "response.error."} {
+		switch strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, prefix+"code").String())) {
+		case "credit_balance_exhausted", "billing_hard_limit_reached", "insufficient_quota":
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(body, prefix+"type").String()), "insufficient_quota") {
 			return true
 		}
 	}

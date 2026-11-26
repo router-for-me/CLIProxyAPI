@@ -6,12 +6,21 @@ import (
 )
 
 func TestCodexWebsocketBillingErrorNormalizesExplicitStatus(t *testing.T) {
-	err, ok := parseCodexWebsocketErrorWithCooling([]byte(`{"type":"error","status":502,"error":{"type":"insufficient_quota","code":"credit_balance_exhausted"}}`), true)
-	if !ok {
-		t.Fatal("expected a WebSocket error")
-	}
-	billingErr := err.(statusErrWithHeaders)
-	if billingErr.StatusCode() != http.StatusTooManyRequests || !billingErr.IsCredentialScoped() {
-		t.Fatalf("expected credential-scoped HTTP 429 even with model-level cooling, got %v", billingErr)
+	for name, payload := range map[string]string{
+		"error":          `{"type":"error","status":502,"error":{"type":"insufficient_quota","code":"credit_balance_exhausted"}}`,
+		"body.error":     `{"type":"error","status":400,"body":{"error":{"code":"credit_balance_exhausted"}}}`,
+		"response.error": `{"type":"error","status":400,"response":{"error":{"code":"credit_balance_exhausted"}}}`,
+		"top level":      `{"type":"error","status":400,"code":"insufficient_quota","message":"Your credit balance is too low."}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err, ok := parseCodexWebsocketErrorWithCooling([]byte(payload), true)
+			if !ok {
+				t.Fatal("expected a WebSocket error")
+			}
+			billingErr := err.(statusErrWithHeaders)
+			if billingErr.StatusCode() != http.StatusTooManyRequests || !billingErr.IsCredentialScoped() {
+				t.Fatalf("expected credential-scoped HTTP 429 even with model-level cooling, got %v", billingErr)
+			}
+		})
 	}
 }
