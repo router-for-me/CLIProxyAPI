@@ -362,6 +362,78 @@ func TestBindCodexSIWCRecoversUnauthorizedPreservingQuotaAndDisabled(t *testing.
 	}
 }
 
+func TestBindCodexSIWCZeroDeadlineQuotaDoesNotRestoreUnavailable(t *testing.T) {
+	now := time.Now()
+	future := now.Add(time.Hour)
+	for _, tc := range []struct {
+		name          string
+		recoverAt     time.Time
+		staleAuth     bool
+		forceDeadline time.Time
+		wantPreserved bool
+		wantStatus    Status
+	}{
+		{name: "zero_deadline", staleAuth: true, wantStatus: StatusActive},
+		{name: "future_deadline", recoverAt: future, staleAuth: true, wantPreserved: true, wantStatus: StatusError},
+		{name: "zero_deadline_quota_without_unavailable", wantStatus: StatusError},
+		{name: "future_force_cooldown_keeps_status", staleAuth: true, forceDeadline: future, wantStatus: StatusError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, base, path, _ := setupSIWCBinding(t, "auth.json")
+			quota := QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: tc.recoverAt}
+			m.mu.Lock()
+			a := m.auths[base.ID]
+			a.Status = StatusError
+			if tc.staleAuth {
+				a.RejectedAccessToken = "bound"
+				a.Unavailable = true
+				a.LastError = &Error{HTTPStatus: 401, Code: "unauthorized", Message: "401 unauthorized"}
+			}
+			if !tc.forceDeadline.IsZero() {
+				a.forceCooldownSeeded = true
+				a.forceCooldownUntil = tc.forceDeadline
+				a.credentialRetryAfter = tc.forceDeadline
+				a.nonAuthCredentialRetryAfter = tc.forceDeadline
+			}
+			a.Quota, a.NextRetryAfter = quota, time.Time{}
+			m.mu.Unlock()
+
+			got, err := m.BindCodexSIWC(context.Background(), base.ID, base.RegistrationEpoch, "account", bindingTokens("bound"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			disk := readBindingDisk(t, path)
+			if disk["use_siwc"] != true || disk["siwc"].(map[string]any)["access_token"] != "bound" {
+				t.Fatalf("binding did not persist to disk: %#v", disk)
+			}
+			if tc.wantPreserved {
+				if !got.Unavailable || got.Status != StatusError || !reflect.DeepEqual(got.Quota, quota) {
+					t.Fatalf("future quota deadline was not preserved: %+v", got)
+				}
+				return
+			}
+			if got.Quota.Exceeded || !got.Quota.NextRecoverAt.IsZero() {
+				t.Fatalf("zero/expired quota deadline was not cleared: %+v", got.Quota)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v", got.Status, tc.wantStatus)
+			}
+			if !tc.forceDeadline.IsZero() {
+				if IsAuthAvailableForModel(got, "", now) {
+					t.Fatal("active force cooldown was cleared by binding")
+				}
+				return
+			}
+			if got.Unavailable || !got.NextRetryAfter.IsZero() {
+				t.Fatalf("stale unavailable state was restored: %+v", got)
+			}
+			if !IsAuthAvailableForModel(got, "", now) {
+				t.Fatal("credential remains blocked after binding cleared the stale unavailable state")
+			}
+		})
+	}
+}
+
 func TestBindCodexSIWCRelativeAuthDir(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

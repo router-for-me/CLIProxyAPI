@@ -137,7 +137,11 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 					updated.Unavailable = false
 					updated.LastError = nil
 					updated.StatusMessage = ""
-					updated.Status = StatusActive
+					// A live cooldown still blocks the credential even after the
+					// stale error is cleared, so keep the original status then.
+					if !updated.credentialRetryAfter.After(now) && !updated.nonAuthCredentialRetryAfter.After(now) && !effectiveAuthForceUntil(updated).After(now) {
+						updated.Status = StatusActive
+					}
 					updated.NextRetryAfter = time.Time{}
 					cooldownChanged = true
 				}
@@ -147,11 +151,17 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 			if len(updated.ModelStates) > 0 {
 				cooldownChanged = true
 			}
-			if current.Quota.Exceeded && (current.Quota.NextRecoverAt.IsZero() || current.Quota.NextRecoverAt.After(now)) {
+			if current.Quota.Exceeded && current.Quota.NextRecoverAt.After(now) {
 				updated.Quota = current.Quota.Clone()
 				updated.Unavailable = current.Unavailable
 				updated.NextRetryAfter = current.NextRetryAfter
 				updated.Status = current.Status
+			}
+			// A quota flag without a future recovery deadline would block the
+			// credential forever, whether or not an unauthorized state was
+			// cleared above. Normalize it independently of that path.
+			if updated.Quota.Exceeded && !updated.Quota.NextRecoverAt.After(now) {
+				applyCooldownFields(&updated.Quota, QuotaState{})
 			}
 		}
 		updated.Generation++
