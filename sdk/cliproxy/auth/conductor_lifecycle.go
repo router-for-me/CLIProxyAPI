@@ -737,8 +737,11 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 	seedInitialForceCooldownDeadlines(auth)
 	if auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
-	} else if m.cooldownDisabledForAuth(auth) {
-		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
+	} else {
+		if m.cooldownDisabledForAuth(auth) {
+			cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
+		}
+		cooldownStateChanged = clearStaleUnavailableState(auth, now) || cooldownStateChanged
 	}
 	if existing.Metadata != nil {
 		if persistedHints, hasHints := existing.Metadata["antigravity_capability_hints"]; hasHints {
@@ -1020,6 +1023,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		auth.EnsureIndex()
 		_ = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false)
 		seedInitialForceCooldownDeadlines(auth)
+		_ = clearStaleUnavailableState(auth, now)
 		if len(auth.ModelStates) > 0 {
 			updateAggregatedAvailability(auth, now)
 		}
