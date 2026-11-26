@@ -255,6 +255,84 @@ func TestClearStaleUnavailableState_ClearsStaleModelStates(t *testing.T) {
 	}
 }
 
+func TestClearStaleUnavailableState_PreservesPermanentModelBlocks(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	updatedAt := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+
+	tests := []struct {
+		name      string
+		lastError *Error
+	}{
+		{
+			name:      "permanent with non-401 LastError",
+			lastError: &Error{HTTPStatus: http.StatusForbidden, Code: "forbidden", Message: "blocked"},
+		},
+		{
+			name: "permanent status error without error object",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			perm := &ModelState{
+				Status:      StatusError,
+				Unavailable: true,
+				LastError:   tc.lastError,
+				UpdatedAt:   updatedAt,
+			}
+			cooling := &ModelState{
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: future,
+				UpdatedAt:      updatedAt,
+			}
+			auth := &Auth{
+				ID:          "permanent-block-auth",
+				Provider:    "test",
+				Status:      StatusActive,
+				Unavailable: true,
+				Generation:  3,
+				UpdatedAt:   updatedAt,
+				ModelStates: map[string]*ModelState{
+					"cooling": cooling,
+					"perm":    perm,
+				},
+			}
+			permErr := perm.LastError
+			coolingBefore := cooling.cloneShallow()
+
+			if !clearStaleUnavailableState(auth, now) {
+				t.Fatal("clearStaleUnavailableState() = false, want true for stale auth")
+			}
+			if perm.Status != StatusError || !perm.Unavailable || !perm.NextRetryAfter.IsZero() ||
+				!perm.Quota.NextRecoverAt.IsZero() || perm.LastError != permErr || !perm.UpdatedAt.Equal(updatedAt) {
+				t.Fatalf("permanent model block was mutated: LastError=%p want %p state=%+v", perm.LastError, permErr, perm)
+			}
+			if IsAuthAvailableForModel(auth, "perm", now) {
+				t.Fatal("permanent model block became selectable")
+			}
+			if !cooldownIndependentStateEqual(coolingBefore, cooling) {
+				t.Fatalf("active model cooldown was modified: before=%+v after=%+v", coolingBefore, cooling)
+			}
+
+			generation := auth.Generation
+			authUpdatedAt := auth.UpdatedAt
+			authUnavailable := auth.Unavailable
+			if clearStaleUnavailableState(auth, now) {
+				t.Fatal("clearStaleUnavailableState() = true on second call, want false (churn)")
+			}
+			if auth.Generation != generation || !auth.UpdatedAt.Equal(authUpdatedAt) || auth.Unavailable != authUnavailable {
+				t.Fatalf("second call mutated auth: generation=%d->%d UpdatedAt=%v->%v Unavailable=%v->%v",
+					generation, auth.Generation, authUpdatedAt, auth.UpdatedAt, authUnavailable, auth.Unavailable)
+			}
+			if perm.Status != StatusError || !perm.Unavailable || perm.LastError != permErr || !perm.UpdatedAt.Equal(updatedAt) {
+				t.Fatalf("second call mutated permanent model block: %+v", perm)
+			}
+		})
+	}
+}
+
 func TestClearStaleUnavailableState_PreservesModelStates(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	future := now.Add(time.Hour)
@@ -285,6 +363,19 @@ func TestClearStaleUnavailableState_PreservesModelStates(t *testing.T) {
 			name: "quota exceeded without recovery deadline",
 			mutate: func(s *ModelState) {
 				s.Quota = QuotaState{Exceeded: true, Reason: "quota"}
+			},
+		},
+		{
+			name: "permanent status error without error object",
+			mutate: func(s *ModelState) {
+				s.Status = StatusError
+			},
+		},
+		{
+			name: "permanent with non-401 LastError",
+			mutate: func(s *ModelState) {
+				s.Status = StatusError
+				s.LastError = &Error{HTTPStatus: http.StatusForbidden, Code: "forbidden", Message: "blocked"}
 			},
 		},
 		{
@@ -320,6 +411,67 @@ func TestClearStaleUnavailableState_PreservesModelStates(t *testing.T) {
 			}
 			if state.credentialQuotaShadow != beforeShadow {
 				t.Fatal("active credential quota shadow was replaced")
+			}
+		})
+	}
+}
+
+func TestClearStaleUnavailableState_ResetsExpiredModelDeadlines(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+
+	tests := []struct {
+		name   string
+		mutate func(*ModelState)
+	}{
+		{
+			name: "expired NextRetryAfter",
+			mutate: func(s *ModelState) {
+				s.NextRetryAfter = past
+			},
+		},
+		{
+			name: "expired quota NextRecoverAt",
+			mutate: func(s *ModelState) {
+				s.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: past}
+			},
+		},
+		{
+			name: "residual quota deadline without Exceeded",
+			mutate: func(s *ModelState) {
+				s.Quota = QuotaState{NextRecoverAt: past}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &ModelState{
+				Status:        StatusError,
+				StatusMessage: "model failure",
+				Unavailable:   true,
+				LastError:     &Error{HTTPStatus: http.StatusForbidden, Code: "forbidden", Message: "blocked"},
+				UpdatedAt:     past,
+			}
+			tc.mutate(state)
+			auth := &Auth{
+				ID:          "expired-deadline-auth",
+				Provider:    "test",
+				Status:      StatusActive,
+				Unavailable: true,
+				ModelStates: map[string]*ModelState{"model": state},
+			}
+			if !clearStaleUnavailableState(auth, now) {
+				t.Fatal("clearStaleUnavailableState() = false, want true")
+			}
+			if !modelStateIsClean(state) {
+				t.Fatalf("expired model deadline was not reset: %+v", state)
+			}
+			if !state.UpdatedAt.Equal(now) {
+				t.Fatalf("model UpdatedAt = %v, want %v", state.UpdatedAt, now)
+			}
+			if !IsAuthAvailableForModel(auth, "model", now) {
+				t.Fatal("model stayed blocked after its deadline expired")
 			}
 		})
 	}
@@ -395,6 +547,48 @@ func TestManagerModify_ReenableClearsStaleUnavailable(t *testing.T) {
 	}
 }
 
+func TestManagerModify_PreservesPermanentModelBlock(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	now := time.Now()
+	const authID = "perm-model-modify"
+	updatedAt := now.Add(-time.Hour)
+	if _, errRegister := manager.Register(ctx, &Auth{
+		ID:          authID,
+		Provider:    "test",
+		Status:      StatusActive,
+		Unavailable: true,
+		ModelStates: map[string]*ModelState{
+			"perm": {
+				Status:      StatusError,
+				Unavailable: true,
+				LastError:   &Error{HTTPStatus: http.StatusForbidden, Code: "forbidden", Message: "blocked"},
+				UpdatedAt:   updatedAt,
+			},
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	modified, ok, errModify := manager.Modify(ctx, authID, 0, func(a *Auth) error {
+		a.StatusMessage = "lifecycle touch"
+		return nil
+	})
+	if errModify != nil || !ok {
+		t.Fatalf("Modify() ok=%v err=%v", ok, errModify)
+	}
+	if IsAuthAvailableForModel(modified, "perm", now) {
+		t.Fatal("permanent model block became selectable after Modify")
+	}
+	state, exists := modified.ModelStates["perm"]
+	if !exists {
+		t.Fatal("perm model state missing after Modify")
+	}
+	if state.Status != StatusError || !state.Unavailable || !state.NextRetryAfter.IsZero() ||
+		!state.Quota.NextRecoverAt.IsZero() || state.LastError == nil || !state.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("Modify() reset the permanent model block: %+v", state)
+	}
+}
+
 type staleAvailabilityStore struct {
 	auths []*Auth
 }
@@ -434,5 +628,55 @@ func TestLoad_ClearsStaleUnavailable(t *testing.T) {
 	}
 	if !blocked.Unavailable {
 		t.Fatal("Load() cleared a real future cooldown")
+	}
+}
+
+func TestLoad_PreservesPermanentModelBlock(t *testing.T) {
+	now := time.Now()
+	updatedAt := now.Add(-time.Hour)
+	store := &staleAvailabilityStore{auths: []*Auth{
+		{
+			ID:          "perm-model-load",
+			Provider:    "test",
+			Status:      StatusActive,
+			Unavailable: true,
+			ModelStates: map[string]*ModelState{
+				"perm": {
+					Status:      StatusError,
+					Unavailable: true,
+					LastError:   &Error{HTTPStatus: http.StatusForbidden, Code: "forbidden", Message: "blocked"},
+					UpdatedAt:   updatedAt,
+				},
+			},
+		},
+		{ID: "stale-load", Provider: "test", Status: StatusActive, Unavailable: true},
+	}}
+	manager := NewManager(store, nil, nil)
+	if errLoad := manager.Load(context.Background()); errLoad != nil {
+		t.Fatalf("Load() error = %v", errLoad)
+	}
+
+	loaded, ok := manager.GetByID("perm-model-load")
+	if !ok {
+		t.Fatal("perm-model auth was not loaded")
+	}
+	state, exists := loaded.ModelStates["perm"]
+	if !exists {
+		t.Fatal("perm model state missing after Load")
+	}
+	if state.Status != StatusError || !state.Unavailable || !state.NextRetryAfter.IsZero() ||
+		!state.Quota.NextRecoverAt.IsZero() || state.LastError == nil || !state.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("Load() reset the permanent model block: %+v", state)
+	}
+	if IsAuthAvailableForModel(loaded, "perm", now) {
+		t.Fatal("permanent model block became selectable after Load")
+	}
+
+	stale, ok := manager.GetByID("stale-load")
+	if !ok {
+		t.Fatal("stale auth was not loaded")
+	}
+	if stale.Unavailable {
+		t.Fatal("Load() did not clear stale auth-level unavailable state")
 	}
 }

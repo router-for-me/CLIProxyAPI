@@ -67,6 +67,12 @@ func clearStaleUnavailableState(auth *Auth, now time.Time) bool {
 		if state.Quota.Exceeded && state.Quota.NextRecoverAt.IsZero() {
 			continue
 		}
+		// A permanent per-model block carries error evidence with no recovery
+		// deadline; availabilityBlock treats it as blocked forever.
+		if state.NextRetryAfter.IsZero() && state.Quota.NextRecoverAt.IsZero() &&
+			(state.Status == StatusError || state.LastError != nil || state.StatusMessage != "") {
+			continue
+		}
 		resetModelState(state, now)
 		modelStatesChanged = true
 	}
