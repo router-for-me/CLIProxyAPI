@@ -141,20 +141,27 @@ func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
 	if ctx.Err() != nil || m.HomeEnabled() {
 		return
 	}
-	for _, a := range m.List() {
+	for _, listed := range m.List() {
 		if ctx.Err() != nil {
 			return
 		}
-		if !claudeQuotaCandidate(a) {
+		if !claudeQuotaCandidate(listed) {
 			continue
 		}
 		// AGENTS.md forbids a deadline after the connection opens, so a stalled
 		// probe must hold only its own slot and not the loop.
-		if !m.claudeQuotaProbes.tryStart(a.ID) {
+		if !m.claudeQuotaProbes.tryStart(listed.ID) {
 			continue
 		}
-		// Subscribe before the goroutine starts, so no change is missed.
-		changes, stopWatch := m.WatchAuthChanges(a.ID)
+		// Subscribe first and take the snapshot after it. Each change after
+		// the snapshot then cancels the probe.
+		changes, stopWatch := m.WatchAuthChanges(listed.ID)
+		a, ok := m.GetByID(listed.ID)
+		if !ok || !claudeQuotaCandidate(a) {
+			stopWatch()
+			m.claudeQuotaProbes.finish(listed.ID)
+			continue
+		}
 		go m.runClaudeQuotaProbe(ctx, a, changes, stopWatch)
 	}
 }
