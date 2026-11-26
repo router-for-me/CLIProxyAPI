@@ -48,6 +48,24 @@ type modelsRequest struct {
 	Type    string            `json:"type"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Query   map[string]string `json:"query,omitempty"`
+	Model   string            `json:"model,omitempty"`
+}
+
+const LocalExecutorDispatchKind = "local-plugin"
+
+// LocalExecutorDecision is the Home reply for a credential-free plugin route.
+type LocalExecutorDecision struct {
+	Kind         string `json:"kind"`
+	Plugin       string `json:"plugin"`
+	Version      string `json:"version"`
+	ConfigDigest string `json:"config_digest"`
+	Model        string `json:"model"`
+	Principal    string `json:"principal"`
+	Access       string `json:"access_provider"`
+	Error        *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 type refreshRequest struct {
