@@ -24,6 +24,30 @@ type claudeQuotaProbeSet struct {
 	inFlight map[string]struct{}
 	slots    chan struct{}
 	wg       sync.WaitGroup
+	// epoch closes when the proxy or the executor changes. Each probe of
+	// that epoch then stops, so it cannot keep a slot with old settings.
+	epoch chan struct{}
+}
+
+// currentEpoch returns the channel that closes at the next change.
+func (s *claudeQuotaProbeSet) currentEpoch() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch == nil {
+		s.epoch = make(chan struct{})
+	}
+	return s.epoch
+}
+
+// cancelAll stops every running probe. A probe that starts later uses the
+// new settings.
+func (s *claudeQuotaProbeSet) cancelAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch != nil {
+		close(s.epoch)
+	}
+	s.epoch = make(chan struct{})
 }
 
 // tryStart reserves the probe of authID. It returns false when a probe for
@@ -111,8 +135,9 @@ func claudeQuotaCandidate(a *Auth) bool {
 		// A quota state can keep an old error from before the quota. The live
 		// deadlines above show whether that error still blocks the model. A
 		// model without quota passes only with a server error whose retry
-		// deadline has expired.
-		expiredServerError := isServerError(s.LastError) && !s.NextRetryAfter.IsZero() && !s.NextRetryAfter.After(now)
+		// deadline has expired or was cleared. A model that is unavailable
+		// without a deadline still blocks.
+		expiredServerError := isServerError(s.LastError) && (!s.Unavailable || (!s.NextRetryAfter.IsZero() && !s.NextRetryAfter.After(now)))
 		if !quota && !expiredServerError && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
 			return false
 		}
@@ -132,7 +157,8 @@ func hasLiveNonQuotaBlock(s *ModelState, now time.Time) bool {
 	if s.nonQuotaCooldownUntil.After(now) || s.nonCapacityCooldownUntil.After(now) || s.forceCooldownUntil.After(now) || s.quotaForceCooldownUntil.After(now) {
 		return true
 	}
-	return !isQuotaModelState(s) && isModelStateActiveCooldown(s, now)
+	// The reset keeps a disabled status, so it is not a block here.
+	return s.Status != StatusDisabled && !isQuotaModelState(s) && isModelStateActiveCooldown(s, now)
 }
 
 func isServerError(err *Error) bool {
@@ -162,20 +188,21 @@ func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
 		// Subscribe first and take the snapshot after it. Each change after
 		// the snapshot then cancels the probe.
 		changes, stopWatch := m.WatchAuthChanges(listed.ID)
+		epoch := m.claudeQuotaProbes.currentEpoch()
 		a, ok := m.GetByID(listed.ID)
 		if !ok || !claudeQuotaCandidate(a) {
 			stopWatch()
 			m.claudeQuotaProbes.finish(listed.ID)
 			continue
 		}
-		go m.runClaudeQuotaProbe(ctx, a, changes, stopWatch)
+		go m.runClaudeQuotaProbe(ctx, a, changes, epoch, stopWatch)
 	}
 }
 
 // runClaudeQuotaProbe runs one reserved probe. A change of the auth, such as
-// a new token or proxy, cancels it, so the reservation does not outlive the
-// credential that it probes.
-func (m *Manager) runClaudeQuotaProbe(ctx context.Context, a *Auth, changes <-chan struct{}, stopWatch func()) {
+// a new token or proxy, or a change of the global proxy or executor cancels
+// it, so the reservation does not outlive the settings that it probes with.
+func (m *Manager) runClaudeQuotaProbe(ctx context.Context, a *Auth, changes, epoch <-chan struct{}, stopWatch func()) {
 	defer m.claudeQuotaProbes.finish(a.ID)
 	defer stopWatch()
 	probeCtx, cancel := context.WithCancel(ctx)
@@ -183,6 +210,8 @@ func (m *Manager) runClaudeQuotaProbe(ctx context.Context, a *Auth, changes <-ch
 	go func() {
 		select {
 		case <-changes:
+			cancel()
+		case <-epoch:
 			cancel()
 		case <-probeCtx.Done():
 		}

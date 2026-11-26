@@ -162,6 +162,7 @@ func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
 }
 
 func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
+	m.claudeQuotaProbes.cancelAll()
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	} else {

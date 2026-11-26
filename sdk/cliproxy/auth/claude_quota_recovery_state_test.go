@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func newModelBlockedClaudeAuth(t *testing.T, m *Manager, id string) *Auth {
@@ -473,5 +475,68 @@ func TestClaudeQuotaRecoveryPreservesDisabledShadow(t *testing.T) {
 	}
 	if s := after.ModelStates["claude-retired"]; s.Status != StatusDisabled {
 		t.Fatalf("recovery re-enabled a disabled model from its shadow: %+v", s)
+	}
+}
+
+func TestClaudeQuotaCandidateIgnoresNormalizedSiblingError(t *testing.T) {
+	now := time.Now()
+	a := &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "test"}, ModelStates: map[string]*ModelState{
+		"fable": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(time.Hour), Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)}},
+		"haiku": {Status: StatusError, LastError: &Error{HTTPStatus: 503, Message: "overloaded"}},
+	}}
+	if !claudeQuotaCandidate(a) {
+		t.Fatal("a normalized expired 503 on a sibling stopped the probe")
+	}
+	a.ModelStates["haiku"].Unavailable = true
+	if claudeQuotaCandidate(a) {
+		t.Fatal("an unavailable sibling without a deadline did not stop the probe")
+	}
+}
+
+func TestClaudeQuotaCandidateIgnoresDisabledShadow(t *testing.T) {
+	now := time.Now()
+	a := &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "test"}, Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Hour)}, ModelStates: map[string]*ModelState{
+		"retired": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(time.Hour), Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Hour)}, credentialQuotaShadow: &ModelState{Status: StatusDisabled, StatusMessage: "disabled by operator"}},
+	}}
+	if !claudeQuotaCandidate(a) {
+		t.Fatal("a disabled shadow without quota stopped the probe")
+	}
+	a.ModelStates["retired"].credentialQuotaShadow.nonQuotaCooldownUntil = now.Add(time.Hour)
+	if claudeQuotaCandidate(a) {
+		t.Fatal("a live non-quota deadline in a disabled shadow did not stop the probe")
+	}
+}
+
+func TestClaudeQuotaProbeStopsOnConfigOrExecutorChange(t *testing.T) {
+	for _, change := range []string{"config", "executor"} {
+		t.Run(change, func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			m := NewManager(nil, nil, nil)
+			newModelBlockedClaudeAuth(t, m, t.Name())
+			stall := func(r *http.Request) (*http.Response, error) {
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
+			m.RegisterExecutor(&claudeQuotaExecutor{request: stall})
+			m.reconcileClaudeQuota(context.Background())
+			switch change {
+			case "config":
+				cfg := &internalconfig.Config{}
+				cfg.ProxyURL = "http://127.0.0.1:1"
+				m.SetConfig(cfg)
+			case "executor":
+				m.RegisterExecutor(&claudeQuotaExecutor{request: stall})
+			}
+			done := make(chan struct{})
+			go func() {
+				m.claudeQuotaProbes.wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("a stalled probe kept its reservation after a proxy or executor change")
+			}
+		})
 	}
 }

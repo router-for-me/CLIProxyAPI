@@ -123,6 +123,7 @@ func (m *Manager) RegisterExecutorWithRevision(executor ProviderExecutor) uint64
 		}
 	}
 	m.mu.Unlock()
+	m.claudeQuotaProbes.cancelAll()
 
 	for _, id := range toReschedule {
 		m.queueRefreshReschedule(id)
