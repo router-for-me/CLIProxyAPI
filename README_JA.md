@@ -103,10 +103,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
   </td>
 </tr>
 <tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
-<td><a href="https://x.com/chenju_ai">陈局 (Chenju)</a> による本プロジェクトへのご支援に感謝します！おそらくこの欄で唯一、登録リンクもプロモーションコードもない枠です。優れたオープンソースプロジェクトには対価が支払われるべきという想いから、メンテナーに敬意を表して一杯おごります。X の <a href="https://x.com/chenju_ai">@chenju_ai</a> で気軽に雑談しましょう。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="OriginCoder" width="150"></a></td>
 <td><strong><a href="https://origincoder.com">OriginCoder</a>は、低遅延で安定した接続を提供し、大量の同時リクエストにも対応する企業向けAIゲートウェイです。</strong><strong>Claude MaxとGPT Proのアカウントプールは、構築から運用まですべて自社で管理。モデル本来の性能で利用できるプールを公式料金の30〜40％で提供し、各プールの性能低下の有無もリアルタイムで公開しています。</strong><strong>GPT、Claude、Grok、Gemini-4-Carbon、DeepSeekなど、世界各国の主要AIモデル</strong>に対応し、<strong>Claude CodeやCodex</strong>などの開発ツールからも利用できます。<strong>AIチャット、コーディング支援、画像生成、動画生成</strong>にも対応しています。海外を拠点に現地の法令に従ってサービスを運営しており、<strong>2025年8月のサービス開始以来、15,000を超えるお客様にご利用いただいています</strong>。料金はすべて公開しており、<strong>超過料金はかかりません。10人民元からチャージできます</strong>。<strong>24時間365日の監視、アカウントプールの冗長化、複数ノード間の自動切り替え</strong>により、アクセスが集中する時間帯も安定した接続を維持します。<a href="https://origincoder.com/monitor">サービスの稼働状況はステータスページで公開しています</a>。<strong>会話の内容は保存せず、お客様のプライバシーを守ります</strong>。<strong>法人名義でのお支払いと請求書の発行</strong>にも対応しています。カスタマーサポートへのお問い合わせには<strong>3分以内に返信</strong>し、技術チームは<strong>24時間体制で対応</strong>します。中国本土からご利用の方には、<a href="https://cn.origincoder.com">アクセスを高速化した専用サイト</a>をご用意しています。</td>
 </tr>
