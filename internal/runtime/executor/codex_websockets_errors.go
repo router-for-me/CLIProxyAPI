@@ -99,15 +99,12 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		return nil, false
 	}
 
+	isBillingLimit := isCodexAPIBillingError(payload)
+	if isBillingLimit {
+		status = http.StatusTooManyRequests
+	}
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	isUsageLimit := isCodexUsageLimitError(out)
-	isBillingLimit := isCodexAPIBillingError(out)
-	if isBillingLimit && status != http.StatusTooManyRequests {
-		status = http.StatusTooManyRequests
-		doc := ojson.NewDoc(out)
-		_ = doc.Set("status", status)
-		out = doc.Bytes()
-	}
 	transientCapacity := !isBillingLimit && !isUsageLimit && isCodexTransientCapacityError(out)
 	statusError := statusErr{
 		code:               status,
