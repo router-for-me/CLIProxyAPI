@@ -92,19 +92,15 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>kedaya.ai は、安定性と効率性に優れた AI モデル API 中継サービスプロバイダーです。Claude、GPT、Gemini、Grok、Antigravity、DeepSeek などの主要モデルをカバーし、OpenAI（Responses を含む）、Anthropic、Gemini のネイティブプロトコルに対応しているため、CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI などのクライアントにシームレスに接続できます。OpenAI および Grok モデルの価格は、最安で公式価格の 0.1% から！専用リンク：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>
-    🥚 <b>【タダポチ案件！】登録＆合言葉で $5 相当の無料クレジット + 初回チャージ 15% OFF！</b><br>
-    🚀 <b>単なる API 中継ではなく、オールインワンの Web ワークスペース：</b> フロントエンド構築不要で、Web チャット・AI 画像生成・動画生成・自動ワークフローがブラウザ上ですぐ使えます。<br>
-    ⚡ <b>主要モデル完全網羅：</b> Claude、GPT、Gemini、DeepSeek などの最先端モデルを高速集約。<br>
-    🛡️ <b>安心のサポート体制：</b> いつでも返金可能 ｜ 請求書・領収書対応 ｜ 法人・個人問わず利用可能 ｜ ユーザーの声を大切にする充実のサポート！<br><br>
-    👉 Xcode VIP 専用リンク：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a><br>
-    💬 チケット申請用合言葉：<code>CLIProxyAPI</code>（チケット送信で即時付与）
+  <td width="180"><a href="https://apipdx.com"><img src="./assets/paidaxing.gif" alt="派大星" width="150"></a></td>
+  <td>
+    🎁 <b>【登録で 5 クレジット進呈！】</b>クーポンコード <code>CLIPROXYAPI</code> を入力すれば即時到着、チケット申請は不要！<br>
+    🚀 <b>オールインワン AI 中継サービス：</b>Claude、GPT、Gemini、DeepSeek、KIMI、GLM などの主要モデルを一挙に集約。1 つのキーで全部まとめて使えます。<br>
+    💰 <b>安い：</b>GPT は最安 <b>0.06 折</b>（定価の 0.6%）、DeepSeek・KIMI・GLM は最安 <b>4 折</b>（定価の 40%）。たくさん使うほどお得で、日常の高頻度利用も気にならない。<br>
+    🛡️ <b>安定：</b>高可用な回線で長時間オンライン。Claude Code・Codex などの一般的なクライアントに対応し、ここぞという時に落ちません。<br><br>
+    👉 派大星 VIP 専用入口：<a href="https://apipdx.com">https://apipdx.com</a><br>
+    💬 クーポンコード：<code>CLIPROXYAPI</code>（登録時に入力すると 5 クレジットが直接付与）
   </td>
-</tr>
-<tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
-<td><a href="https://x.com/chenju_ai">陈局 (Chenju)</a> による本プロジェクトへのご支援に感謝します！おそらくこの欄で唯一、登録リンクもプロモーションコードもない枠です。優れたオープンソースプロジェクトには対価が支払われるべきという想いから、メンテナーに敬意を表して一杯おごります。X の <a href="https://x.com/chenju_ai">@chenju_ai</a> で気軽に雑談しましょう。</td>
 </tr>
 <tr>
 <td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="OriginCoder" width="150"></a></td>

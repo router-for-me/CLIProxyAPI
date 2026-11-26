@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -43,6 +44,8 @@ var (
 	shadowPluginCleanupOnce   sync.Once
 	cleanedShadowTempDirs     sync.Map
 	pluginDigestCache         sync.Map
+	residentShadowPaths       sync.Map
+	shadowLoadSequence        atomic.Uint64
 	pruneShadowBeforeLockHook func(shadowFileName string)
 )
 
@@ -154,6 +157,14 @@ func shadowCopyPluginToDirWithGuard(file pluginFile, sourcePath string, dir stri
 		releaseGuard = unlockCoord
 	}
 	target, errCopy := shadowCopyPluginToDirWithDigest(file, dir, size, digest)
+	if errCopy == nil && holdGuard {
+		if _, resident := residentShadowPaths.LoadOrStore(target, struct{}{}); resident {
+			// Native Go images stay mapped after shutdown. Loading the same path
+			// would reuse the shut-down instance and its package globals.
+			file.ID = fmt.Sprintf("%s-reload-%d-%d", file.ID, os.Getpid(), shadowLoadSequence.Add(1))
+			target, errCopy = shadowCopyPluginToDirWithDigest(file, dir, size, digest)
+		}
+	}
 	if errCopy != nil {
 		releaseGuard()
 		return "", nil, errCopy
