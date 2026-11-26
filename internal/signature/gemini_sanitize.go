@@ -418,6 +418,15 @@ func geminiPartHasFunctionResponse(part ojson.Result) bool {
 func geminiPartThoughtSignature(part ojson.Result) (string, bool) {
 	foundEmpty := false
 	for _, path := range geminiPartThoughtSignaturePaths {
+		if path == "extra_content.google.thought_signature" {
+			if sig, exists := ExtraContentGoogleThoughtSignature(part); exists {
+				if sig != "" {
+					return sig, true
+				}
+				foundEmpty = true
+			}
+			continue
+		}
 		result := part.Get(path)
 		if !result.Exists() {
 			continue
@@ -443,6 +452,12 @@ func hasNormalizedGeminiPartThoughtSignature(part ojson.Result, replaySignature 
 		return false
 	}
 	for _, path := range geminiPartThoughtSignaturePaths[1:] {
+		if path == "extra_content.google.thought_signature" {
+			if _, exists := ExtraContentGoogleThoughtSignature(part); exists {
+				return false
+			}
+			continue
+		}
 		if part.Get(path).Exists() {
 			return false
 		}
@@ -452,11 +467,15 @@ func hasNormalizedGeminiPartThoughtSignature(part ojson.Result, replaySignature 
 
 func deleteGeminiPartThoughtSignatureFieldsDoc(doc *ojson.Doc, partPath string) bool {
 	modified := false
+	prefix := ""
+	if partPath != "" {
+		prefix = partPath + "."
+	}
 	for _, relPath := range geminiPartThoughtSignaturePaths {
-		path := relPath
-		if partPath != "" {
-			path = partPath + "." + relPath
+		if relPath == "extra_content.google.thought_signature" {
+			continue
 		}
+		path := prefix + relPath
 		for doc.Get(path).Exists() {
 			beforeLen := doc.Len()
 			if errDelete := doc.Delete(path); errDelete != nil || doc.Len() >= beforeLen {
@@ -465,5 +484,153 @@ func deleteGeminiPartThoughtSignatureFieldsDoc(doc *ojson.Doc, partPath string) 
 			modified = true
 		}
 	}
+	if StripExtraContentGoogleThoughtSignatureDoc(doc, partPath) {
+		modified = true
+	}
 	return modified
+}
+
+// ExtraContentGoogleThoughtSignature returns the first non-empty thought_signature
+// found across all extra_content.google object occurrences in part, and reports
+// whether any extra_content.google.thought_signature key exists.
+func ExtraContentGoogleThoughtSignature(part ojson.Result) (string, bool) {
+	if !part.IsObject() || !part.Get("extra_content").Exists() {
+		return "", false
+	}
+	foundEmpty := false
+	foundSig := ""
+	part.ForEach(func(key, val ojson.Result) bool {
+		if key.String() != "extra_content" || !val.IsObject() {
+			return true
+		}
+		val.ForEach(func(ecKey, ecVal ojson.Result) bool {
+			if ecKey.String() != "google" || !ecVal.IsObject() {
+				return true
+			}
+			ecVal.ForEach(func(gKey, gVal ojson.Result) bool {
+				if gKey.String() != "thought_signature" {
+					return true
+				}
+				if sig := gVal.String(); strings.TrimSpace(sig) != "" {
+					foundSig = sig
+					return false
+				}
+				foundEmpty = true
+				return true
+			})
+			return foundSig == ""
+		})
+		return foundSig == ""
+	})
+	if foundSig != "" {
+		return foundSig, true
+	}
+	return "", foundEmpty
+}
+
+// StripExtraContentGoogleThoughtSignatureDoc removes every occurrence of
+// extra_content.google.thought_signature from the part at partPath and prunes
+// empty google and extra_content wrapper objects while preserving non-empty siblings.
+func StripExtraContentGoogleThoughtSignatureDoc(doc *ojson.Doc, partPath string) bool {
+	if doc == nil || partPath == "" {
+		return false
+	}
+	rebuilt, changed := stripExtraContentGoogleThoughtSignaturePartRaw(doc.Get(partPath))
+	if !changed {
+		return false
+	}
+	return doc.SetRaw(partPath, rebuilt) == nil
+}
+
+// StripExtraContentGoogleThoughtSignaturePartDoc applies the same stripping and
+// empty-wrapper pruning to a standalone part document.
+func StripExtraContentGoogleThoughtSignaturePartDoc(doc *ojson.Doc) (*ojson.Doc, bool) {
+	if doc == nil {
+		return doc, false
+	}
+	rebuilt, changed := stripExtraContentGoogleThoughtSignaturePartRaw(ojson.ParseBytes(doc.Bytes()))
+	if !changed {
+		return doc, false
+	}
+	return ojson.NewDocString(rebuilt), true
+}
+
+func stripExtraContentGoogleThoughtSignaturePartRaw(part ojson.Result) (string, bool) {
+	if !part.IsObject() || !part.Get("extra_content").Exists() {
+		return "", false
+	}
+	var partPairs []string
+	partChanged := false
+	part.ForEach(func(key, val ojson.Result) bool {
+		if key.String() != "extra_content" || !val.IsObject() {
+			partPairs = append(partPairs, key.Raw+":"+val.Raw)
+			return true
+		}
+		rebuiltExtra, keepExtra, extraChanged := stripExtraContentGoogleObject(val)
+		if !keepExtra {
+			partChanged = true
+			return true
+		}
+		if extraChanged {
+			partChanged = true
+			partPairs = append(partPairs, key.Raw+":"+rebuiltExtra)
+			return true
+		}
+		partPairs = append(partPairs, key.Raw+":"+val.Raw)
+		return true
+	})
+	if !partChanged {
+		return "", false
+	}
+	return "{" + strings.Join(partPairs, ",") + "}", true
+}
+
+func stripExtraContentGoogleObject(extra ojson.Result) (string, bool, bool) {
+	var extraPairs []string
+	extraChanged := false
+	extra.ForEach(func(key, val ojson.Result) bool {
+		if key.String() != "google" || !val.IsObject() {
+			extraPairs = append(extraPairs, key.Raw+":"+val.Raw)
+			return true
+		}
+		rebuiltGoogle, keepGoogle, googleChanged := stripGoogleThoughtSignatureObject(val)
+		if !keepGoogle {
+			extraChanged = true
+			return true
+		}
+		if googleChanged {
+			extraChanged = true
+			extraPairs = append(extraPairs, key.Raw+":"+rebuiltGoogle)
+			return true
+		}
+		extraPairs = append(extraPairs, key.Raw+":"+val.Raw)
+		return true
+	})
+	if len(extraPairs) == 0 {
+		return "", false, true
+	}
+	if !extraChanged {
+		return "", true, false
+	}
+	return "{" + strings.Join(extraPairs, ",") + "}", true, true
+}
+
+func stripGoogleThoughtSignatureObject(google ojson.Result) (string, bool, bool) {
+	var googlePairs []string
+	googleChanged := false
+	google.ForEach(func(key, val ojson.Result) bool {
+		if key.String() == "thought_signature" {
+			googleChanged = true
+			return true
+		}
+		googlePairs = append(googlePairs, key.Raw+":"+val.Raw)
+		return true
+	})
+	if len(googlePairs) == 0 {
+		return "", false, true
+	}
+	if !googleChanged {
+		return "", true, false
+	}
+	return "{" + strings.Join(googlePairs, ",") + "}", true, true
 }
