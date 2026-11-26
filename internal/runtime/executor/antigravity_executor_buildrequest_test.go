@@ -1493,6 +1493,306 @@ func TestAntigravityBuildRequest_CapsThinkingBudgetWithMaxOutputTokens(t *testin
 	}
 }
 
+func TestAntigravityBuildRequest_SnakeCaseMaxOutputTokensAboveCatalogLimit(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"max_output_tokens": 70000,
+				"thinkingConfig": {"thinkingBudget": 64000}
+			}
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	doc := ojson.NewDoc(payload)
+	_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "claude-sonnet-4-6", doc, false, "", "https://example.com")
+	if errBuild != nil {
+		t.Fatalf("buildRequestDoc() error: %v", errBuild)
+	}
+	if got := ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens"); got.Exists() {
+		t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+	}
+	if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("maxOutputTokens = %d, want 64000; body=%s", got, finalPayload)
+	}
+	if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+		t.Fatalf("thinkingBudget = %d, want 63999; body=%s", got, finalPayload)
+	}
+}
+
+func TestAntigravityBuildRequest_ClaudeCanonicalizesToolConfigBeforeValidated(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+
+	cases := []struct {
+		name               string
+		model              string
+		payload            string
+		wantAllowedFn      string
+		wantIncludeServer  bool
+		checkIncludeServer bool
+	}{
+		{
+			name:               "snake_case_tool_config_and_function_calling_config",
+			model:              "claude-opus-5-5-high",
+			payload:            `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"include_server_side_tool_invocations":false,"function_calling_config":{"mode":"AUTO","allowed_function_names":["bash"]}}}}`,
+			wantAllowedFn:      "bash",
+			wantIncludeServer:  false,
+			checkIncludeServer: true,
+		},
+		{
+			name:          "snake_case_tool_config_camel_functionCallingConfig",
+			model:         "claude-sonnet-4-6",
+			payload:       `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["read_file"]}}}}`,
+			wantAllowedFn: "read_file",
+		},
+		{
+			name:          "camel_toolConfig_snake_function_calling_config",
+			model:         "claude-sonnet-4-6",
+			payload:       `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"toolConfig":{"function_calling_config":{"mode":"AUTO","allowed_function_names":["grep"]}}}}`,
+			wantAllowedFn: "grep",
+		},
+		{
+			name:          "duplicate_tool_config_and_toolConfig_deduplicated",
+			model:         "claude-sonnet-4-6",
+			payload:       `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"function_calling_config":{"mode":"AUTO"}},"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["bash"]}}}}`,
+			wantAllowedFn: "bash",
+		},
+		{
+			name:               "duplicate_containers_preserve_snake_allowed_function_names_and_siblings",
+			model:              "claude-sonnet-4-6",
+			payload:            `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"include_server_side_tool_invocations":false,"function_calling_config":{"mode":"ANY","allowed_function_names":["read_file"]}},"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}}}}`,
+			wantAllowedFn:      "read_file",
+			wantIncludeServer:  false,
+			checkIncludeServer: true,
+		},
+		{
+			name:          "duplicate_function_calling_configs_inside_toolConfig_preserve_snake_allowlist",
+			model:         "claude-sonnet-4-6",
+			payload:       `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO"},"function_calling_config":{"mode":"ANY","allowed_function_names":["grep"]}}}}`,
+			wantAllowedFn: "grep",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := ojson.NewDocString(tc.payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", tc.model, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", tc.model, errBuild)
+			}
+			if ojson.GetBytes(finalPayload, "request.tool_config").Exists() {
+				t.Fatalf("emitted duplicate proto-JSON request.tool_config alongside request.toolConfig: %s", finalPayload)
+			}
+			if ojson.GetBytes(finalPayload, "request.toolConfig.function_calling_config").Exists() {
+				t.Fatalf("emitted duplicate proto-JSON function_calling_config alongside functionCallingConfig: %s", finalPayload)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
+				t.Fatalf("request.toolConfig.functionCallingConfig.mode = %q, want VALIDATED; body=%s", got, finalPayload)
+			}
+			if tc.wantAllowedFn != "" {
+				allowedCamel := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
+				allowedSnake := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.allowed_function_names.0").String()
+				if allowedCamel != tc.wantAllowedFn && allowedSnake != tc.wantAllowedFn {
+					t.Fatalf("allowed function name lost: camel=%q snake=%q want=%q; body=%s", allowedCamel, allowedSnake, tc.wantAllowedFn, finalPayload)
+				}
+			}
+			if tc.checkIncludeServer {
+				inc := ojson.GetBytes(finalPayload, "request.toolConfig.include_server_side_tool_invocations")
+				if !inc.Exists() || inc.Bool() != tc.wantIncludeServer {
+					t.Fatalf("include_server_side_tool_invocations = %s, want %t; body=%s", inc.Raw, tc.wantIncludeServer, finalPayload)
+				}
+			}
+		})
+	}
+
+	t.Run("duplicate_containers_camelCase_fields_take_precedence_without_alias_duplication", func(t *testing.T) {
+		payload := `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"include_server_side_tool_invocations":false,"function_calling_config":{"mode":"ANY","allowed_function_names":["read_file"]}},"toolConfig":{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["bash"]}}}}`
+		doc := ojson.NewDocString(payload)
+		_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "claude-sonnet-4-6", doc, false, "", "https://example.com")
+		if errBuild != nil {
+			t.Fatalf("buildRequestDoc() error: %v", errBuild)
+		}
+		if ojson.GetBytes(finalPayload, "request.tool_config").Exists() {
+			t.Fatalf("unexpected request.tool_config: %s", finalPayload)
+		}
+		if ojson.GetBytes(finalPayload, "request.toolConfig.include_server_side_tool_invocations").Exists() {
+			t.Fatalf("unexpected duplicate snake_case include_server_side_tool_invocations: %s", finalPayload)
+		}
+		if ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.allowed_function_names").Exists() {
+			t.Fatalf("unexpected duplicate snake_case allowed_function_names: %s", finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.toolConfig.includeServerSideToolInvocations"); !got.Exists() || !got.Bool() {
+			t.Fatalf("includeServerSideToolInvocations = %s, want true; body=%s", got.Raw, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != "bash" {
+			t.Fatalf("allowedFunctionNames.0 = %q, want bash; body=%s", got, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
+			t.Fatalf("mode = %q, want VALIDATED; body=%s", got, finalPayload)
+		}
+	})
+}
+
+func TestAntigravityBuildRequest_NonClaudeStripsAllMaxOutputTokenAliases(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+
+	cases := []struct {
+		name              string
+		payload           string
+		wantGenConfigGone bool
+		wantTemperature   float64
+		checkTemperature  bool
+	}{
+		{
+			name:              "snake_container_snake_key_only",
+			payload:           `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"max_output_tokens":4096}}}`,
+			wantGenConfigGone: true,
+		},
+		{
+			name:             "snake_container_snake_key_preserves_siblings",
+			payload:          `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"max_output_tokens":4096,"temperature":0.7}}}`,
+			wantTemperature:  0.7,
+			checkTemperature: true,
+		},
+		{
+			name:              "snake_container_camel_key_only",
+			payload:           `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"maxOutputTokens":4096}}}`,
+			wantGenConfigGone: true,
+		},
+		{
+			name:             "camel_container_snake_key",
+			payload:          `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"max_output_tokens":4096,"temperature":0.3}}}`,
+			wantTemperature:  0.3,
+			checkTemperature: true,
+		},
+		{
+			name:             "camel_container_camel_key",
+			payload:          `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":4096,"temperature":0.5}}}`,
+			wantTemperature:  0.5,
+			checkTemperature: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := ojson.NewDocString(tc.payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "gemini-4-hydrogen-high", doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc() error: %v", errBuild)
+			}
+			for _, path := range []string{
+				"request.generationConfig.maxOutputTokens",
+				"request.generationConfig.max_output_tokens",
+				"request.generation_config.maxOutputTokens",
+				"request.generation_config.max_output_tokens",
+			} {
+				if ojson.GetBytes(finalPayload, path).Exists() {
+					t.Fatalf("%s was not stripped on non-Claude model: %s", path, finalPayload)
+				}
+			}
+			if tc.wantGenConfigGone && ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
+				t.Fatalf("empty request.generation_config should be pruned: %s", finalPayload)
+			}
+			if tc.checkTemperature {
+				tempCamel := ojson.GetBytes(finalPayload, "request.generationConfig.temperature")
+				tempSnake := ojson.GetBytes(finalPayload, "request.generation_config.temperature")
+				if (!tempCamel.Exists() || tempCamel.Float() != tc.wantTemperature) && (!tempSnake.Exists() || tempSnake.Float() != tc.wantTemperature) {
+					t.Fatalf("temperature sibling lost (want %v): %s", tc.wantTemperature, finalPayload)
+				}
+			}
+		})
+	}
+
+	t.Run("mixed_generationConfig_and_generation_config_merged_without_duplication", func(t *testing.T) {
+		payload := `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}},"generation_config":{"max_output_tokens":4096,"temperature":0.7}}}`
+		doc := ojson.NewDocString(payload)
+		_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "gemini-4-hydrogen-high", doc, false, "", "https://example.com")
+		if errBuild != nil {
+			t.Fatalf("buildRequestDoc() error: %v", errBuild)
+		}
+		if ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
+			t.Fatalf("emitted duplicate request.generation_config alongside request.generationConfig: %s", finalPayload)
+		}
+		for _, path := range []string{
+			"request.generationConfig.maxOutputTokens",
+			"request.generationConfig.max_output_tokens",
+		} {
+			if ojson.GetBytes(finalPayload, path).Exists() {
+				t.Fatalf("%s was not stripped on non-Claude model: %s", path, finalPayload)
+			}
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.temperature").Float(); got != 0.7 {
+			t.Fatalf("temperature = %v, want 0.7; body=%s", got, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "HIGH" {
+			t.Fatalf("thinkingLevel = %q, want HIGH; body=%s", got, finalPayload)
+		}
+	})
+}
+
+func TestAntigravityBuildRequest_SnakeCaseGenerationConfigMaxOutputTokensCapped(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+
+	t.Run("catalog_limit_caps_snake_case_generation_config", func(t *testing.T) {
+		payload := `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generation_config":{"max_output_tokens":70000,"temperature":0.5,"thinking_config":{"thinking_budget":64000}}}}`
+		doc := ojson.NewDocString(payload)
+		_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "claude-sonnet-4-6", doc, false, "", "https://example.com")
+		if errBuild != nil {
+			t.Fatalf("buildRequestDoc() error: %v", errBuild)
+		}
+		if ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
+			t.Fatalf("emitted duplicate request.generation_config alongside request.generationConfig: %s", finalPayload)
+		}
+		if ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens").Exists() {
+			t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+			t.Fatalf("maxOutputTokens = %d, want 64000; body=%s", got, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.temperature").Float(); got != 0.5 {
+			t.Fatalf("temperature = %v, want 0.5; body=%s", got, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinking_config.thinking_budget").Int(); got != 63999 {
+			t.Fatalf("thinking_budget = %d, want 63999; body=%s", got, finalPayload)
+		}
+	})
+
+	t.Run("thinking_group_preserves_smaller_snake_case_generation_config_limit", func(t *testing.T) {
+		payload := `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generation_config":{"max_output_tokens":32000,"temperature":0.3,"thinking_config":{"thinking_budget":40000}}}}`
+		selection := cliproxyauth.AntigravityModelSelection{ID: "claude-sonnet-4-6-high", MaxOutputTokens: 65536}
+		doc := ojson.NewDocString(payload)
+		_, finalPayload, errBuild := executor.buildRequestForModelDoc(context.Background(), auth, "token", selection, doc, false, "", "https://example.com")
+		if errBuild != nil {
+			t.Fatalf("buildRequestForModelDoc() error: %v", errBuild)
+		}
+		if ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
+			t.Fatalf("emitted duplicate request.generation_config alongside request.generationConfig: %s", finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 32000 {
+			t.Fatalf("maxOutputTokens = %d, want 32000; body=%s", got, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.temperature").Float(); got != 0.3 {
+			t.Fatalf("temperature = %v, want 0.3; body=%s", got, finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinking_config.thinking_budget").Int(); got != 31999 {
+			t.Fatalf("thinking_budget = %d, want 31999; body=%s", got, finalPayload)
+		}
+	})
+}
+
 func TestAntigravityBuildRequest_CaseInsensitiveGeminiProAndImageModels(t *testing.T) {
 	t.Parallel()
 

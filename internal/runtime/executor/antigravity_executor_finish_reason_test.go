@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -392,5 +394,368 @@ func TestAntigravityStreamPreservesQuotedFilterNoticeWithUsageMetadata(t *testin
 	}
 	if !bytes.Contains(joined.Bytes(), []byte(quotedNotice)) {
 		t.Fatalf("expected quoted filter notice in stream output, got %s", joined.String())
+	}
+}
+
+func TestAntigravityStreamCleanEOFWithoutFinishReasonCommitsReasoningReplay(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model     = "gemini-3.8-flash-high"
+		sessionID = "clean-eof-stream-replay"
+	)
+	signature := strings.Repeat("c", 128)
+	noFinishReasonSSE := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + signature + `","functionCall":{"name":"bash","args":{"command":"ls"},"id":"call_clean_eof_1"}}]}}],"modelVersion":"` + model + `","responseId":"resp-clean-eof-1","usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":15,"totalTokenCount":135,"thoughtsTokenCount":20}}}` + "\n\n"
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := newIssue7881TestAuth("auth-clean-eof-stream")
+
+	turn1Ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(noFinishReasonSSE)),
+		}, nil
+	}))
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Stream:         true,
+		Headers:        http.Header{"Session-Id": []string{sessionID}},
+	}
+	turn1Body := `{"model":"` + model + `","max_tokens":1024,"stream":true,"tools":[{"name":"bash","description":"run shell command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}],"messages":[{"role":"user","content":"list files"}]}`
+	stream1, errStream1 := exec.ExecuteStream(turn1Ctx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(turn1Body),
+	}, opts)
+	if errStream1 != nil {
+		t.Fatalf("Turn 1 ExecuteStream() error = %v", errStream1)
+	}
+
+	var sawMessageStop bool
+	for chunk := range stream1.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("Turn 1 unexpected stream error: %v", chunk.Err)
+		}
+		if strings.Contains(string(chunk.Payload), `"type":"message_stop"`) {
+			sawMessageStop = true
+		}
+	}
+	if !sawMessageStop {
+		t.Fatal("expected Turn 1 clean-EOF stream to deliver synthetic message_stop")
+	}
+
+	items, ok := internalcache.GetAntigravityReasoningReplayItems(model, "responses:"+sessionID)
+	if !ok || len(items) == 0 {
+		t.Fatalf("clean-EOF tool stream committed 0 reasoning replay items (ok=%v)", ok)
+	}
+	var hasSig bool
+	for _, item := range items {
+		if ojson.GetBytesNoCopy(item, "thoughtSignature").String() == signature {
+			hasSig = true
+			break
+		}
+	}
+	if !hasSig {
+		t.Fatalf("committed replay items did not contain expected thoughtSignature: %q", items)
+	}
+
+	var capturedTurn2Request []byte
+	turn2Ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		raw, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		capturedTurn2Request = append([]byte(nil), raw...)
+		respSSE := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5,"totalTokenCount":17},"modelVersion":"` + model + `","responseId":"resp-clean-eof-turn2"}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(respSSE)),
+		}, nil
+	}))
+
+	turn2Body := `{"model":"` + model + `","max_tokens":1024,"stream":true,"tools":[{"name":"bash","description":"run shell command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}],"messages":[{"role":"user","content":"list files"},{"role":"assistant","content":[{"type":"tool_use","id":"call_clean_eof_1","name":"bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_clean_eof_1","content":"README.md"}]}]}`
+	stream2, errStream2 := exec.ExecuteStream(turn2Ctx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(turn2Body),
+	}, opts)
+	if errStream2 != nil {
+		t.Fatalf("Turn 2 ExecuteStream() error = %v", errStream2)
+	}
+	for chunk := range stream2.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("Turn 2 stream error: %v", chunk.Err)
+		}
+	}
+
+	var restored bool
+	for _, content := range ojson.GetBytesNoCopy(capturedTurn2Request, "request.contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("functionCall.name").String() == "bash" && part.Get("thoughtSignature").String() == signature {
+				restored = true
+			}
+		}
+	}
+	if !restored {
+		t.Fatalf("Turn 2 missed thoughtSignature replay after Turn 1 clean-EOF tool stream; upstream request = %s", string(capturedTurn2Request))
+	}
+}
+
+func TestAntigravityExecuteClaudeNonStreamCleanEOFWithoutFinishReasonCommitsReasoningReplay(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model     = "gemini-3-pro"
+		sessionID = "clean-eof-nonstream-replay"
+	)
+	signature := strings.Repeat("p", 128)
+	noFinishReasonSSE := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + signature + `","functionCall":{"name":"bash","args":{"command":"pwd"},"id":"call_clean_eof_ns_1"}}]}}],"modelVersion":"` + model + `","responseId":"resp-clean-eof-ns-1","usageMetadata":{"promptTokenCount":80,"candidatesTokenCount":10,"totalTokenCount":90,"thoughtsTokenCount":12}}}` + "\n\n"
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := newIssue7881TestAuth("auth-clean-eof-nonstream")
+
+	reqCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(noFinishReasonSSE)),
+		}, nil
+	}))
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Stream:         false,
+		Headers:        http.Header{"Session-Id": []string{sessionID}},
+	}
+	reqBody := `{"model":"` + model + `","max_tokens":1024,"stream":false,"tools":[{"name":"bash","description":"run shell command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}],"messages":[{"role":"user","content":"print working directory"}]}`
+	resp, errExec := exec.Execute(reqCtx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(reqBody),
+	}, opts)
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected non-empty response payload")
+	}
+
+	items, ok := internalcache.GetAntigravityReasoningReplayItems(model, "responses:"+sessionID)
+	if !ok || len(items) == 0 {
+		t.Fatalf("clean-EOF executeClaudeNonStream committed 0 reasoning replay items (ok=%v)", ok)
+	}
+	var hasSig bool
+	for _, item := range items {
+		if ojson.GetBytesNoCopy(item, "thoughtSignature").String() == signature {
+			hasSig = true
+			break
+		}
+	}
+	if !hasSig {
+		t.Fatalf("committed replay items did not contain expected thoughtSignature: %q", items)
+	}
+}
+
+func TestAntigravityStreamCleanEOFIncompleteStreamingFunctionCallDoesNotCommitReplay(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model     = "gemini-3.8-flash-high"
+		sessionID = "clean-eof-incomplete-fc"
+	)
+	signature := strings.Repeat("i", 128)
+	incompleteFC := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + signature + `","functionCall":{"id":"call_incomplete","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}],"modelVersion":"` + model + `","responseId":"resp-incomplete-fc","usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5,"totalTokenCount":25}}}` + "\n\n"
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := newIssue7881TestAuth("auth-clean-eof-incomplete")
+
+	reqCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(incompleteFC)),
+		}, nil
+	}))
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Stream:         true,
+		Headers:        http.Header{"Session-Id": []string{sessionID}},
+	}
+	reqBody := `{"model":"` + model + `","max_tokens":1024,"stream":true,"tools":[{"name":"get_weather","description":"get weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}],"messages":[{"role":"user","content":"weather in NY"}]}`
+	stream, errStream := exec.ExecuteStream(reqCtx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(reqBody),
+	}, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+	}
+
+	if items, ok := internalcache.GetAntigravityReasoningReplayItems(model, "responses:"+sessionID); ok || len(items) != 0 {
+		t.Fatalf("incomplete streaming functionCall on clean EOF must not commit replay items, got ok=%v items=%d", ok, len(items))
+	}
+}
+
+func TestAntigravityReasoningReplayMarkCleanEOFRequiresObservedCandidate(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	scope := antigravityReasoningReplayScope{modelName: "gemini-3.8-flash-high", sessionKey: "session:mark-clean-eof-empty"}
+	existing := []byte(`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"existing-signature-123456789"}`)
+	internalcache.CacheAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{existing})
+
+	reqPayload := []byte(`{"sessionId":"mark-clean-eof-empty","request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+	acc := newAntigravityReasoningReplayAccumulator(scope, reqPayload)
+	acc.ObserveSSELine([]byte(`data: {"response":{"usageMetadata":{"promptTokenCount":10}}}`))
+	acc.MarkCleanEOF()
+	acc.Commit(context.Background())
+
+	if items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey); !ok || len(items) != 1 {
+		t.Fatalf("MarkCleanEOF without observed candidate must not commit or wipe existing cache, got ok=%v items=%d", ok, len(items))
+	}
+}
+
+func TestAntigravityExecuteClaudeNonStreamEmptyCandidatePreservesExistingReplayCache(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model     = "gemini-3-pro"
+		sessionID = "clean-eof-empty-candidate"
+	)
+	existing := []byte(`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"existing-signature-123456789"}`)
+	internalcache.CacheAntigravityReasoningReplayItems(model, "responses:"+sessionID, [][]byte{existing})
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := newIssue7881TestAuth("auth-empty-candidate")
+
+	reqCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(`data: {"response":{"candidates":[{}]}}` + "\n\n")),
+		}, nil
+	}))
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Stream:         false,
+		Headers:        http.Header{"Session-Id": []string{sessionID}},
+	}
+	reqBody := `{"model":"` + model + `","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"hello"}]}`
+	_, errExec := exec.Execute(reqCtx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(reqBody),
+	}, opts)
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	items, ok := internalcache.GetAntigravityReasoningReplayItems(model, "responses:"+sessionID)
+	if !ok || len(items) != 1 || ojson.GetBytesNoCopy(items[0], "thoughtSignature").String() != "existing-signature-123456789" {
+		t.Fatalf("empty candidate without finishReason must not wipe existing replay cache, got ok=%v items=%q", ok, items)
+	}
+}
+
+func TestAntigravityStreamCleanEOFWithTrailingIncompleteSSEFrameDoesNotCommitReplay(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model     = "gemini-3.8-flash-high"
+		sessionID = "clean-eof-trailing-incomplete-stream"
+	)
+	signature := strings.Repeat("t", 128)
+	truncatedStream := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + signature + `","functionCall":{"name":"bash","args":{"command":"ls"},"id":"call_trunc_1"}}]}}],"modelVersion":"` + model + `","responseId":"resp-trunc-1","usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":10,"totalTokenCount":60}}}` + "\n\n" +
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"cut off`
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := newIssue7881TestAuth("auth-trailing-incomplete-stream")
+
+	reqCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(truncatedStream)),
+		}, nil
+	}))
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Stream:         true,
+		Headers:        http.Header{"Session-Id": []string{sessionID}},
+	}
+	reqBody := `{"model":"` + model + `","max_tokens":1024,"stream":true,"tools":[{"name":"bash","description":"run shell command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}],"messages":[{"role":"user","content":"list files"}]}`
+	stream, errStream := exec.ExecuteStream(reqCtx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(reqBody),
+	}, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+	}
+
+	if items, ok := internalcache.GetAntigravityReasoningReplayItems(model, "responses:"+sessionID); ok || len(items) != 0 {
+		t.Fatalf("stream with trailing incomplete SSE JSON frame must not commit replay items, got ok=%v items=%d", ok, len(items))
+	}
+}
+
+func TestAntigravityExecuteClaudeNonStreamCleanEOFWithTrailingIncompleteSSEFrameDoesNotCommitReplay(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model     = "gemini-3-pro"
+		sessionID = "clean-eof-trailing-incomplete-nonstream"
+	)
+	signature := strings.Repeat("n", 128)
+	truncatedStream := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + signature + `","functionCall":{"name":"bash","args":{"command":"pwd"},"id":"call_trunc_ns_1"}}]}}],"modelVersion":"` + model + `","responseId":"resp-trunc-ns-1","usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":10,"totalTokenCount":60}}}` + "\n\n" +
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"cut off`
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := newIssue7881TestAuth("auth-trailing-incomplete-nonstream")
+
+	reqCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(truncatedStream)),
+		}, nil
+	}))
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Stream:         false,
+		Headers:        http.Header{"Session-Id": []string{sessionID}},
+	}
+	reqBody := `{"model":"` + model + `","max_tokens":1024,"stream":false,"tools":[{"name":"bash","description":"run shell command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}],"messages":[{"role":"user","content":"print working directory"}]}`
+	_, errExec := exec.Execute(reqCtx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(reqBody),
+	}, opts)
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	if items, ok := internalcache.GetAntigravityReasoningReplayItems(model, "responses:"+sessionID); ok || len(items) != 0 {
+		t.Fatalf("executeClaudeNonStream with trailing incomplete SSE JSON frame must not commit replay items, got ok=%v items=%d", ok, len(items))
 	}
 }

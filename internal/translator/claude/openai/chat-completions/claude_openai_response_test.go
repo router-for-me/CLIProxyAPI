@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -786,5 +787,116 @@ func TestConvertClaudeResponseToOpenAI_MultiHopFallbackAndStickyDefault(t *testi
 	stickyChunks := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, translatedDefaultReq, stickyStart, &stickyParam)
 	if len(stickyChunks) != 1 || ojson.GetBytesNoCopy(stickyChunks[0], "choices.0.delta.fallback.to.model").String() != "claude-opus-4-8" {
 		t.Fatalf("sticky default Chat start chunk = %s, want delta.fallback.to.model=claude-opus-4-8", string(stickyChunks[0]))
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_RestoresSanitizedToolNames(t *testing.T) {
+	ctx := context.Background()
+	longName := "mcp_server_namespace_" + strings.Repeat("longtoolname", 5)
+	sanitizedLongName := longName[:64]
+	originalReq := []byte(`{"model":"claude-sonnet-4-6","tools":[{"type":"function","function":{"name":"mcp.github.search_code","parameters":{"type":"object"}}},{"type":"function","function":{"name":"` + longName + `","parameters":{"type":"object"}}}]}`)
+
+	events := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_tool_restore","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"mcp_github_search_code","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"abc\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_2","name":"` + sanitizedLongName + `","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":15}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var streamNames []string
+	for _, ev := range events {
+		for _, chunk := range ConvertClaudeResponseToOpenAI(ctx, "claude-sonnet-4-6", originalReq, nil, ev, &param) {
+			if name := ojson.GetBytesNoCopy(chunk, "choices.0.delta.tool_calls.0.function.name"); name.Exists() {
+				streamNames = append(streamNames, name.String())
+			}
+		}
+	}
+	if len(streamNames) != 2 || streamNames[0] != "mcp.github.search_code" || streamNames[1] != longName {
+		t.Fatalf("stream restored tool names = %v, want [mcp.github.search_code %s]", streamNames, longName)
+	}
+
+	sseRaw := bytes.Join(events, []byte("\n"))
+	nonStreamOut := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-sonnet-4-6", originalReq, nil, sseRaw, nil)
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp.github.search_code" {
+		t.Fatalf("non-stream SSE tool_calls[0].function.name = %q, want mcp.github.search_code; output=%s", got, nonStreamOut)
+	}
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "choices.0.message.tool_calls.1.function.name").String(); got != longName {
+		t.Fatalf("non-stream SSE tool_calls[1].function.name = %q, want %q; output=%s", got, longName, nonStreamOut)
+	}
+
+	nativeRaw := []byte(`{"id":"msg_tool_restore_native","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"tool_use","id":"toolu_1","name":"mcp_github_search_code","input":{"q":"abc"}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}}`)
+	nativeOut := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-sonnet-4-6", originalReq, nil, nativeRaw, nil)
+	if got := ojson.GetBytesNoCopy(nativeOut, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp.github.search_code" {
+		t.Fatalf("non-stream native tool_calls[0].function.name = %q, want mcp.github.search_code; output=%s", got, nativeOut)
+	}
+
+	t.Run("ignores tools without explicit function type", func(t *testing.T) {
+		reqWithUntyped := []byte(`{"model":"claude-sonnet-4-6","tools":[{"function":{"name":"mcp.search","parameters":{"type":"object"}}},{"type":"function","function":{"name":"mcp_search","parameters":{"type":"object"}}}]}`)
+		untypedEvents := [][]byte{
+			[]byte(`data: {"type":"message_start","message":{"id":"msg_untyped","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}`),
+			[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_u1","name":"mcp_search","input":{}}}`),
+			[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}`),
+			[]byte(`data: {"type":"content_block_stop","index":0}`),
+			[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}`),
+			[]byte(`data: {"type":"message_stop"}`),
+		}
+		var untypedParam any
+		var gotStreamName string
+		for _, ev := range untypedEvents {
+			for _, chunk := range ConvertClaudeResponseToOpenAI(ctx, "claude-sonnet-4-6", reqWithUntyped, nil, ev, &untypedParam) {
+				if name := ojson.GetBytesNoCopy(chunk, "choices.0.delta.tool_calls.0.function.name"); name.Exists() {
+					gotStreamName = name.String()
+				}
+			}
+		}
+		if gotStreamName != "mcp_search" {
+			t.Fatalf("stream tool name = %q, want mcp_search", gotStreamName)
+		}
+		gotNonStream := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-sonnet-4-6", reqWithUntyped, nil, bytes.Join(untypedEvents, []byte("\n")), nil)
+		if got := ojson.GetBytesNoCopy(gotNonStream, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp_search" {
+			t.Fatalf("non-stream tool name = %q, want mcp_search; output=%s", got, gotNonStream)
+		}
+	})
+}
+
+func TestConvertClaudeResponseToOpenAINonStream_HandlesErrorEvents(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name:  "single SSE error event",
+			input: []byte(`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`),
+		},
+		{
+			name: "mid-stream SSE error event",
+			input: []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-6\"}}\n" +
+				"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n"),
+		},
+		{
+			name:  "native JSON error payload",
+			input: []byte(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-sonnet-4-6", nil, nil, tc.input, nil)
+			if got := ojson.GetBytesNoCopy(out, "error.message").String(); got != "Overloaded" {
+				t.Fatalf("error.message = %q, want Overloaded; output=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "error.type").String(); got != "overloaded_error" {
+				t.Fatalf("error.type = %q, want overloaded_error; output=%s", got, out)
+			}
+			if ojson.GetBytesNoCopy(out, "choices").Exists() {
+				t.Fatalf("error response must not contain fabricated choices; output=%s", out)
+			}
+		})
 	}
 }

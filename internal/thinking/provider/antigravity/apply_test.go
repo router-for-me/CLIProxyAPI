@@ -307,3 +307,88 @@ func TestApplier_EmitsUppercaseThinkingLevelEnumNames(t *testing.T) {
 		}
 	})
 }
+
+func TestApplier_ClaudeEffectiveMaxTokensSnakeCase(t *testing.T) {
+	applier := thinking.GetProviderApplier("antigravity")
+	if applier == nil {
+		t.Fatal("antigravity provider applier is not registered")
+	}
+	modelInfo := claudeSonnet46AntigravityModel()
+
+	t.Run("strips_thinking_for_snake_case_max_output_tokens_at_or_below_1024", func(t *testing.T) {
+		tests := []struct {
+			name string
+			body string
+		}{
+			{
+				name: "generationConfig_max_output_tokens_1024",
+				body: `{"request":{"generationConfig":{"max_output_tokens":1024,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":2048}}}}`,
+			},
+			{
+				name: "generationConfig_max_output_tokens_512",
+				body: `{"request":{"generationConfig":{"max_output_tokens":512,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":2048}}}}`,
+			},
+			{
+				name: "generation_config_max_output_tokens_512",
+				body: `{"request":{"generation_config":{"max_output_tokens":512,"thinking_config":{"include_thoughts":true,"thinking_budget":2048}}}}`,
+			},
+			{
+				name: "non_numeric_maxOutputTokens_falls_back_to_numeric_max_output_tokens",
+				body: `{"request":{"generationConfig":{"maxOutputTokens":"4096","max_output_tokens":512,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":2048}}}}`,
+			},
+			{
+				name: "both_camel_and_snake_uses_smaller_limit",
+				body: `{"request":{"generationConfig":{"maxOutputTokens":4096,"max_output_tokens":1024,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":2048}}}}`,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errApply := applier.Apply([]byte(tc.body), thinking.ThinkingConfig{Mode: thinking.ModeBudget, Budget: 2048}, modelInfo)
+				if errApply != nil {
+					t.Fatalf("Apply() error = %v", errApply)
+				}
+				if tcNode := ojson.GetBytes(out, "request.generationConfig.thinkingConfig"); tcNode.Exists() {
+					t.Fatalf("expected thinkingConfig to be stripped, got %s; body=%s", tcNode.Raw, out)
+				}
+				if tcSnake := ojson.GetBytes(out, "request.generationConfig.thinking_config"); tcSnake.Exists() {
+					t.Fatalf("expected thinking_config to be stripped, got %s; body=%s", tcSnake.Raw, out)
+				}
+				if got := ojson.GetBytes(out, "request.generationConfig.maxOutputTokens"); got.Exists() && got.Type == ojson.Number && got.Int() == int64(modelInfo.MaxCompletionTokens) {
+					t.Fatalf("unexpected default maxOutputTokens=%d injected when caller provided max_output_tokens; body=%s", got.Int(), out)
+				}
+			})
+		}
+	})
+
+	t.Run("clamps_budget_using_snake_case_max_output_tokens_2048", func(t *testing.T) {
+		body := []byte(`{"request":{"generationConfig":{"max_output_tokens":2048,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":4096}}}}`)
+		out, errApply := applier.Apply(body, thinking.ThinkingConfig{Mode: thinking.ModeBudget, Budget: 4096}, modelInfo)
+		if errApply != nil {
+			t.Fatalf("Apply() error = %v", errApply)
+		}
+		if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 2047 {
+			t.Fatalf("thinkingBudget = %d, want 2047; body=%s", got, out)
+		}
+		if include := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+			t.Fatalf("includeThoughts = %s, want true; body=%s", include.Raw, out)
+		}
+		if got := ojson.GetBytes(out, "request.generationConfig.maxOutputTokens"); got.Exists() {
+			t.Fatalf("expected default maxOutputTokens not to be injected when max_output_tokens is set, got %s; body=%s", got.Raw, out)
+		}
+	})
+
+	t.Run("caps_caller_max_output_tokens_above_model_limit", func(t *testing.T) {
+		body := []byte(`{"request":{"generationConfig":{"max_output_tokens":70000,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":64000}}}}`)
+		out, errApply := applier.Apply(body, thinking.ThinkingConfig{Mode: thinking.ModeBudget, Budget: 64000}, modelInfo)
+		if errApply != nil {
+			t.Fatalf("Apply() error = %v", errApply)
+		}
+		if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+			t.Fatalf("thinkingBudget = %d, want 63999; body=%s", got, out)
+		}
+		if include := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+			t.Fatalf("includeThoughts = %s, want true; body=%s", include.Raw, out)
+		}
+	})
+}

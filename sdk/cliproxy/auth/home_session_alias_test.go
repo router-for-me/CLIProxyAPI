@@ -1082,3 +1082,32 @@ func TestExecuteHomeLCPCompactionPreservesNodeKindInExecutorOptions(t *testing.T
 		t.Fatalf("execOpts.Metadata[NodeKind] = %q, want compaction", gotNodeKind)
 	}
 }
+
+func TestHomeDispatchSessionIDsAliasesMessageHashTurn2InsteadOfParent(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+
+	turn1Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"home msg hash turn 1"}]}`),
+		Metadata:        map[string]any{},
+	}
+	session1, parent1 := manager.homeDispatchSessionIDs(turn1Opts)
+	if session1 == "" || parent1 != "" {
+		t.Fatalf("turn 1 homeDispatchSessionIDs() = (%q, %q), want (non-empty msg:*, empty)", session1, parent1)
+	}
+
+	turn2Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"home msg hash turn 1"},{"role":"assistant","content":"home reply 1"},{"role":"user","content":"home msg hash turn 2"}]}`),
+		Metadata:        map[string]any{},
+	}
+	session2, parent2 := manager.homeDispatchSessionIDs(turn2Opts)
+	if session2 != session1 {
+		t.Fatalf("turn 2 canonical session = %q, want aliased to turn 1 session %q", session2, session1)
+	}
+	if parent2 != "" {
+		t.Fatalf("turn 2 parentSessionID = %q, want empty (message-hash continuation must not be treated as subagent)", parent2)
+	}
+}

@@ -280,14 +280,99 @@ func videosCreateRequestFromForm(c *gin.Context) ([]byte, error) {
 	if value := strings.TrimSpace(firstPostForm(c, "input_reference[file_id]", "input_reference.file_id", "file_id")); value != "" {
 		_ = rawDoc.Set("input_reference.file_id", value)
 	}
-	if refs := strings.TrimSpace(c.PostForm("reference_image_urls")); refs != "" {
-		for _, ref := range strings.Split(refs, ",") {
-			if ref = strings.TrimSpace(ref); ref != "" {
-				_ = rawDoc.Set("reference_image_urls.-1", ref)
-			}
+	refValues := append([]string(nil), c.PostFormArray("reference_image_urls")...)
+	refValues = append(refValues, c.PostFormArray("reference_image_urls[]")...)
+	for _, rawRef := range refValues {
+		for _, ref := range parseReferenceImageURLFormValue(rawRef) {
+			_ = rawDoc.Set("reference_image_urls.-1", ref)
 		}
 	}
 	return rawDoc.Bytes(), nil
+}
+
+func parseReferenceImageURLFormValue(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "[") && ojson.Valid(trimmed) {
+		parsed := ojson.Parse(trimmed)
+		if parsed.IsArray() {
+			var out []string
+			parsed.ForEach(func(_, item ojson.Result) bool {
+				var value string
+				switch {
+				case item.Type == ojson.String:
+					value = strings.TrimSpace(item.String())
+				case item.IsObject():
+					if directURL := item.Get("url"); directURL.Type == ojson.String {
+						value = strings.TrimSpace(directURL.String())
+					}
+					if value == "" {
+						if nestedURL := item.Get("image_url.url"); nestedURL.Type == ojson.String {
+							value = strings.TrimSpace(nestedURL.String())
+						}
+					}
+				}
+				if value != "" {
+					out = append(out, value)
+				}
+				return true
+			})
+			return out
+		}
+	}
+
+	parts := strings.Split(trimmed, ",")
+	out := make([]string, 0, len(parts))
+	for i := 0; i < len(parts); i++ {
+		part := strings.TrimSpace(parts[i])
+		if part == "" {
+			continue
+		}
+		if isReferenceURLBoundary(part) {
+			var b strings.Builder
+			b.WriteString(part)
+			if hasDataURLPrefix(part) && i+1 < len(parts) {
+				b.WriteByte(',')
+				b.WriteString(strings.TrimLeft(parts[i+1], " \t\r\n"))
+				i++
+			}
+			for i+1 < len(parts) {
+				nextIdx := i + 1
+				for nextIdx < len(parts) && strings.TrimSpace(parts[nextIdx]) == "" {
+					nextIdx++
+				}
+				if nextIdx >= len(parts) {
+					i = len(parts) - 1
+					break
+				}
+				if isReferenceURLBoundary(strings.TrimSpace(parts[nextIdx])) {
+					i = nextIdx - 1
+					break
+				}
+				for j := i + 1; j <= nextIdx; j++ {
+					b.WriteByte(',')
+					b.WriteString(parts[j])
+				}
+				i = nextIdx
+			}
+			out = append(out, strings.TrimSpace(b.String()))
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func hasDataURLPrefix(value string) bool {
+	return len(value) >= len("data:") && strings.EqualFold(value[:len("data:")], "data:")
+}
+
+func isReferenceURLBoundary(value string) bool {
+	return hasDataURLPrefix(value) ||
+		(len(value) >= len("http://") && strings.EqualFold(value[:len("http://")], "http://")) ||
+		(len(value) >= len("https://") && strings.EqualFold(value[:len("https://")], "https://"))
 }
 
 func firstPostForm(c *gin.Context, keys ...string) string {
