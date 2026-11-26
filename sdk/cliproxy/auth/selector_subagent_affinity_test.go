@@ -310,3 +310,152 @@ func TestSessionAffinitySubagentAliasIsolation(t *testing.T) {
 		t.Fatalf("parent cache key %s = (%q, %v), want (auth-1, true)", parentCacheKey, val, ok)
 	}
 }
+
+func TestMessageHashTurn2NotMisclassifiedAsSubagent(t *testing.T) {
+	t.Parallel()
+
+	turn2Payload := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"follow up"}]}`)
+	primaryID, fallbackID := extractMessageHashIDs(turn2Payload)
+	if primaryID == "" || fallbackID == "" || primaryID == fallbackID {
+		t.Fatalf("extractMessageHashIDs() = (%q, %q), want distinct non-empty msg:* hashes", primaryID, fallbackID)
+	}
+
+	if isHierarchyParent(primaryID, fallbackID) {
+		t.Fatalf("isHierarchyParent(%q, %q) = true, want false for message-hash continuation", primaryID, fallbackID)
+	}
+	if isSubagentSession(primaryID, fallbackID) {
+		t.Fatalf("isSubagentSession(%q, %q) = true, want false for message-hash continuation", primaryID, fallbackID)
+	}
+
+	// Preserve explicit hierarchy parent detection for non-msg prefixes and :agent: markers.
+	hierarchyCases := [][2]string{
+		{"claude:root-1:agent:worker-1", "claude:root-1"},
+		{"claude:child-1", "claude:parent-1"},
+		{"slot:worker-1", "slot:root-0"},
+		{"codex:child-1", "codex:parent-1"},
+		{"agy:child-1", "agy:parent-1"},
+		{"geminicache:child-1", "geminicache:parent-1"},
+		{"lcp:v1:child-1", "lcp:v1:parent-1"},
+	}
+	for _, tc := range hierarchyCases {
+		if !isHierarchyParent(tc[0], tc[1]) {
+			t.Fatalf("isHierarchyParent(%q, %q) = false, want true", tc[0], tc[1])
+		}
+		if !isSubagentSession(tc[0], tc[1]) {
+			t.Fatalf("isSubagentSession(%q, %q) = false, want true", tc[0], tc[1])
+		}
+	}
+}
+
+func TestSessionAffinityMessageHashTurn2RetainsAffinityWhenSubagentAffinityFalse(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: &disabled,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-ag-1", Provider: "antigravity"},
+		{ID: "auth-ag-2", Provider: "antigravity"},
+	}
+
+	turn1Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"hello from turn 1"}]}`),
+		Metadata:        map[string]any{},
+	}
+	turn1Auth, errTurn1 := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", turn1Opts, auths)
+	if errTurn1 != nil {
+		t.Fatalf("turn 1 Pick() error = %v", errTurn1)
+	}
+	if turn1Auth.ID != "auth-ag-1" {
+		t.Fatalf("turn 1 auth = %q, want auth-ag-1", turn1Auth.ID)
+	}
+
+	turn2Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"hello from turn 1"},{"role":"assistant","content":"hi there"},{"role":"user","content":"turn 2 follow up"}]}`),
+		Metadata:        map[string]any{},
+	}
+	turn2Auth, errTurn2 := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", turn2Opts, auths)
+	if errTurn2 != nil {
+		t.Fatalf("turn 2 Pick() error = %v", errTurn2)
+	}
+	if turn2Auth.ID != "auth-ag-1" {
+		t.Fatalf("turn 2 lost session affinity under SubagentAffinity=false: got %q, want auth-ag-1", turn2Auth.ID)
+	}
+}
+
+func TestSessionAffinityMessageHashTurn2AliasesRebindAndResultLifecycle(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	turn1Payload := []byte(`{"messages":[{"role":"user","content":"lifecycle turn 1"}]}`)
+	turn2Payload := []byte(`{"messages":[{"role":"user","content":"lifecycle turn 1"},{"role":"assistant","content":"lifecycle ack 1"},{"role":"user","content":"lifecycle turn 2"}]}`)
+	fullHash, shortHash := extractMessageHashIDs(turn2Payload)
+	if fullHash == "" || shortHash == "" || fullHash == shortHash {
+		t.Fatalf("extractMessageHashIDs() = (%q, %q), want distinct msg:* hashes", fullHash, shortHash)
+	}
+
+	// 1. SubagentAffinity=true: boundAuthForRequest finds Turn 1 binding from Turn 2 fallbackID,
+	// bind() refreshes both fullHash and shortHash, and OnResult(Success: false) clears both.
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: &enabled,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-1", Provider: "antigravity"},
+		{ID: "auth-2", Provider: "antigravity"},
+	}
+	turn1Opts := cliproxyexecutor.Options{OriginalRequest: turn1Payload, Metadata: map[string]any{}}
+	turn2Opts := cliproxyexecutor.Options{OriginalRequest: turn2Payload, Metadata: map[string]any{}}
+
+	if picked, errPick := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", turn1Opts, auths); errPick != nil || picked.ID != "auth-1" {
+		t.Fatalf("turn 1 Pick() = (%v, %v), want auth-1", picked, errPick)
+	}
+	if boundID, okBound := selector.boundAuthForRequest([]string{"antigravity"}, "gemini-3.7-flash-high", turn2Opts); !okBound || boundID != "auth-1" {
+		t.Fatalf("boundAuthForRequest(turn2) = (%q, %v), want (auth-1, true)", boundID, okBound)
+	}
+	if picked, errPick := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", turn2Opts, auths); errPick != nil || picked.ID != "auth-1" {
+		t.Fatalf("turn 2 Pick() = (%v, %v), want auth-1", picked, errPick)
+	}
+
+	selector.OnResult(Result{
+		AuthID:  "auth-1",
+		Success: false,
+		Options: turn2Opts,
+	})
+	shortKey := "antigravity::" + shortHash + "::gemini-3.7-flash-high"
+	fullKey := "antigravity::" + fullHash + "::gemini-3.7-flash-high"
+	if val, ok := selector.cache.Get(fullKey); ok {
+		t.Fatalf("fullHash cache key was not cleared on failure: got %q", val)
+	}
+	if val, ok := selector.cache.Get(shortKey); ok {
+		t.Fatalf("shortHash fallback cache key was not cleared on Turn 2 failure: got %q", val)
+	}
+
+	// 2. rebindOnNever refuses failover on Turn 2 when Turn 1's bound auth becomes unavailable.
+	neverSelector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: &enabled,
+		RebindOn:         SessionAffinityRebindOnNever,
+	})
+	defer neverSelector.Stop()
+
+	auth1 := &Auth{ID: "auth-1", Provider: "antigravity"}
+	auth2 := &Auth{ID: "auth-2", Provider: "antigravity"}
+	if picked, errPick := neverSelector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", cliproxyexecutor.Options{OriginalRequest: turn1Payload, Metadata: map[string]any{}}, []*Auth{auth1, auth2}); errPick != nil || picked.ID != "auth-1" {
+		t.Fatalf("neverSelector turn 1 Pick() = (%v, %v), want auth-1", picked, errPick)
+	}
+	auth1.Disabled = true
+	auth1.Status = StatusDisabled
+	if picked, errPick := neverSelector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", cliproxyexecutor.Options{OriginalRequest: turn2Payload, Metadata: map[string]any{}}, []*Auth{auth1, auth2}); errPick == nil || picked != nil {
+		t.Fatalf("neverSelector turn 2 Pick() with disabled bound auth = (%v, %v), want (nil, error refusing failover)", picked, errPick)
+	}
+}

@@ -1301,3 +1301,92 @@ func TestConvertAntigravityResponseToOpenAI_SeparatesDeltaPayloadFromTerminalFin
 		}
 	})
 }
+
+func TestConvertAntigravityResponseToOpenAI_NullOrEmptyFinishReasonDoesNotClobberCachedReason(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name           string
+		upstreamReason string
+		trailingRaw    string
+		wantFinish     string
+		wantNative     string
+	}{
+		{name: "safety_trailing_empty", upstreamReason: "SAFETY", trailingRaw: `""`, wantFinish: "content_filter", wantNative: "safety"},
+		{name: "safety_trailing_null", upstreamReason: "SAFETY", trailingRaw: "null", wantFinish: "content_filter", wantNative: "safety"},
+		{name: "safety_trailing_whitespace", upstreamReason: "SAFETY", trailingRaw: `"   "`, wantFinish: "content_filter", wantNative: "safety"},
+		{name: "recitation_trailing_empty", upstreamReason: "RECITATION", trailingRaw: `""`, wantFinish: "content_filter", wantNative: "recitation"},
+		{name: "max_tokens_trailing_empty", upstreamReason: "MAX_TOKENS", trailingRaw: `""`, wantFinish: "length", wantNative: "max_tokens"},
+		{name: "max_tokens_trailing_null", upstreamReason: "MAX_TOKENS", trailingRaw: "null", wantFinish: "length", wantNative: "max_tokens"},
+		{name: "lowercase_max_tokens_trailing_null", upstreamReason: "max_tokens", trailingRaw: "null", wantFinish: "length", wantNative: "max_tokens"},
+	}
+
+	for _, tc := range cases {
+		t.Run("trailing_usage_"+tc.name, func(t *testing.T) {
+			var param any
+			chunk1 := []byte(`{"response":{"responseId":"resp_8186","modelVersion":"claude-opus-5-5","candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"` + tc.upstreamReason + `"}]}}`)
+			chunk2 := []byte(`{"response":{"responseId":"resp_8186","modelVersion":"claude-opus-5-5","candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":` + tc.trailingRaw + `}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+
+			_ = ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk1, &param)
+			out2 := ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk2, &param)
+			if len(out2) != 1 {
+				t.Fatalf("output count = %d, want 1; outputs=%q", len(out2), out2)
+			}
+			if got := ojson.GetBytesNoCopy(out2[0], "choices.0.finish_reason").String(); got != tc.wantFinish {
+				t.Fatalf("finish_reason = %q, want %q; payload=%s", got, tc.wantFinish, out2[0])
+			}
+			if got := ojson.GetBytesNoCopy(out2[0], "choices.0.native_finish_reason").String(); got != tc.wantNative {
+				t.Fatalf("native_finish_reason = %q, want %q; payload=%s", got, tc.wantNative, out2[0])
+			}
+			if got := ojson.GetBytesNoCopy(out2[0], "usage.total_tokens").Int(); got != 15 {
+				t.Fatalf("usage.total_tokens = %d, want 15; payload=%s", got, out2[0])
+			}
+
+			done := ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, []byte("[DONE]"), &param)
+			if len(done) != 0 {
+				t.Fatalf("DONE output count = %d, want 0 after terminal chunk; outputs=%q", len(done), done)
+			}
+		})
+	}
+
+	t.Run("empty_null_and_whitespace_finishReason_preserve_cached_reason_until_DONE", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"responseId":"resp_8186_done","modelVersion":"claude-opus-5-5","candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"SAFETY"}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":""}],"cpaUsageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+		chunk3 := []byte(`{"response":{"candidates":[{"finishReason":null}]}}`)
+		chunk4 := []byte(`{"response":{"candidates":[{"finishReason":"   "}]}}`)
+
+		_ = ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk1, &param)
+		_ = ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk2, &param)
+		_ = ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk3, &param)
+		_ = ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk4, &param)
+
+		done := ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, []byte("[DONE]"), &param)
+		if len(done) != 1 {
+			t.Fatalf("DONE output count = %d, want 1; outputs=%q", len(done), done)
+		}
+		if got := ojson.GetBytesNoCopy(done[0], "choices.0.finish_reason").String(); got != "content_filter" {
+			t.Fatalf("DONE finish_reason = %q, want %q; payload=%s", got, "content_filter", done[0])
+		}
+		if got := ojson.GetBytesNoCopy(done[0], "choices.0.native_finish_reason").String(); got != "safety" {
+			t.Fatalf("DONE native_finish_reason = %q, want %q; payload=%s", got, "safety", done[0])
+		}
+		if got := ojson.GetBytesNoCopy(done[0], "usage.total_tokens").Int(); got != 15 {
+			t.Fatalf("DONE usage.total_tokens = %d, want 15; payload=%s", got, done[0])
+		}
+	})
+
+	t.Run("blank_or_null_finishReason_with_usage_does_not_finalize_prematurely", func(t *testing.T) {
+		for _, rawFinish := range []string{`""`, "null", `"   "`} {
+			var param any
+			chunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":` + rawFinish + `}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}}`)
+			out := ConvertAntigravityResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, chunk, &param)
+			if len(out) != 1 {
+				t.Fatalf("finishReason=%s: output count = %d, want 1; outputs=%q", rawFinish, len(out), out)
+			}
+			if fr := ojson.GetBytesNoCopy(out[0], "choices.0.finish_reason"); fr.Type != ojson.Null {
+				t.Fatalf("finishReason=%s: finish_reason = %s, want null; payload=%s", rawFinish, fr.Raw, out[0])
+			}
+		}
+	})
+}
