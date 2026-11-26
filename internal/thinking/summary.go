@@ -90,8 +90,12 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 		if config, ok := firstSummaryBoolConfigFromGetter(get, []string{
 			"generationConfig.thinkingConfig.includeThoughts",
 			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
 			"generation_config.thinking_config.include_thoughts",
 			"generation_config.thinking_config.includeThoughts",
+			"generation_config.thinkingConfig.include_thoughts",
+			"generation_config.thinkingConfig.includeThoughts",
 		}); ok {
 			return config
 		}
@@ -101,6 +105,10 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 			"request.generationConfig.thinkingConfig.include_thoughts",
 			"request.generationConfig.thinking_config.includeThoughts",
 			"request.generationConfig.thinking_config.include_thoughts",
+			"request.generation_config.thinkingConfig.includeThoughts",
+			"request.generation_config.thinkingConfig.include_thoughts",
+			"request.generation_config.thinking_config.includeThoughts",
+			"request.generation_config.thinking_config.include_thoughts",
 		}); ok {
 			return config
 		}
@@ -108,6 +116,8 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 		for _, path := range []string{
 			"generation_config.thinking_summaries",
 			"generation_config.thinkingSummaries",
+			"generationConfig.thinking_summaries",
+			"generationConfig.thinkingSummaries",
 		} {
 			if config, ok := interactionsSummaryConfigFromGetter(get, path); ok {
 				return config
@@ -124,6 +134,10 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 			"generation_config.thinking_config.includeThoughts",
 			"generation_config.thinkingConfig.include_thoughts",
 			"generation_config.thinkingConfig.includeThoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
+			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinkingConfig.includeThoughts",
 		}); ok {
 			return config
 		}
@@ -335,27 +349,41 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 		if doc.Set("generationConfig.thinkingConfig.includeThoughts", enabled) == nil {
 			modified = true
 		}
-		for _, path := range []string{
+		if cleanupSummaryAliasFieldsDoc(doc, []string{
 			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
 			"generation_config.thinking_config.include_thoughts",
 			"generation_config.thinking_config.includeThoughts",
-		} {
-			if doc.Get(path).Exists() && doc.Delete(path) == nil {
-				modified = true
-			}
+			"generation_config.thinkingConfig.include_thoughts",
+			"generation_config.thinkingConfig.includeThoughts",
+		}, []string{
+			"generationConfig.thinking_config",
+			"generation_config.thinking_config",
+			"generation_config.thinkingConfig",
+			"generation_config",
+		}) {
+			modified = true
 		}
 	case "antigravity":
 		if doc.Set("request.generationConfig.thinkingConfig.includeThoughts", enabled) == nil {
 			modified = true
 		}
-		for _, path := range []string{
+		if cleanupSummaryAliasFieldsDoc(doc, []string{
 			"request.generationConfig.thinkingConfig.include_thoughts",
 			"request.generationConfig.thinking_config.includeThoughts",
 			"request.generationConfig.thinking_config.include_thoughts",
-		} {
-			if doc.Get(path).Exists() && doc.Delete(path) == nil {
-				modified = true
-			}
+			"request.generation_config.thinkingConfig.includeThoughts",
+			"request.generation_config.thinkingConfig.include_thoughts",
+			"request.generation_config.thinking_config.includeThoughts",
+			"request.generation_config.thinking_config.include_thoughts",
+		}, []string{
+			"request.generationConfig.thinking_config",
+			"request.generation_config.thinkingConfig",
+			"request.generation_config.thinking_config",
+			"request.generation_config",
+		}) {
+			modified = true
 		}
 	case "interactions":
 		// Google Interactions only accepts auto or none. OpenAI's concise and
@@ -367,7 +395,25 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 		if doc.Set("generation_config.thinking_summaries", value) == nil {
 			modified = true
 		}
-		if doc.Get("generation_config.thinkingSummaries").Exists() && doc.Delete("generation_config.thinkingSummaries") == nil {
+		if cleanupSummaryAliasFieldsDoc(doc, []string{
+			"generation_config.thinkingSummaries",
+			"generationConfig.thinking_summaries",
+			"generationConfig.thinkingSummaries",
+			"generation_config.thinking_config.include_thoughts",
+			"generation_config.thinking_config.includeThoughts",
+			"generation_config.thinkingConfig.include_thoughts",
+			"generation_config.thinkingConfig.includeThoughts",
+			"generationConfig.thinking_config.include_thoughts",
+			"generationConfig.thinking_config.includeThoughts",
+			"generationConfig.thinkingConfig.include_thoughts",
+			"generationConfig.thinkingConfig.includeThoughts",
+		}, []string{
+			"generation_config.thinking_config",
+			"generation_config.thinkingConfig",
+			"generationConfig.thinking_config",
+			"generationConfig.thinkingConfig",
+			"generationConfig",
+		}) {
 			modified = true
 		}
 	case "openai-response", "codex":
@@ -390,6 +436,39 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 		}
 		if reasoning := doc.Get("reasoning"); reasoning.IsObject() && len(reasoning.Map()) == 0 {
 			if doc.Delete("reasoning") == nil {
+				modified = true
+			}
+		}
+	}
+	return modified
+}
+
+func cleanupSummaryAliasFieldsDoc(doc *ojson.Doc, fieldPaths []string, containers []string) bool {
+	modified := false
+	deletedPaths := make([]string, 0, len(fieldPaths))
+	for _, path := range fieldPaths {
+		if doc.Get(path).Exists() && doc.Delete(path) == nil {
+			modified = true
+			deletedPaths = append(deletedPaths, path)
+		}
+	}
+	if len(deletedPaths) == 0 {
+		return false
+	}
+	for _, container := range containers {
+		prefix := container + "."
+		touched := false
+		for _, deleted := range deletedPaths {
+			if strings.HasPrefix(deleted, prefix) {
+				touched = true
+				break
+			}
+		}
+		if !touched {
+			continue
+		}
+		if node := doc.Get(container); node.Exists() && node.IsObject() && len(node.Map()) == 0 {
+			if doc.Delete(container) == nil {
 				modified = true
 			}
 		}

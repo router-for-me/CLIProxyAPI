@@ -81,7 +81,8 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+	grant := execOptions.homeLocalExecutor
+	if h.AuthManager != nil && h.AuthManager.HomeEnabled() && grant == nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
 		close(errChan)
@@ -94,11 +95,11 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		close(errChan)
 		return nil, nil, errChan
 	}
+	if grant != nil {
+		ctx = grant.usageContext(ctx, originalRequestedModel)
+	}
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, true))
-	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
-	lifecycle := h.newRequestLifecycleTracker(execCtx, entryProtocol, modelName, originalRequestedModel, true, opts.Metadata, execOptions.SkipInterceptorPluginID)
-	var interceptErr *interfaces.ErrorMessage
-	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(execCtx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+	req, opts, lifecycle, interceptErr := h.preparePluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
 	if interceptErr != nil {
 		lifecycle.completeError(execCtx, interceptErr)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -115,6 +116,9 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		return nil, nil, errChan
 	}
 	execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
+	if grant != nil {
+		execCtx = grant.prepare(execCtx, &req, originalRequestedModel)
+	}
 	var reporter *helps.UsageReporter
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)
@@ -352,9 +356,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
-	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
-	if !preparedRoute {
-		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+	var routeDecision modelRouteDecision
+	if !h.isHomeLocalExecutorModel(modelName) {
+		var preparedRoute bool
+		routeDecision, preparedRoute = preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
+		if !preparedRoute {
+			routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+		}
 	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
@@ -422,6 +430,22 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		errChan <- interceptErr
 		close(errChan)
 		return nil, nil, errChan
+	}
+	grant, errGrant := h.authorizeHomeLocalExecution(ctx, modelName, opts, execOptions.SkipRouterPluginID)
+	if errGrant == nil && grant != nil {
+		errGrant = validateNativeInteractionsExecution(entryProtocol, execOptions, modelRouteDecision{ExecutorPluginID: grant.Plugin})
+	}
+	if errGrant != nil {
+		lifecycle.completeError(ctx, errGrant)
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errGrant
+		close(errChan)
+		return nil, nil, errChan
+	}
+	if grant != nil {
+		grant.request, grant.options, grant.lifecycle = req, opts, lifecycle
+		execOptions.homeLocalExecutor = grant
+		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, grant.Model, originalRequestedModel, rawJSON, alt, grant.Plugin, execOptions)
 	}
 	ctx = coreauth.WithRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)

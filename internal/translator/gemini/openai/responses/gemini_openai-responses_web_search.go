@@ -91,7 +91,7 @@ func HasOnlyResponsesWebSearchTools(root ojson.Result) bool {
 // AllowsResponsesWebSearchToolChoice checks whether tool_choice permits web search execution.
 func AllowsResponsesWebSearchToolChoice(root ojson.Result) bool {
 	toolChoice := root.Get("tool_choice")
-	if !toolChoice.Exists() {
+	if !toolChoice.Exists() || toolChoice.Type == ojson.Null {
 		return true
 	}
 	if toolChoice.Type == ojson.String {

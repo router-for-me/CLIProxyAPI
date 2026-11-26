@@ -40,9 +40,14 @@ type NativeCapabilities struct {
 type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
-	// MetadataModelID identifies the canonical model used to resolve client metadata.
-	// It is internal and must not be exposed in model-list responses.
+	// SourceModelID identifies the provider model behind this published route.
+	SourceModelID string `json:"-"`
+	// MetadataModelID identifies the catalog key used to resolve client metadata.
 	MetadataModelID string `json:"-"`
+	// OAuthAlias is the configured alias that produced this route, before adding any auth prefix.
+	OAuthAlias string `json:"-"`
+	// OAuthAliasSource is the exact published source of that alias, including any suffix.
+	OAuthAliasSource string `json:"-"`
 	// ExplicitThinking indicates thinking/reasoning configuration was explicitly configured for this model.
 	ExplicitThinking bool `json:"-"`
 	// ExplicitInputModalities indicates input modalities were explicitly configured for this model.
@@ -283,7 +288,8 @@ func (r *ModelRegistry) RegistrationEpoch() uint64 {
 
 // LookupModelInfo looks up ModelInfo by checking dynamic registrations first
 // (strictly scoped to provider when non-empty, or global when empty) and then
-// falling back to channel-specific and global static definitions.
+// falling back to channel-specific and shared static definitions. A channel or
+// qualified model ID selects an independent provider catalog.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -303,7 +309,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 			return cloneModelInfo(info)
 		}
 	}
-	return cloneModelInfo(LookupStaticModelInfo(modelID))
+	return lookupStaticModelInfo(modelID, nil)
 }
 
 // NativeCapabilityRoute describes one registered route to a public model.
@@ -1475,6 +1481,56 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
+// ClientModelRoute returns the metadata key and alias for the first matching client route.
+func (r *ModelRegistry) ClientModelRoute(clientID string, modelIDs ...string) (metadataModelID, oauthAlias string) {
+	route := r.LookupClientModelRoute(clientID, modelIDs...)
+	return route.MetadataModelID, route.OAuthAlias
+}
+
+// ClientModelRouteInfo describes the source and alias of a registered route.
+type ClientModelRouteInfo struct {
+	ID               string
+	SourceModelID    string
+	MetadataModelID  string
+	OAuthAlias       string
+	OAuthAliasSource string
+}
+
+// LookupClientModelRoute returns the first matching route registered by this client.
+// Candidates are tried in order, preferring exact spelling within each candidate.
+func (r *ModelRegistry) LookupClientModelRoute(clientID string, modelIDs ...string) ClientModelRouteInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	models := r.clientModelInfos[clientID]
+	for _, modelID := range modelIDs {
+		if modelID == "" {
+			continue
+		}
+		info := models[modelID]
+		if info == nil {
+			for _, id := range r.clientModels[clientID] {
+				if strings.EqualFold(id, modelID) {
+					info = models[id]
+					if info != nil {
+						break
+					}
+				}
+			}
+		}
+		if info != nil {
+			return ClientModelRouteInfo{
+				ID:               info.ID,
+				SourceModelID:    info.SourceModelID,
+				MetadataModelID:  info.MetadataModelID,
+				OAuthAlias:       info.OAuthAlias,
+				OAuthAliasSource: info.OAuthAliasSource,
+			}
+		}
+	}
+	return ClientModelRouteInfo{}
+}
+
 // IsModelSuspendedForClient reports whether a model is currently suspended for a specific client.
 func (r *ModelRegistry) IsModelSuspendedForClient(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
@@ -1736,8 +1792,9 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 	defer r.mutex.RUnlock()
 
 	type providerModel struct {
-		count int
-		info  *ModelInfo
+		count             int
+		info              *ModelInfo
+		supportsWebSearch bool
 	}
 
 	providerModels := make(map[string]*providerModel)
@@ -1762,15 +1819,13 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 				providerModels[modelID] = entry
 			}
 			entry.count++
-			if entry.info == nil {
-				if clientInfos != nil {
-					if info := clientInfos[modelID]; info != nil {
+			if clientInfos != nil {
+				if info := clientInfos[modelID]; info != nil {
+					if entry.info == nil {
 						entry.info = info
 					}
-				}
-				if entry.info == nil {
-					if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
-						entry.info = reg.Info
+					if info.SupportsWebSearch {
+						entry.supportsWebSearch = true
 					}
 				}
 			}
@@ -1839,12 +1894,21 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+			var cloned *ModelInfo
 			if entry.info != nil {
-				result = append(result, cloneModelInfo(entry.info))
-				continue
+				cloned = cloneModelInfo(entry.info)
+			} else if ok && registration != nil {
+				if registration.InfoByProvider != nil && registration.InfoByProvider[provider] != nil {
+					cloned = cloneModelInfo(registration.InfoByProvider[provider])
+				} else if registration.Info != nil {
+					cloned = cloneModelInfo(registration.Info)
+				}
 			}
-			if ok && registration != nil && registration.Info != nil {
-				result = append(result, cloneModelInfo(registration.Info))
+			if cloned != nil {
+				if entry.supportsWebSearch {
+					cloned.SupportsWebSearch = true
+				}
+				result = append(result, cloned)
 			}
 		}
 	}
@@ -2145,30 +2209,35 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
-
-	// Get all available models for this handler type
-	models := r.GetAvailableModels(handlerType)
+	// Get all available models while preserving canonical ID and creation timestamps
+	// across handler types (e.g., gemini uses "name" without "id" or "created", and
+	// claude formats "created_at" instead of numeric "created").
+	models := r.GetAvailableModelInfos()
 	if len(models) == 0 {
 		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
 	}
 
-	// Sort models by creation timestamp (newest first)
+	// Sort models using a strict weak ordering: models with a creation timestamp
+	// sort before those without, then newest first, with lexicographical ID tie-breaking.
 	sort.Slice(models, func(i, j int) bool {
-		// Extract created timestamps from map
-		createdI, okI := models[i]["created"].(int64)
-		createdJ, okJ := models[j]["created"].(int64)
-		if !okI || !okJ {
-			return false
+		hasCreatedI := models[i].Created != 0
+		hasCreatedJ := models[j].Created != 0
+		if hasCreatedI != hasCreatedJ {
+			return hasCreatedI
 		}
-		return createdI > createdJ
+		if hasCreatedI && models[i].Created != models[j].Created {
+			return models[i].Created > models[j].Created
+		}
+		return models[i].ID < models[j].ID
 	})
 
 	// Find the first model with available clients
 	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCount(modelID); count > 0 {
-				return modelID, nil
-			}
+		if model.ID == "" {
+			continue
+		}
+		if count := r.GetModelCount(model.ID); count > 0 {
+			return model.ID, nil
 		}
 	}
 

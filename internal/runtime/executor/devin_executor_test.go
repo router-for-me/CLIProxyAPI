@@ -103,6 +103,56 @@ func TestDevinExecutorPrepareRequest(t *testing.T) {
 	}
 }
 
+func TestDevinSWE17ModelUIDFromThinkingBudget(t *testing.T) {
+	const model = "devin/swe-1-7"
+	const body = `{"messages":[{"role":"user","content":"hi"}],"max_tokens":20000}`
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	for _, tc := range []struct {
+		name, model, body, wantUID string
+	}{
+		{"omitted", model, body, "swe-1-7"},
+		{"disabled", model + "(0)", body, "swe-1-7"},
+		{"numeric suffix", model + "(16000)", body, "swe-1-7-medium"},
+		{"Claude body", model, `{"messages":[{"role":"user","content":"hi"}],"max_tokens":20000,"thinking":{"type":"enabled","budget_tokens":16000}}`, "swe-1-7-medium"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{Model: tc.model, Payload: []byte(tc.body)}
+			httpReq, _, _, errPrep := exec.prepareDevinHTTPRequest(t.Context(), auth, req, opts)
+			if errPrep != nil {
+				t.Fatal(errPrep)
+			}
+			defer func() {
+				if err := httpReq.Body.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			flag, wire, errRead := helps.ReadConnectFrame(httpReq.Body)
+			if errRead != nil || flag != 0 {
+				t.Fatalf("read request frame: flag=%d, err=%v", flag, errRead)
+			}
+			for len(wire) > 0 {
+				num, typ, n := protowire.ConsumeField(wire)
+				if n < 0 {
+					t.Fatal(protowire.ParseError(n))
+				}
+				if num == 21 && typ == protowire.BytesType {
+					_, _, tagLen := protowire.ConsumeTag(wire)
+					uid, _ := protowire.ConsumeString(wire[tagLen:n])
+					if uid != tc.wantUID {
+						t.Errorf("upstream model UID = %q, want %q", uid, tc.wantUID)
+					}
+					return
+				}
+				wire = wire[n:]
+			}
+			t.Fatal("upstream model UID is missing")
+		})
+	}
+}
+
 func TestDevinAuthCredentials(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{

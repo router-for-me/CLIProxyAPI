@@ -1041,6 +1041,32 @@ func (c *Client) GetModels(ctx context.Context, headers http.Header, query url.V
 	return raw, nil
 }
 
+func (c *Client) AuthorizeLocalExecutor(ctx context.Context, model string, headers http.Header, query url.Values) (LocalExecutorDecision, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return LocalExecutorDecision{}, errClient
+	}
+	request, errMarshal := json.Marshal(modelsRequest{
+		Type: "local-plugin-dispatch", Model: model,
+		Headers: headersToLowerMap(headers), Query: queryToLowerMap(query),
+	})
+	if errMarshal != nil {
+		return LocalExecutorDecision{}, errMarshal
+	}
+	raw, errGet := cmd.Get(ctx, string(request)).Bytes()
+	if errGet != nil {
+		return LocalExecutorDecision{}, errGet
+	}
+	if c.dispatchFenced.Load() {
+		return LocalExecutorDecision{}, ErrDispatchFenced
+	}
+	var decision LocalExecutorDecision
+	if errDecode := json.Unmarshal(raw, &decision); errDecode != nil {
+		return LocalExecutorDecision{}, errDecode
+	}
+	return decision, nil
+}
+
 func buildKVSetArgs(key string, value []byte, opts KVSetOptions) ([]any, error) {
 	return kvstore.BuildSetArgs(key, value, opts)
 }
@@ -1393,6 +1419,7 @@ func (c *Client) rPopAuth(ctx context.Context, requestedModel string, sessionID 
 	if input, ok := ctx.Value(schedulerContextKey{}).(SchedulerContext); ok {
 		req.SchedulerContext = &input
 	}
+	req.ExecutorPlugins, _ = ctx.Value(executorPluginsContextKey{}).(map[string][]string)
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		return nil, errMarshal

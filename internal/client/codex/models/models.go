@@ -126,6 +126,13 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
+			if inherited := stringSliceValue(entry["input_modalities"]); len(inherited) > 0 {
+				filtered := filterCodexInputModalities(inherited)
+				entry["input_modalities"] = filtered
+				if !hasImageModality(filtered) {
+					delete(entry, "supports_image_detail_original")
+				}
+			}
 			info := registry.LookupModelInfo(id)
 			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
 			applyCodexClientDisplayName(entry, model)
@@ -668,8 +675,8 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	thinkingSupport := codexClientThinkingSupport(model)
 
 	if info != nil {
-		if info.DisplayName != "" {
-			displayName = info.DisplayName
+		if displayName == "" {
+			displayName = strings.TrimSpace(info.DisplayName)
 		}
 		if info.Description != "" {
 			description = info.Description
@@ -686,6 +693,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		delete(entry, "input_modalities")
 		delete(entry, "supports_image_detail_original")
 	} else {
+		entry["visibility"] = "list"
 		if inherited := stringSliceValue(entry["input_modalities"]); len(inherited) > 0 {
 			applyCodexClientInputModalitiesMetadata(entry, inherited)
 		}
@@ -710,6 +718,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["display_name"] = displayName
 	entry["description"] = description
 	entry["minimal_client_version"] = codexClientFallbackMinimalClientVersion
+	entry["supported_in_api"] = true
 	entry["prefer_websockets"] = false
 	if optimizeMultiAgentV2 {
 		entry["multi_agent_version"] = "v2"

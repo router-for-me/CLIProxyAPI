@@ -45,6 +45,13 @@ type RequestAuthPreparer interface {
 	PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error)
 }
 
+// HomePluginRequestAuthPreparer lets a credential provider also prepare auth
+// that a Home-selected plugin will consume without running the provider executor.
+type HomePluginRequestAuthPreparer interface {
+	RequestAuthPreparer
+	ShouldPrepareHomePluginRequestAuth(auth *Auth) bool
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -141,6 +148,10 @@ type pluginSchedulerState interface {
 	HasScheduler() bool
 }
 
+type pluginSchedulerPriorityPool interface {
+	SchedulerWantsAllPriorityCandidates() bool
+}
+
 // StoppableSelector is an optional interface for selectors that hold resources.
 // Selectors that implement this interface will have Stop called during shutdown.
 type StoppableSelector interface {
@@ -198,7 +209,7 @@ type Manager struct {
 	executors                 map[string]ProviderExecutor
 	executorRevisions         map[string]uint64
 	selector                  Selector
-	hook                      Hook
+	hook                      *hookChain
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
@@ -214,7 +225,8 @@ type Manager struct {
 	authChangeWatchers map[string]map[chan struct{}]struct{}
 	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
-	pluginScheduler PluginScheduler
+	pluginScheduler     PluginScheduler
+	homePluginExecutors HomePluginExecutorResolver
 	// continuityClock overrides time.Now and timer waiting in unit tests.
 	continuityClock continuityClock
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
@@ -241,8 +253,8 @@ type Manager struct {
 	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
 	apiKeyModelRouting atomic.Value
 
-	// modelPoolOffsets tracks per-auth alias pool rotation state.
-	modelPoolOffsets map[string]int
+	// modelPoolOffsets tracks per-auth alias pool rotation state keyed by auth ID and pool key.
+	modelPoolOffsets map[string]map[string]int
 
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
@@ -291,7 +303,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		executors:             make(map[string]ProviderExecutor),
 		executorRevisions:     make(map[string]uint64),
 		selector:              selector,
-		hook:                  hook,
+		hook:                  &hookChain{primary: hook},
 		auths:                 make(map[string]*Auth),
 		authEpochs:            make(map[string]uint64),
 		homeRuntimeAuths:      make(map[string]map[string]*Auth),
@@ -299,7 +311,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		homePrepareFlights:    make(map[string]*homeAuthPrepareFlight),
 		providerOffsets:       make(map[string]int),
-		modelPoolOffsets:      make(map[string]int),
+		modelPoolOffsets:      make(map[string]map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

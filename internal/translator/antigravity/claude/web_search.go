@@ -90,10 +90,14 @@ func allowsClaudeWebSearchToolChoice(payload []byte) bool {
 	}
 }
 
-func shouldBuildAntigravityWebSearchRequest(model string, payload []byte) bool {
-	return antigravitySupportsNativeGoogleSearch(model) &&
-		hasOnlyClaudeTypedWebSearchTools(payload) &&
-		allowsClaudeWebSearchToolChoice(payload)
+func shouldBuildAntigravityWebSearchRequest(model string, payload []byte, supported *bool) bool {
+	if !hasOnlyClaudeTypedWebSearchTools(payload) || !allowsClaudeWebSearchToolChoice(payload) {
+		return false
+	}
+	if supported != nil {
+		return *supported
+	}
+	return antigravitySupportsNativeGoogleSearch(model)
 }
 
 func buildAntigravityWebSearchRequest(model string, payload []byte) []byte {
@@ -221,6 +225,27 @@ func antigravityGroundingMetadata(root ojson.Result) ojson.Result {
 	return root.Get("candidates.0.groundingMetadata")
 }
 
+func hasValidAntigravityWebGrounding(groundingMetadata ojson.Result) bool {
+	if !groundingMetadata.Exists() || !groundingMetadata.IsObject() {
+		return false
+	}
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() {
+		for _, q := range queries.Array() {
+			if q.Type == ojson.String && strings.TrimSpace(q.String()) != "" {
+				return true
+			}
+		}
+	}
+	if chunks := groundingMetadata.Get("groundingChunks"); chunks.IsArray() {
+		for _, c := range chunks.Array() {
+			if uri := c.Get("web.uri"); uri.Type == ojson.String && strings.TrimSpace(uri.String()) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func antigravityTextContent(root ojson.Result) string {
 	var textBuilder strings.Builder
 	parts := root.Get("response.candidates.0.content.parts")
@@ -229,6 +254,9 @@ func antigravityTextContent(root ojson.Result) string {
 	}
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			if part.Get("thought").Bool() || part.Get("functionCall").Exists() {
+				continue
+			}
 			if text := part.Get("text"); text.Exists() {
 				textBuilder.WriteString(text.String())
 			}
@@ -257,8 +285,14 @@ func antigravityUsageTokens(root ojson.Result) (int64, int64) {
 }
 
 func webSearchQueryFromGrounding(groundingMetadata ojson.Result) string {
-	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
-		return queries.Array()[0].String()
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() {
+		for _, q := range queries.Array() {
+			if q.Type == ojson.String {
+				if trimmed := strings.TrimSpace(q.String()); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
 	}
 	return ""
 }
@@ -390,6 +424,8 @@ func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroun
 				Text:      citedText,
 				Citations: []map[string]any{citation},
 			})
+		} else if citedText != "" {
+			blocks = append(blocks, webSearchCitedTextBlock{Text: citedText})
 		}
 		if support.EndIndex > lastEnd {
 			lastEnd = support.EndIndex

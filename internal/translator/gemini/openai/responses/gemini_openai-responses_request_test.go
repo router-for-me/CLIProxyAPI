@@ -3691,3 +3691,605 @@ func TestCollectOpenAIResponsesFunctionCallOutputs_DoesNotMoveOrphansAcrossNotic
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_ValidatesFunctionCallArguments(t *testing.T) {
+	tests := []struct {
+		name            string
+		arguments       string
+		wantRawArgs     string
+		wantWrappedArgs string
+		expectWrapped   bool
+	}{
+		{
+			name:        "valid json object",
+			arguments:   `{"command":"ls"}`,
+			wantRawArgs: `{"command":"ls"}`,
+		},
+		{
+			name:        "valid json object with whitespace",
+			arguments:   `  {"command":"ls"}  `,
+			wantRawArgs: `{"command":"ls"}`,
+		},
+		{
+			name:        "empty string defaults to empty object",
+			arguments:   "",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "whitespace defaults to empty object",
+			arguments:   "   ",
+			wantRawArgs: "{}",
+		},
+		{
+			name:            "truncated object wrapped under arguments",
+			arguments:       `{"command":"ls"`,
+			wantWrappedArgs: `{"command":"ls"`,
+			expectWrapped:   true,
+		},
+		{
+			name:            "truncated array wrapped under arguments",
+			arguments:       `[1, 2`,
+			wantWrappedArgs: `[1, 2`,
+			expectWrapped:   true,
+		},
+		{
+			name:            "valid json array wrapped under arguments",
+			arguments:       `[1,2]`,
+			wantWrappedArgs: `[1,2]`,
+			expectWrapped:   true,
+		},
+		{
+			name:            "valid json scalar wrapped under arguments",
+			arguments:       "123",
+			wantWrappedArgs: "123",
+			expectWrapped:   true,
+		},
+		{
+			name:            "plain non-json text wrapped under arguments",
+			arguments:       "not json",
+			wantWrappedArgs: "not json",
+			expectWrapped:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqDoc := ojson.NewDocString(`{"model":"gemini-3.6-flash","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"run_command","arguments":""},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
+			if errSet := reqDoc.Set("input.1.arguments", tt.arguments); errSet != nil {
+				t.Fatalf("set arguments error: %v", errSet)
+			}
+
+			result, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", reqDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+			}
+			if !ojson.ValidBytes(result) {
+				t.Fatalf("translated request is not valid JSON: %s", result)
+			}
+			args := ojson.GetBytesNoCopy(result, "contents.1.parts.0.functionCall.args")
+			if !args.IsObject() {
+				t.Fatalf("functionCall.args = %s, want JSON object. Output: %s", args.Raw, result)
+			}
+			if tt.expectWrapped {
+				if got := args.Get("arguments").String(); got != tt.wantWrappedArgs {
+					t.Fatalf("functionCall.args.arguments = %q, want %q. Output: %s", got, tt.wantWrappedArgs, result)
+				}
+				return
+			}
+			if args.Raw != tt.wantRawArgs {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRawArgs, result)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_GuardsOptionalFields(t *testing.T) {
+	t.Run("null optional fields and empty stop_sequences are omitted", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-3.6-flash",
+			"instructions": null,
+			"max_output_tokens": null,
+			"temperature": null,
+			"top_p": null,
+			"stop_sequences": [],
+			"input": "hello"
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if root.Get("systemInstruction").Exists() {
+			t.Fatalf("expected systemInstruction omitted for null instructions, got %s", root.Get("systemInstruction").Raw)
+		}
+		for _, path := range []string{
+			"generationConfig.maxOutputTokens",
+			"generationConfig.temperature",
+			"generationConfig.topP",
+			"generationConfig.stopSequences",
+		} {
+			if v := root.Get(path); v.Exists() {
+				t.Fatalf("expected %s omitted, got %s. Output: %s", path, v.Raw, out)
+			}
+		}
+	})
+
+	t.Run("empty instructions non-positive max_output_tokens and non-typed fields are omitted", func(t *testing.T) {
+		cases := []struct {
+			name string
+			req  string
+		}{
+			{
+				name: "empty instructions and zero max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","instructions":"","max_output_tokens":0,"temperature":"0.5","top_p":true,"stop_sequences":[null,123,""],"input":"hello"}`,
+			},
+			{
+				name: "non-string instructions and negative max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","instructions":123,"max_output_tokens":-10,"input":"hello"}`,
+			},
+			{
+				name: "string max_output_tokens",
+				req:  `{"model":"gemini-3.6-flash","max_output_tokens":"256","input":"hello"}`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", []byte(tc.req), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+				}
+				root := util.ParseGJSONBytesNoCopy(out)
+				if root.Get("systemInstruction").Exists() {
+					t.Fatalf("expected systemInstruction omitted, got %s", root.Get("systemInstruction").Raw)
+				}
+				for _, path := range []string{
+					"generationConfig.maxOutputTokens",
+					"generationConfig.temperature",
+					"generationConfig.topP",
+					"generationConfig.stopSequences",
+				} {
+					if v := root.Get(path); v.Exists() {
+						t.Fatalf("expected %s omitted, got %s. Output: %s", path, v.Raw, out)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("explicit valid values including zero temperature and top_p are preserved", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-3.6-flash",
+			"instructions": "Be concise.",
+			"max_output_tokens": 256,
+			"temperature": 0,
+			"top_p": 0,
+			"stop_sequences": ["END", null, "\n"],
+			"input": "hello"
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if got := root.Get("systemInstruction.parts.0.text").String(); got != "Be concise." {
+			t.Fatalf("systemInstruction.parts.0.text = %q, want %q", got, "Be concise.")
+		}
+		if got := root.Get("generationConfig.maxOutputTokens"); !got.Exists() || got.Type != ojson.Number || got.Int() != 256 {
+			t.Fatalf("maxOutputTokens = %s, want 256", got.Raw)
+		}
+		if got := root.Get("generationConfig.temperature"); !got.Exists() || got.Type != ojson.Number || got.Float() != 0 {
+			t.Fatalf("temperature = %s, want 0", got.Raw)
+		}
+		if got := root.Get("generationConfig.topP"); !got.Exists() || got.Type != ojson.Number || got.Float() != 0 {
+			t.Fatalf("topP = %s, want 0", got.Raw)
+		}
+		stops := root.Get("generationConfig.stopSequences")
+		if !stops.IsArray() || len(stops.Array()) != 2 || stops.Get("0").String() != "END" || stops.Get("1").String() != "\n" {
+			t.Fatalf("stopSequences = %s, want [\"END\",\"\\n\"]", stops.Raw)
+		}
+	})
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_AllowedTools(t *testing.T) {
+	t.Run("required mode sets ANY and allowedFunctionNames", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "Check weather in Tokyo",
+			"tools": [
+				{"type": "function", "name": "get_weather", "parameters": {"type": "object"}},
+				{"type": "function", "name": "delete_db", "parameters": {"type": "object"}}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "function", "name": "get_weather"}]
+			}
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		if mode := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.mode").String(); mode != "ANY" {
+			t.Fatalf("mode = %q, want ANY; out=%s", mode, out)
+		}
+		allowed := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+		if len(allowed) != 1 || allowed[0].String() != "get_weather" {
+			t.Fatalf("allowedFunctionNames = %v, want [get_weather]; out=%s", allowed, out)
+		}
+		decls := ojson.GetBytesNoCopy(out, "tools.0.functionDeclarations").Array()
+		if len(decls) != 1 || decls[0].Get("name").String() != "get_weather" {
+			t.Fatalf("functionDeclarations = %v, want only get_weather; out=%s", decls, out)
+		}
+	})
+
+	t.Run("auto mode filters declarations without allowedFunctionNames and preserves history mapping", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "check"}]},
+				{"type": "function_call", "call_id": "call_1", "name": "read/file", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+			],
+			"tools": [
+				{"type": "function", "name": "get_weather", "parameters": {"type": "object"}},
+				{"type": "function", "name": "read/file", "parameters": {"type": "object"}},
+				{"type": "function", "name": "read_file", "parameters": {"type": "object"}}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "auto",
+				"tools": [{"type": "function", "name": "get_weather"}]
+			}
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		if mode := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.mode").String(); mode != "AUTO" {
+			t.Fatalf("mode = %q, want AUTO; out=%s", mode, out)
+		}
+		if ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.allowedFunctionNames").Exists() {
+			t.Fatalf("allowedFunctionNames must not be set in AUTO mode; out=%s", out)
+		}
+		decls := ojson.GetBytesNoCopy(out, "tools.0.functionDeclarations").Array()
+		if len(decls) != 1 || decls[0].Get("name").String() != "get_weather" {
+			t.Fatalf("functionDeclarations = %v, want only get_weather; out=%s", decls, out)
+		}
+		// Verify historical call to read/file still used its disambiguated forwardMap name (not plain read_file)
+		histName := ojson.GetBytesNoCopy(out, "contents.1.parts.0.functionCall.name").String()
+		if histName == "" || histName == "read_file" {
+			t.Fatalf("historical functionCall.name = %q, expected disambiguated name for read/file; out=%s", histName, out)
+		}
+	})
+
+	t.Run("none mode sets NONE without allowedFunctionNames", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "hello",
+			"tools": [
+				{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "none",
+				"tools": [{"type": "function", "name": "get_weather"}]
+			}
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		if mode := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+			t.Fatalf("mode = %q, want NONE; out=%s", mode, out)
+		}
+		if ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.allowedFunctionNames").Exists() {
+			t.Fatalf("allowedFunctionNames must not be set in NONE mode; out=%s", out)
+		}
+	})
+
+	t.Run("empty or undeclared allowed_tools fails closed to NONE", func(t *testing.T) {
+		for _, choice := range []string{
+			`{"type": "allowed_tools", "mode": "required", "tools": []}`,
+			`{"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "undeclared"}]}`,
+			`{"type": "allowed_tools", "mode": "bogus", "tools": [{"type": "function", "name": "get_weather"}]}`,
+		} {
+			req := []byte(`{
+				"model": "gemini-2.5-pro",
+				"input": "hello",
+				"tools": [
+					{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}
+				],
+				"tool_choice": ` + choice + `
+			}`)
+			out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", req, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+			}
+			if mode := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+				t.Fatalf("choice=%s: mode = %q, want NONE; out=%s", choice, mode, out)
+			}
+			if ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.allowedFunctionNames").Exists() {
+				t.Fatalf("choice=%s: unexpected allowedFunctionNames; out=%s", choice, out)
+			}
+			if ojson.GetBytesNoCopy(out, "tools").Exists() {
+				t.Fatalf("choice=%s: expected tools omitted when no functions allowed; out=%s", choice, out)
+			}
+		}
+	})
+
+	t.Run("namespace and client tool_search entries work in allowed_tools", func(t *testing.T) {
+		req := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "search and call namespace",
+			"tools": [
+				{"type": "tool_search", "execution": "client"},
+				{
+					"type": "namespace",
+					"name": "codex_app",
+					"tools": [
+						{"type": "function", "name": "read", "parameters": {"type": "object"}},
+						{"type": "custom", "name": "patch"}
+					]
+				},
+				{"type": "function", "name": "delete_db", "parameters": {"type": "object"}}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [
+					{"type": "tool_search"},
+					{"type": "namespace", "name": "codex_app"}
+				]
+			}
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", req, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		if mode := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.mode").String(); mode != "ANY" {
+			t.Fatalf("mode = %q, want ANY; out=%s", mode, out)
+		}
+		allowed := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+		if len(allowed) != 3 || allowed[0].String() != "tool_search" || allowed[1].String() != "codex_app__read" || allowed[2].String() != "codex_app__patch" {
+			t.Fatalf("allowedFunctionNames = %v, want [tool_search codex_app__read codex_app__patch]; out=%s", allowed, out)
+		}
+		decls := ojson.GetBytesNoCopy(out, "tools.0.functionDeclarations").Array()
+		if len(decls) != 3 {
+			t.Fatalf("functionDeclarations count = %d, want 3; out=%s", len(decls), out)
+		}
+	})
+
+	t.Run("identity collision does not authorize shadowed namespace or mismatched tool kind", func(t *testing.T) {
+		// Top-level ops__read wins over namespace ops/read under precedence rules;
+		// allowing {type: "function", namespace: "ops", name: "read"} must NOT authorize top-level ops__read.
+		reqNamespaceCollision := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "read something",
+			"tools": [
+				{"type": "function", "name": "ops__read", "parameters": {"type": "object"}},
+				{
+					"type": "namespace",
+					"name": "ops",
+					"tools": [
+						{"type": "function", "name": "read", "parameters": {"type": "object"}}
+					]
+				}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "function", "namespace": "ops", "name": "read"}]
+			}
+		}`)
+		out, errConvert := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqNamespaceCollision, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errConvert)
+		}
+		if mode := ojson.GetBytesNoCopy(out, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+			t.Fatalf("namespace collision mode = %q, want NONE; out=%s", mode, out)
+		}
+		if ojson.GetBytesNoCopy(out, "tools").Exists() {
+			t.Fatalf("namespace collision should not expose top-level ops__read; out=%s", out)
+		}
+
+		// Top-level ops__delete must NOT be authorized by {type: "namespace", name: "ops"}.
+		reqTopLevelPrefix := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "run ops",
+			"tools": [
+				{"type": "function", "name": "ops__delete", "parameters": {"type": "object"}}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "namespace", "name": "ops"}]
+			}
+		}`)
+		outPrefix, errPrefix := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqTopLevelPrefix, false)
+		if errPrefix != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errPrefix)
+		}
+		if mode := ojson.GetBytesNoCopy(outPrefix, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+			t.Fatalf("top-level prefix mode = %q, want NONE; out=%s", mode, outPrefix)
+		}
+		if ojson.GetBytesNoCopy(outPrefix, "tools").Exists() {
+			t.Fatalf("top-level prefix should not expose ops__delete; out=%s", outPrefix)
+		}
+
+		// Direct 2-arg ConvertResponsesToolChoiceToGemini matches the exact same NONE outcome.
+		rootPrefix := util.ParseGJSONBytesNoCopy(reqTopLevelPrefix)
+		_, fwdPrefix, _ := util.BuildGeminiFunctionDeclarations(rootPrefix)
+		cfgPrefix, okPrefix := util.ConvertResponsesToolChoiceToGemini(rootPrefix.Get("tool_choice"), fwdPrefix)
+		if !okPrefix || ojson.GetBytesNoCopy(cfgPrefix, "mode").String() != "NONE" {
+			t.Fatalf("direct ConvertResponsesToolChoiceToGemini top-level prefix: ok=%v cfg=%s, want NONE", okPrefix, cfgPrefix)
+		}
+
+		// Real namespace ops/read authorized by {type: "namespace", name: "ops"} matches across both entry points.
+		reqRealNamespace := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "run ops",
+			"tools": [
+				{
+					"type": "namespace",
+					"name": "ops",
+					"tools": [
+						{"type": "function", "name": "read", "parameters": {"type": "object"}}
+					]
+				}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "namespace", "name": "ops"}]
+			}
+		}`)
+		outRealNS, errRealNS := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqRealNamespace, false)
+		if errRealNS != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errRealNS)
+		}
+		rootRealNS := util.ParseGJSONBytesNoCopy(reqRealNamespace)
+		_, fwdRealNS, _ := util.BuildGeminiFunctionDeclarations(rootRealNS)
+		cfgRealNS, okRealNS := util.ConvertResponsesToolChoiceToGemini(rootRealNS.Get("tool_choice"), fwdRealNS)
+		if !okRealNS || ojson.GetBytesNoCopy(cfgRealNS, "mode").String() != "ANY" {
+			t.Fatalf("direct ConvertResponsesToolChoiceToGemini real namespace: ok=%v cfg=%s, want ANY", okRealNS, cfgRealNS)
+		}
+		if gotDirect := ojson.GetBytesNoCopy(cfgRealNS, "allowedFunctionNames.0").String(); gotDirect != "ops__read" {
+			t.Fatalf("direct ConvertResponsesToolChoiceToGemini allowedFunctionNames.0 = %q, want ops__read; cfg=%s", gotDirect, cfgRealNS)
+		}
+		if gotReq := ojson.GetBytesNoCopy(outRealNS, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); gotReq != "ops__read" {
+			t.Fatalf("request path allowedFunctionNames.0 = %q, want ops__read; out=%s", gotReq, outRealNS)
+		}
+
+		// Same-namespace local-name collision: ops/ops__read wins over ops/read;
+		// allowing {type: "function", namespace: "ops", name: "read"} must NOT authorize ops/ops__read.
+		reqSameNSCollision := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "read",
+			"tools": [
+				{
+					"type": "namespace",
+					"name": "ops",
+					"tools": [
+						{"type": "function", "name": "ops__read", "parameters": {"type": "object"}},
+						{"type": "function", "name": "read", "parameters": {"type": "object"}}
+					]
+				}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "function", "namespace": "ops", "name": "read"}]
+			}
+		}`)
+		outSameNS, errSameNS := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqSameNSCollision, false)
+		if errSameNS != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errSameNS)
+		}
+		if mode := ojson.GetBytesNoCopy(outSameNS, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+			t.Fatalf("same-namespace collision mode = %q, want NONE; out=%s", mode, outSameNS)
+		}
+		if ojson.GetBytesNoCopy(outSameNS, "tools").Exists() {
+			t.Fatalf("same-namespace collision should not expose ops__read; out=%s", outSameNS)
+		}
+		rootSameNS := util.ParseGJSONBytesNoCopy(reqSameNSCollision)
+		_, fwdSameNS, _ := util.BuildGeminiFunctionDeclarations(rootSameNS)
+		cfgSameNS, okSameNS := util.ConvertResponsesToolChoiceToGemini(rootSameNS.Get("tool_choice"), fwdSameNS)
+		if !okSameNS || ojson.GetBytesNoCopy(cfgSameNS, "mode").String() != "NONE" {
+			t.Fatalf("direct ConvertResponsesToolChoiceToGemini same-namespace collision: ok=%v cfg=%s, want NONE", okSameNS, cfgSameNS)
+		}
+
+		// Namespace winner ops/read shadows lower-priority additional_tools top-level ops__read;
+		// allowing top-level {type: "function", name: "ops__read"} must NOT authorize ops/read.
+		reqTopLevelShadowed := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": [
+				{"type": "additional_tools", "tools": [{"type": "function", "name": "ops__read", "parameters": {"type": "object"}}]},
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "read"}]}
+			],
+			"tools": [
+				{
+					"type": "namespace",
+					"name": "ops",
+					"tools": [
+						{"type": "function", "name": "read", "parameters": {"type": "object"}}
+					]
+				}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "function", "name": "ops__read"}]
+			}
+		}`)
+		outTopShadowed, errTopShadowed := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqTopLevelShadowed, false)
+		if errTopShadowed != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errTopShadowed)
+		}
+		if mode := ojson.GetBytesNoCopy(outTopShadowed, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+			t.Fatalf("shadowed top-level collision mode = %q, want NONE; out=%s", mode, outTopShadowed)
+		}
+		if ojson.GetBytesNoCopy(outTopShadowed, "tools").Exists() {
+			t.Fatalf("shadowed top-level collision should not expose ops/read; out=%s", outTopShadowed)
+		}
+		rootTopShadowed := util.ParseGJSONBytesNoCopy(reqTopLevelShadowed)
+		_, fwdTopShadowed, _ := util.BuildGeminiFunctionDeclarations(rootTopShadowed)
+		cfgTopShadowed, okTopShadowed := util.ConvertResponsesToolChoiceToGemini(rootTopShadowed.Get("tool_choice"), fwdTopShadowed)
+		if !okTopShadowed || ojson.GetBytesNoCopy(cfgTopShadowed, "mode").String() != "NONE" {
+			t.Fatalf("direct ConvertResponsesToolChoiceToGemini shadowed top-level collision: ok=%v cfg=%s, want NONE", okTopShadowed, cfgTopShadowed)
+		}
+
+		// Mismatched tool kind (explicit or untyped custom wrapper when winner is function) must fail closed to NONE.
+		for _, kindChoice := range []string{
+			`{"type": "custom", "name": "run"}`,
+			`{"custom": {"name": "run"}}`,
+			`{"type": "tool", "custom": {"name": "run"}}`,
+		} {
+			reqKindMismatch := []byte(`{
+				"model": "gemini-2.5-pro",
+				"input": "run tool",
+				"tools": [
+					{"type": "function", "name": "run", "parameters": {"type": "object"}}
+				],
+				"tool_choice": {
+					"type": "allowed_tools",
+					"mode": "required",
+					"tools": [` + kindChoice + `]
+				}
+			}`)
+			outKind, errKind := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqKindMismatch, false)
+			if errKind != nil {
+				t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errKind)
+			}
+			if mode := ojson.GetBytesNoCopy(outKind, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+				t.Fatalf("kindChoice=%s mode = %q, want NONE; out=%s", kindChoice, mode, outKind)
+			}
+			if ojson.GetBytesNoCopy(outKind, "tools").Exists() {
+				t.Fatalf("kindChoice=%s should not expose function run; out=%s", kindChoice, outKind)
+			}
+		}
+
+		// Allowing type:"tool" without custom wrapper must not authorize a custom tool declaration.
+		reqToolOnCustom := []byte(`{
+			"model": "gemini-2.5-pro",
+			"input": "run custom",
+			"tools": [
+				{"type": "custom", "name": "exec"}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "required",
+				"tools": [{"type": "tool", "name": "exec"}]
+			}
+		}`)
+		outToolOnCustom, errToolOnCustom := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", reqToolOnCustom, false)
+		if errToolOnCustom != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToGemini error: %v", errToolOnCustom)
+		}
+		if mode := ojson.GetBytesNoCopy(outToolOnCustom, "toolConfig.functionCallingConfig.mode").String(); mode != "NONE" {
+			t.Fatalf("tool-on-custom mode = %q, want NONE; out=%s", mode, outToolOnCustom)
+		}
+		if ojson.GetBytesNoCopy(outToolOnCustom, "tools").Exists() {
+			t.Fatalf("tool-on-custom should not expose custom exec; out=%s", outToolOnCustom)
+		}
+	})
+}

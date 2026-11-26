@@ -2944,3 +2944,644 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 		}
 	})
 }
+
+func TestXAIWebsocketIDStateEvictsEphemeralSessionOnStreamCompletion(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Logf("close upstream test websocket: %v", errClose)
+			}
+		}()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-ephemeral-1","output":[{"id":"msg-1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-ephemeral",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"ephemeral-cache-key","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+	result, errStream := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	exec.idStore.mu.Lock()
+	remaining := len(exec.idStore.sessions)
+	exec.idStore.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("ephemeral idStore entries = %d, want 0", remaining)
+	}
+}
+
+func TestXAIWebsocketIDStateEvictsEphemeralSessionOnEarlyError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"forbidden"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-ephemeral-err",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"ephemeral-error-key","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+	if _, errStream := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, req, opts); errStream == nil {
+		t.Fatal("ExecuteStream() error = nil, want handshake failure")
+	}
+
+	exec.idStore.mu.Lock()
+	remaining := len(exec.idStore.sessions)
+	exec.idStore.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("ephemeral idStore entries after early error = %d, want 0", remaining)
+	}
+}
+
+func TestXAIWebsocketIDStateCloseAllExecutionSessionsClearsStore(t *testing.T) {
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+
+	state := getXAIWebsocketIDState(exec.idStore, "persistent-session-1")
+	state.mapDownstreamToUpstream("resp-1", "resp-1")
+	exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+
+	exec.idStore.mu.Lock()
+	remaining := len(exec.idStore.sessions)
+	exec.idStore.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("idStore entries after CloseAllExecutionSessionsID = %d, want 0", remaining)
+	}
+}
+
+func TestXAIWebsocketIDStateIdleTTLEvictsAfter24Hours(t *testing.T) {
+	var clockMu sync.Mutex
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+	store := &xaiWebsocketIDStateStore{
+		sessions: make(map[string]*xaiWebsocketIDState),
+		now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+	}
+	if gotTTL := store.effectiveIdleTTL(); gotTTL != 24*time.Hour {
+		t.Fatalf("default effectiveIdleTTL() = %v, want %v", gotTTL, 24*time.Hour)
+	}
+
+	stale := getXAIWebsocketIDState(store, "stale-session")
+	stale.mapDownstreamToUpstream("resp-stale", "resp-stale")
+	stale.recordTranscriptTurn(xaiJSONRawMessages(ojson.Parse(`[{"type":"message","role":"user","content":"stale"}]`)), []byte(`{"response":{"output":[]}}`), true)
+
+	active := getXAIWebsocketIDState(store, "active-session")
+	active.mapDownstreamToUpstream("resp-active", "resp-active")
+	active.recordTranscriptTurn(xaiJSONRawMessages(ojson.Parse(`[{"type":"message","role":"user","content":"active"}]`)), []byte(`{"response":{"output":[]}}`), true)
+
+	advance(24*time.Hour - time.Second)
+	store.evictExpired()
+	store.mu.Lock()
+	if len(store.sessions) != 2 {
+		store.mu.Unlock()
+		t.Fatalf("entries before 24h idle TTL = %d, want 2", len(store.sessions))
+	}
+	store.mu.Unlock()
+
+	// Touch active-session right before 24h so its idle timer resets.
+	if got := getXAIWebsocketIDState(store, "active-session"); got != active {
+		t.Fatal("expected active-session state to be reused before expiration")
+	}
+
+	advance(time.Second)
+	store.evictExpired()
+	store.mu.Lock()
+	_, stalePresent := store.sessions["stale-session"]
+	_, activePresent := store.sessions["active-session"]
+	orderLen := store.order.Len()
+	store.mu.Unlock()
+	if stalePresent {
+		t.Fatal("stale-session remained in store after 24h idle TTL")
+	}
+	if !activePresent || orderLen != 1 {
+		t.Fatalf("activePresent=%t orderLen=%d, want true and 1", activePresent, orderLen)
+	}
+
+	advance(24 * time.Hour)
+	// Accessing a new session must also sweep the now-expired active-session.
+	_ = getXAIWebsocketIDState(store, "fresh-session")
+	store.mu.Lock()
+	_, activePresentAfter := store.sessions["active-session"]
+	_, freshPresent := store.sessions["fresh-session"]
+	sessionsLen := len(store.sessions)
+	orderLen = store.order.Len()
+	store.mu.Unlock()
+	if activePresentAfter || !freshPresent || sessionsLen != 1 || orderLen != 1 {
+		t.Fatalf("post-expiry state active=%t fresh=%t sessions=%d order=%d, want false, true, 1, 1", activePresentAfter, freshPresent, sessionsLen, orderLen)
+	}
+}
+
+func TestXAIWebsocketIDStateNoBoundedCapacityLimit(t *testing.T) {
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	store := &xaiWebsocketIDStateStore{
+		sessions: make(map[string]*xaiWebsocketIDState),
+		now:      func() time.Time { return now },
+	}
+
+	const totalSessions = 1500
+	for i := 0; i < totalSessions; i++ {
+		state := getXAIWebsocketIDState(store, fmt.Sprintf("session-%d", i))
+		state.mapDownstreamToUpstream(fmt.Sprintf("resp-%d", i), fmt.Sprintf("resp-%d", i))
+	}
+
+	store.mu.Lock()
+	retained := len(store.sessions)
+	orderLen := store.order.Len()
+	store.mu.Unlock()
+	if retained != totalSessions || orderLen != totalSessions {
+		t.Fatalf("retained sessions=%d order=%d, want %d (unbounded capacity within 24h TTL)", retained, orderLen, totalSessions)
+	}
+
+	now = now.Add(24 * time.Hour)
+	store.evictExpired()
+	store.mu.Lock()
+	remaining := len(store.sessions)
+	orderLen = store.order.Len()
+	store.mu.Unlock()
+	if remaining != 0 || orderLen != 0 {
+		t.Fatalf("remaining sessions=%d order=%d after 24h idle TTL, want 0", remaining, orderLen)
+	}
+}
+
+func TestXAIWebsocketIDStateInFlightProtectedAcrossIdleTTL(t *testing.T) {
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	store := &xaiWebsocketIDStateStore{
+		sessions: make(map[string]*xaiWebsocketIDState),
+		now:      func() time.Time { return now },
+	}
+
+	inFlightState := acquireXAIWebsocketIDState(store, "inflight-session", true)
+	inFlightState.recordTranscriptTurn(xaiJSONRawMessages(ojson.Parse(`[{"type":"message","role":"user","content":"long-turn"}]`)), []byte(`{"response":{"output":[]}}`), true)
+
+	now = now.Add(time.Hour)
+	idleState := acquireXAIWebsocketIDState(store, "idle-session", true)
+	releaseXAIWebsocketIDState(store, "idle-session", idleState, false)
+
+	// Advance past 24h for both entries; idle-session must be evicted while inflight-session stays protected.
+	now = now.Add(24 * time.Hour)
+	store.evictExpired()
+	store.mu.Lock()
+	_, idlePresent := store.sessions["idle-session"]
+	_, inFlightPresent := store.sessions["inflight-session"]
+	store.mu.Unlock()
+	if idlePresent {
+		t.Fatal("idle-session remained after exceeding 24h idle TTL")
+	}
+	if !inFlightPresent {
+		t.Fatal("inflight-session was evicted while still in-flight")
+	}
+
+	// Releasing inflight-session resets its idle clock from the release timestamp.
+	now = now.Add(time.Hour)
+	releaseXAIWebsocketIDState(store, "inflight-session", inFlightState, false)
+	store.mu.Lock()
+	_, stillPresent := store.sessions["inflight-session"]
+	store.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("inflight-session was unexpectedly evicted immediately upon release")
+	}
+
+	now = now.Add(24*time.Hour - time.Second)
+	store.evictExpired()
+	store.mu.Lock()
+	_, stillPresent = store.sessions["inflight-session"]
+	store.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("inflight-session was evicted before 24h idle window elapsed after release")
+	}
+
+	now = now.Add(time.Second)
+	store.evictExpired()
+	store.mu.Lock()
+	remaining := len(store.sessions)
+	orderLen := store.order.Len()
+	store.mu.Unlock()
+	if remaining != 0 || orderLen != 0 {
+		t.Fatalf("remaining=%d orderLen=%d after 24h post-release TTL, want 0", remaining, orderLen)
+	}
+}
+
+func TestXAIWebsocketIDStateConcurrentEphemeralAndPersistentNoRace(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Logf("close concurrent test websocket: %v", errClose)
+			}
+		}()
+		for {
+			_, _, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-conc","output":[{"id":"msg-conc","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	var clockMu sync.Mutex
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{
+		sessions: make(map[string]*xaiWebsocketIDState),
+		now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+	}
+	defer exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-concurrent",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+
+	var wg sync.WaitGroup
+	// Concurrent ephemeral streams sharing the same prompt_cache_key.
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := cliproxyexecutor.Request{
+				Model:   "grok-4.3",
+				Payload: []byte(`{"model":"grok-4.3","prompt_cache_key":"shared-ephemeral-key","input":[{"type":"message","role":"user","content":"hi"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+			}
+			result, errStream := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth.Clone(), req, opts)
+			if errStream != nil {
+				t.Errorf("ephemeral ExecuteStream() error = %v", errStream)
+				return
+			}
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Errorf("ephemeral stream chunk error = %v", chunk.Err)
+				}
+			}
+		}()
+	}
+
+	// Concurrent persistent streams interleaved with evictExpired and explicit session close.
+	for i := 0; i < 4; i++ {
+		sessionID := fmt.Sprintf("persistent-conc-%d", i)
+		wg.Add(1)
+		go func(sid string, closeAfter bool) {
+			defer wg.Done()
+			req := cliproxyexecutor.Request{
+				Model:   "grok-4.3",
+				Payload: []byte(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"hi"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Metadata:       map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sid},
+			}
+			result, errStream := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth.Clone(), req, opts)
+			if errStream != nil {
+				t.Errorf("persistent ExecuteStream(%s) error = %v", sid, errStream)
+				return
+			}
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Errorf("persistent stream(%s) chunk error = %v", sid, chunk.Err)
+				}
+			}
+			exec.idStore.evictExpired()
+			if closeAfter {
+				exec.CloseExecutionSession(sid)
+			}
+		}(sessionID, i%2 == 0)
+	}
+	wg.Wait()
+
+	exec.idStore.mu.Lock()
+	_, sharedEphemeralPresent := exec.idStore.sessions["shared-ephemeral-key"]
+	remainingBeforeTTL := len(exec.idStore.sessions)
+	exec.idStore.mu.Unlock()
+	if sharedEphemeralPresent {
+		t.Fatal("shared-ephemeral-key leaked after all concurrent ephemeral streams finished")
+	}
+	if remainingBeforeTTL != 2 {
+		t.Fatalf("remaining unclosed persistent sessions = %d, want 2", remainingBeforeTTL)
+	}
+
+	clockMu.Lock()
+	now = now.Add(24 * time.Hour)
+	clockMu.Unlock()
+	exec.idStore.evictExpired()
+
+	exec.idStore.mu.Lock()
+	remainingAfterTTL := len(exec.idStore.sessions)
+	orderLenAfterTTL := exec.idStore.order.Len()
+	exec.idStore.mu.Unlock()
+	if remainingAfterTTL != 0 || orderLenAfterTTL != 0 {
+		t.Fatalf("remaining=%d order=%d after 24h TTL sweep, want 0", remainingAfterTTL, orderLenAfterTTL)
+	}
+}
+
+func TestXAIWebsocketIDStateRetainsExplicitReqMetadataSessionAcrossEphemeralTurns(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedCompactPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+			if errUpgrade != nil {
+				t.Errorf("upgrade websocket: %v", errUpgrade)
+				return
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Logf("close req metadata test websocket: %v", errClose)
+				}
+			}()
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-req-meta-1","output":[{"id":"msg-1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"turn-1-answer"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+			}
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+				return
+			}
+			capturedCompactPayload <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_compact_req_meta","output":[{"id":"cmp-1","type":"compaction","encrypted_content":"ZW5jcnlwdGVk"}]}`))
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	var clockMu sync.Mutex
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{
+		sessions: make(map[string]*xaiWebsocketIDState),
+		now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+	}
+	defer exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-req-meta",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	reqMetadata := map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "req-meta-logical-session",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	// Turn 1: ephemeral upstream websocket connection, explicit session ID only in req.Metadata.
+	turn1, errTurn1 := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth.Clone(), cliproxyexecutor.Request{
+		Model:    "grok-4.3",
+		Payload:  []byte(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"remember-me"}]}`),
+		Metadata: reqMetadata,
+	}, opts)
+	if errTurn1 != nil {
+		t.Fatalf("turn 1 ExecuteStream() error = %v", errTurn1)
+	}
+	for chunk := range turn1.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("turn 1 stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	// Turn 2: compaction_trigger with no inline history or previous_response_id must reuse recorded state.
+	turn2, errTurn2 := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth.Clone(), cliproxyexecutor.Request{
+		Model:    "grok-4.3",
+		Payload:  []byte(`{"model":"grok-4.3","stream":true,"input":[{"type":"compaction_trigger"}]}`),
+		Metadata: reqMetadata,
+	}, opts)
+	if errTurn2 != nil {
+		t.Fatalf("turn 2 compaction ExecuteStream() error = %v", errTurn2)
+	}
+	for chunk := range turn2.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("turn 2 compaction chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case compactBody := <-capturedCompactPayload:
+		if !bytes.Contains(compactBody, []byte("remember-me")) || !bytes.Contains(compactBody, []byte("turn-1-answer")) {
+			t.Fatalf("compact request missing prior turn transcript: %s", compactBody)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for /responses/compact request")
+	}
+
+	// Explicit req.Metadata session still expires after the 24h idle TTL.
+	clockMu.Lock()
+	now = now.Add(24 * time.Hour)
+	clockMu.Unlock()
+	exec.idStore.evictExpired()
+	exec.idStore.mu.Lock()
+	remaining := len(exec.idStore.sessions)
+	exec.idStore.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("req.Metadata session remained after 24h idle TTL: remaining=%d", remaining)
+	}
+}
+
+func TestXAIWebsocketIDStateCloseAllAtomicWithConcurrentAcquire(t *testing.T) {
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	inAcquire := make(chan struct{})
+	releaseAcquire := make(chan struct{})
+	var hookArmed atomic.Bool
+
+	exec.idStore = &xaiWebsocketIDStateStore{
+		sessions: make(map[string]*xaiWebsocketIDState),
+		now: func() time.Time {
+			if hookArmed.CompareAndSwap(true, false) {
+				close(inAcquire)
+				<-releaseAcquire
+			}
+			return now
+		},
+	}
+	defer exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+
+	// Seed an existing persistent session.
+	_, oldState := exec.acquireSessionAndIDState("old-session")
+	releaseXAIWebsocketIDState(exec.idStore, "old-session", oldState, false)
+
+	// Pause acquireSessionAndIDState("new-session") inside idStore.now() while it holds store.mu,
+	// start closeAllExecutionSessions concurrently, and verify it blocks until both stores update atomically.
+	hookArmed.Store(true)
+	acquireDone := make(chan struct{})
+	var acquiredSess *codexWebsocketSession
+	var acquiredState *xaiWebsocketIDState
+	go func() {
+		defer close(acquireDone)
+		acquiredSess, acquiredState = exec.acquireSessionAndIDState("new-session")
+	}()
+
+	<-inAcquire
+	closeStarted := make(chan struct{})
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		close(closeStarted)
+		exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+	}()
+	<-closeStarted
+
+	// Confirm closeAllExecutionSessions cannot clear idStore while acquireSessionAndIDState holds store.mu.
+	select {
+	case <-closeDone:
+		t.Fatal("CloseAllExecutionSessionsID completed while acquireSessionAndIDState held store.mu")
+	default:
+	}
+
+	close(releaseAcquire)
+	<-acquireDone
+	<-closeDone
+
+	if acquiredSess == nil || acquiredState == nil {
+		t.Fatalf("acquireSessionAndIDState() returned (%v, %v), want non-nil pair", acquiredSess, acquiredState)
+	}
+	releaseXAIWebsocketIDState(exec.idStore, "new-session", acquiredState, false)
+
+	// After closeAll completes, both the old and newly acquired sessions must be removed from both stores together.
+	exec.store.mu.Lock()
+	storeCount := len(exec.store.sessions)
+	exec.store.mu.Unlock()
+	exec.idStore.mu.Lock()
+	idCount := len(exec.idStore.sessions)
+	exec.idStore.mu.Unlock()
+	if storeCount != 0 || idCount != 0 {
+		t.Fatalf("post-closeAll storeCount=%d idCount=%d, want both 0 (atomic teardown)", storeCount, idCount)
+	}
+
+	// Stress concurrent acquire + release + closeAll and verify the store/idStore pairing invariant.
+	for iter := 0; iter < 40; iter++ {
+		sessionID := fmt.Sprintf("atomic-session-%d", iter)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, st := exec.acquireSessionAndIDState(sessionID)
+			releaseXAIWebsocketIDState(exec.idStore, sessionID, st, false)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			exec.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
+		}()
+		close(start)
+		wg.Wait()
+
+		exec.store.mu.Lock()
+		exec.idStore.mu.Lock()
+		for sid := range exec.store.sessions {
+			if exec.idStore.sessions[sid] == nil {
+				exec.idStore.mu.Unlock()
+				exec.store.mu.Unlock()
+				t.Fatalf("iteration %d: session %q remained in store without matching idStore entry", iter, sid)
+			}
+		}
+		exec.idStore.mu.Unlock()
+		exec.store.mu.Unlock()
+	}
+}

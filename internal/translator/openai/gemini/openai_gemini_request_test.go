@@ -871,3 +871,391 @@ func TestConvertGeminiRequestToOpenAI_FunctionResponsePartsMedia(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertGeminiRequestToOpenAI_NormalizesNumericProtoSchemaTypes_Issue8032(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "search",
+				"parameters": {
+					"type": 6,
+					"properties": {
+						"query": {"type": 1},
+						"tags": {"type": 5, "items": {"type": 1}}
+					}
+				}
+			}]
+		}]
+	}`)
+
+	out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", err)
+	}
+
+	schema := ojson.GetBytesNoCopy(out, "tools.0.function.parameters")
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"type", "object"},
+		{"properties.query.type", "string"},
+		{"properties.tags.type", "array"},
+		{"properties.tags.items.type", "string"},
+	} {
+		got := schema.Get(tc.path)
+		if got.Type != ojson.String || got.String() != tc.want {
+			t.Errorf("tools.0.function.parameters.%s = %s (type %v), want string %q", tc.path, got.Raw, got.Type, tc.want)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToOpenAI_SkipsNullAndInvalidGenerationConfigNumbers(t *testing.T) {
+	t.Run("null numeric fields are omitted", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"temperature": null,
+				"maxOutputTokens": null,
+				"topP": null,
+				"topK": null,
+				"candidateCount": null,
+				"thinkingConfig": {
+					"thinkingLevel": null,
+					"thinkingBudget": null
+				}
+			}
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", err)
+		}
+
+		for _, field := range []string{"temperature", "max_tokens", "top_p", "top_k", "n", "reasoning_effort"} {
+			if got := ojson.GetBytesNoCopy(out, field); got.Exists() {
+				t.Errorf("%s = %s, want omitted for null input; out=%s", field, got.Raw, string(out))
+			}
+		}
+	})
+
+	t.Run("non-positive maxOutputTokens and candidateCount are omitted while zero temperature and topP are kept", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"temperature": 0,
+				"maxOutputTokens": 0,
+				"topP": 0,
+				"topK": "bad",
+				"candidateCount": 0,
+				"thinkingConfig": {
+					"thinkingLevel": null,
+					"thinkingBudget": 4096
+				}
+			}
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", err)
+		}
+
+		if got := ojson.GetBytesNoCopy(out, "temperature"); !got.Exists() || got.Float() != 0 {
+			t.Errorf("temperature = %s, want 0", got.Raw)
+		}
+		if got := ojson.GetBytesNoCopy(out, "top_p"); !got.Exists() || got.Float() != 0 {
+			t.Errorf("top_p = %s, want 0", got.Raw)
+		}
+		for _, field := range []string{"max_tokens", "top_k", "n"} {
+			if got := ojson.GetBytesNoCopy(out, field); got.Exists() {
+				t.Errorf("%s = %s, want omitted; out=%s", field, got.Raw, string(out))
+			}
+		}
+		if got := ojson.GetBytesNoCopy(out, "reasoning_effort").String(); got != "medium" {
+			t.Errorf("reasoning_effort = %q, want %q when thinkingLevel is null and thinkingBudget is 4096; out=%s", got, "medium", string(out))
+		}
+	})
+
+	t.Run("null thinkingBudget is omitted while numeric zero maps to none", func(t *testing.T) {
+		nullBudgetOut, err := ConvertGeminiRequestToOpenAI("gpt-5", []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"maxOutputTokens": -1,
+				"candidateCount": -2,
+				"thinkingConfig": {"thinkingBudget": null}
+			}
+		}`), false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", err)
+		}
+		for _, field := range []string{"max_tokens", "n", "reasoning_effort"} {
+			if got := ojson.GetBytesNoCopy(nullBudgetOut, field); got.Exists() {
+				t.Errorf("%s = %s, want omitted; out=%s", field, got.Raw, string(nullBudgetOut))
+			}
+		}
+
+		zeroBudgetOut, errZero := ConvertGeminiRequestToOpenAI("gpt-5", []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generation_config": {
+				"thinking_config": {"thinking_budget": 0}
+			}
+		}`), false)
+		if errZero != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", errZero)
+		}
+		if got := ojson.GetBytesNoCopy(zeroBudgetOut, "reasoning_effort").String(); got != "none" {
+			t.Errorf("reasoning_effort = %q, want none for numeric thinking_budget 0; out=%s", got, string(zeroBudgetOut))
+		}
+	})
+}
+
+func TestConvertGeminiRequestToOpenAI_DefaultsNonObjectFunctionCallArgsToEmptyObject(t *testing.T) {
+	tests := []struct {
+		name     string
+		partJSON string
+		wantArgs string
+	}{
+		{name: "null args", partJSON: `{"functionCall":{"name":"lookup","args":null}}`, wantArgs: "{}"},
+		{name: "array args", partJSON: `{"functionCall":{"name":"lookup","args":[1,2]}}`, wantArgs: "{}"},
+		{name: "string args", partJSON: `{"functionCall":{"name":"lookup","args":"raw"}}`, wantArgs: "{}"},
+		{name: "number args", partJSON: `{"functionCall":{"name":"lookup","args":42}}`, wantArgs: "{}"},
+		{name: "omitted args", partJSON: `{"functionCall":{"name":"lookup"}}`, wantArgs: "{}"},
+		{name: "snake_case function_call null args", partJSON: `{"function_call":{"name":"lookup","args":null}}`, wantArgs: "{}"},
+		{name: "object args preserved", partJSON: `{"functionCall":{"name":"lookup","args":{"city":"Paris"}}}`, wantArgs: `{"city":"Paris"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{"contents":[{"role":"model","parts":[` + tt.partJSON + `]}]}`)
+			out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+			if err != nil {
+				t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", err)
+			}
+			if got := ojson.GetBytesNoCopy(out, "messages.0.tool_calls.0.function.arguments").String(); got != tt.wantArgs {
+				t.Fatalf("function.arguments = %q, want %q; out=%s", got, tt.wantArgs, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToOpenAI_SupportsSnakeCaseGeminiSDKFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "check weather"}]}],
+		"generation_config": {
+			"temperature": 0.4,
+			"max_output_tokens": 256,
+			"top_p": 0.85,
+			"top_k": 32,
+			"stop_sequences": ["END", "STOP"],
+			"candidate_count": 2,
+			"response_modalities": ["TEXT", "IMAGE"],
+			"thinking_config": {
+				"thinking_level": "HIGH"
+			}
+		},
+		"tools": [{
+			"function_declarations": [{
+				"name": "lookup_weather",
+				"description": "Look up weather",
+				"parameters": null,
+				"parameters_json_schema": {
+					"type": "object",
+					"properties": {
+						"city": {"type": "string"}
+					}
+				}
+			}]
+		}],
+		"tool_config": {
+			"function_calling_config": {
+				"mode": "ANY",
+				"allowed_function_names": ["lookup_weather"]
+			}
+		}
+	}`)
+
+	out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", err)
+	}
+
+	if got := ojson.GetBytesNoCopy(out, "temperature").Float(); got != 0.4 {
+		t.Errorf("temperature = %v, want 0.4", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "max_tokens").Int(); got != 256 {
+		t.Errorf("max_tokens = %d, want 256", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "top_p").Float(); got != 0.85 {
+		t.Errorf("top_p = %v, want 0.85", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "top_k").Int(); got != 32 {
+		t.Errorf("top_k = %d, want 32", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "stop.0").String(); got != "END" {
+		t.Errorf("stop.0 = %q, want END", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "stop.1").String(); got != "STOP" {
+		t.Errorf("stop.1 = %q, want STOP", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "n").Int(); got != 2 {
+		t.Errorf("n = %d, want 2", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "modalities.0").String(); got != "text" {
+		t.Errorf("modalities.0 = %q, want text", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "modalities.1").String(); got != "image" {
+		t.Errorf("modalities.1 = %q, want image", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "reasoning_effort").String(); got != "high" {
+		t.Errorf("reasoning_effort = %q, want high", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tools.0.function.name").String(); got != "lookup_weather" {
+		t.Errorf("tools.0.function.name = %q, want lookup_weather", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tools.0.function.parameters.properties.city.type").String(); got != "string" {
+		t.Errorf("tools.0.function.parameters.properties.city.type = %q, want string", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "function" {
+		t.Errorf("tool_choice.type = %q, want function", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.function.name").String(); got != "lookup_weather" {
+		t.Errorf("tool_choice.function.name = %q, want lookup_weather", got)
+	}
+
+	t.Run("snake_case tool_config modes and mixed spellings", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			input    string
+			wantPath string
+			wantVal  string
+		}{
+			{
+				name:     "snake NONE",
+				input:    `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"function_calling_config":{"mode":"NONE"}}}`,
+				wantPath: "tool_choice",
+				wantVal:  "none",
+			},
+			{
+				name:     "snake AUTO",
+				input:    `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"function_calling_config":{"mode":"AUTO"}}}`,
+				wantPath: "tool_choice",
+				wantVal:  "auto",
+			},
+			{
+				name:     "snake ANY multiple allowed_function_names",
+				input:    `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"function_calling_config":{"mode":"ANY","allowed_function_names":["a","b"]}}}`,
+				wantPath: "tool_choice",
+				wantVal:  "required",
+			},
+			{
+				name:     "mixed camel toolConfig with snake function_calling_config",
+				input:    `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"toolConfig":{"function_calling_config":{"mode":"ANY","allowed_function_names":["only_tool"]}}}`,
+				wantPath: "tool_choice.function.name",
+				wantVal:  "only_tool",
+			},
+			{
+				name:     "snake ANY with non-string allowed_function_names falls back to required",
+				input:    `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tool_config":{"function_calling_config":{"mode":"ANY","allowed_function_names":[null,""]}}}`,
+				wantPath: "tool_choice",
+				wantVal:  "required",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				gotOut, errConv := ConvertGeminiRequestToOpenAI("gpt-5", []byte(tc.input), false)
+				if errConv != nil {
+					t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", errConv)
+				}
+				if got := ojson.GetBytesNoCopy(gotOut, tc.wantPath).String(); got != tc.wantVal {
+					t.Fatalf("%s = %q, want %q; out=%s", tc.wantPath, got, tc.wantVal, string(gotOut))
+				}
+			})
+		}
+	})
+
+	t.Run("multi-name allowed_function_names filters declared tools", func(t *testing.T) {
+		multiInput := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+			"tools": [{
+				"function_declarations": [
+					{"name": "a", "description": "Tool A"},
+					{"name": "b", "description": "Tool B"},
+					{"name": "c", "description": "Tool C"}
+				]
+			}],
+			"tool_config": {
+				"function_calling_config": {
+					"mode": "ANY",
+					"allowed_function_names": ["a", "b"]
+				}
+			}
+		}`)
+
+		gotOut, errConv := ConvertGeminiRequestToOpenAI("gpt-5", multiInput, false)
+		if errConv != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", errConv)
+		}
+		if got := ojson.GetBytesNoCopy(gotOut, "tool_choice").String(); got != "required" {
+			t.Fatalf("tool_choice = %q, want required; out=%s", got, string(gotOut))
+		}
+		gotTools := ojson.GetBytesNoCopy(gotOut, "tools").Array()
+		if len(gotTools) != 2 {
+			t.Fatalf("len(tools) = %d, want 2; out=%s", len(gotTools), string(gotOut))
+		}
+		if gotTools[0].Get("function.name").String() != "a" || gotTools[1].Get("function.name").String() != "b" {
+			t.Fatalf("filtered tool names = [%q, %q], want [a, b]; out=%s",
+				gotTools[0].Get("function.name").String(), gotTools[1].Get("function.name").String(), string(gotOut))
+		}
+	})
+
+	t.Run("multi-name allowed_function_names with no matching declared tools omits tools and tool_choice", func(t *testing.T) {
+		noMatchInput := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+			"tools": [{
+				"function_declarations": [
+					{"name": "c", "description": "Tool C"}
+				]
+			}],
+			"tool_config": {
+				"function_calling_config": {
+					"mode": "ANY",
+					"allowed_function_names": ["a", "b"]
+				}
+			}
+		}`)
+
+		gotOut, errConv := ConvertGeminiRequestToOpenAI("gpt-5", noMatchInput, false)
+		if errConv != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", errConv)
+		}
+		if ojson.GetBytesNoCopy(gotOut, "tools").Exists() {
+			t.Fatalf("tools should be omitted when no declared tools match allowlist; out=%s", string(gotOut))
+		}
+		if ojson.GetBytesNoCopy(gotOut, "tool_choice").Exists() {
+			t.Fatalf("tool_choice should be omitted when allowlist excludes all declared tools; out=%s", string(gotOut))
+		}
+	})
+
+	t.Run("camelCase functionDeclarations takes precedence without duplicating snake_case alias", func(t *testing.T) {
+		dualInput := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+			"tools": [{
+				"functionDeclarations": [{"name": "lookup", "description": "camel"}],
+				"function_declarations": [{"name": "lookup", "description": "snake"}]
+			}]
+		}`)
+
+		gotOut, errConv := ConvertGeminiRequestToOpenAI("gpt-5", dualInput, false)
+		if errConv != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI returned error: %v", errConv)
+		}
+		gotTools := ojson.GetBytesNoCopy(gotOut, "tools").Array()
+		if len(gotTools) != 1 {
+			t.Fatalf("len(tools) = %d, want 1; out=%s", len(gotTools), string(gotOut))
+		}
+		if got := gotTools[0].Get("function.description").String(); got != "camel" {
+			t.Fatalf("tools.0.function.description = %q, want camel; out=%s", got, string(gotOut))
+		}
+	})
+}

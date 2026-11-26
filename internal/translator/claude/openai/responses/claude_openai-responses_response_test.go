@@ -2719,3 +2719,212 @@ func TestConvertClaudeResponseToOpenAIResponses_MultiHopFallbackChainPreservesAl
 		t.Fatalf("non-stream multi-hop fallbacks = %s, want 2 hops with output_index 1 and 2", ojson.GetBytesNoCopy(nonStreamOut, "fallbacks").Raw)
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponses_ErrorEventStream(t *testing.T) {
+	ctx := context.Background()
+	origReq := []byte(`{"model":"claude-sonnet-4-5","input":"Hello"}`)
+
+	t.Run("standalone error event emits response.failed and terminates stream", func(t *testing.T) {
+		var param any
+		errChunk := []byte(`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+		out := ConvertClaudeResponseToOpenAIResponses(ctx, "claude-sonnet-4-5", origReq, nil, errChunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("len(out) = %d, want 1", len(out))
+		}
+		event, data := parseClaudeResponsesSSEEvent(t, out[0])
+		if event != "response.failed" || data.Get("type").String() != "response.failed" {
+			t.Fatalf("event=%q data.type=%q, want response.failed", event, data.Get("type").String())
+		}
+		if data.Get("sequence_number").Int() != 1 {
+			t.Fatalf("sequence_number = %d, want 1", data.Get("sequence_number").Int())
+		}
+		if data.Get("response.status").String() != "failed" {
+			t.Fatalf("response.status = %q, want failed", data.Get("response.status").String())
+		}
+		if data.Get("response.error.code").String() != "overloaded_error" || data.Get("response.error.message").String() != "Overloaded" {
+			t.Fatalf("response.error = %s, want overloaded_error / Overloaded", data.Get("response.error").Raw)
+		}
+		if data.Get("response.created_at").Int() <= 0 {
+			t.Fatalf("response.created_at = %d, want > 0", data.Get("response.created_at").Int())
+		}
+		if data.Get("response.model").String() != "claude-sonnet-4-5" {
+			t.Fatalf("response.model = %q, want claude-sonnet-4-5", data.Get("response.model").String())
+		}
+		// Subsequent events after error must be ignored.
+		after := ConvertClaudeResponseToOpenAIResponses(ctx, "claude-sonnet-4-5", origReq, nil, []byte(`data: {"type":"message_stop"}`), &param)
+		if len(after) != 0 {
+			t.Fatalf("expected no events after response.failed, got %d", len(after))
+		}
+	})
+
+	t.Run("mid-stream error preserves response id, usage, and partial outputs without completing unfinished tool calls", func(t *testing.T) {
+		var param any
+		chunks := [][]byte{
+			[]byte(`data: {"type":"message_start","message":{"id":"msg_err_1","model":"claude-sonnet-4-5","usage":{"input_tokens":7,"output_tokens":2}}}`),
+			[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+			[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial text"}}`),
+			[]byte(`data: {"type":"content_block_stop","index":0}`),
+			[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}`),
+			[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Tok"}}`),
+			[]byte(`data: {"type":"error","error":{"type":"api_error","message":"Internal server error"}}`),
+		}
+		var failed ojson.Result
+		foundFailed := false
+		for _, ch := range chunks {
+			for _, emitted := range ConvertClaudeResponseToOpenAIResponses(ctx, "claude-sonnet-4-5", origReq, nil, ch, &param) {
+				event, data := parseClaudeResponsesSSEEvent(t, emitted)
+				if event == "response.failed" {
+					foundFailed = true
+					failed = data
+				}
+			}
+		}
+		if !foundFailed {
+			t.Fatalf("expected response.failed event")
+		}
+		if failed.Get("response.id").String() != "msg_err_1" {
+			t.Fatalf("response.id = %q, want msg_err_1", failed.Get("response.id").String())
+		}
+		if failed.Get("response.error.code").String() != "api_error" || failed.Get("response.error.message").String() != "Internal server error" {
+			t.Fatalf("response.error = %s", failed.Get("response.error").Raw)
+		}
+		if failed.Get("response.usage.input_tokens").Int() != 7 || failed.Get("response.usage.output_tokens").Int() != 2 {
+			t.Fatalf("response.usage = %s, want input_tokens=7 output_tokens=2", failed.Get("response.usage").Raw)
+		}
+		outputs := failed.Get("response.output").Array()
+		if len(outputs) != 2 {
+			t.Fatalf("response.output len = %d, want 2; raw=%s", len(outputs), failed.Get("response.output").Raw)
+		}
+		if outputs[0].Get("type").String() != "message" || outputs[0].Get("status").String() != "completed" || outputs[0].Get("content.0.text").String() != "partial text" {
+			t.Fatalf("output[0] = %s, want completed message with partial text", outputs[0].Raw)
+		}
+		if outputs[1].Get("type").String() != "function_call" || outputs[1].Get("status").String() != "incomplete" || outputs[1].Get("arguments").String() != `{"city":"Tok` {
+			t.Fatalf("output[1] = %s, want incomplete function_call with partial arguments", outputs[1].Raw)
+		}
+	})
+
+	t.Run("error event with missing fields falls back to default code and message", func(t *testing.T) {
+		var param any
+		out := ConvertClaudeResponseToOpenAIResponses(ctx, "claude-sonnet-4-5", origReq, nil, []byte(`data: {"type":"error","error":{}}`), &param)
+		if len(out) != 1 {
+			t.Fatalf("len(out) = %d, want 1", len(out))
+		}
+		_, data := parseClaudeResponsesSSEEvent(t, out[0])
+		if data.Get("response.error.code").String() != "api_error" || data.Get("response.error.message").String() != "Upstream Claude error" {
+			t.Fatalf("response.error = %s, want defaults", data.Get("response.error").Raw)
+		}
+	})
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_ErrorEvent(t *testing.T) {
+	ctx := context.Background()
+	origReq := []byte(`{"model":"claude-sonnet-4-5","input":"Hello"}`)
+
+	t.Run("SSE error event returns failed response with error payload", func(t *testing.T) {
+		rawSSE := []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+		out := ConvertClaudeResponseToOpenAIResponsesNonStream(ctx, "claude-sonnet-4-5", origReq, nil, rawSSE, nil)
+		root := ojson.ParseBytes(out)
+		if root.Get("status").String() != "failed" {
+			t.Fatalf("status = %q, want failed; out=%s", root.Get("status").String(), string(out))
+		}
+		if root.Get("error.code").String() != "overloaded_error" || root.Get("error.message").String() != "Overloaded" {
+			t.Fatalf("error = %s, want overloaded_error / Overloaded", root.Get("error").Raw)
+		}
+		if root.Get("created_at").Int() <= 0 {
+			t.Fatalf("created_at = %d, want > 0", root.Get("created_at").Int())
+		}
+		if root.Get("model").String() != "claude-sonnet-4-5" {
+			t.Fatalf("model = %q, want claude-sonnet-4-5", root.Get("model").String())
+		}
+	})
+
+	t.Run("SSE error after message_start preserves response id, usage, and partial outputs without completing unfinished tool calls", func(t *testing.T) {
+		rawSSE := bytes.Join([][]byte{
+			[]byte(`data: {"type":"message_start","message":{"id":"msg_ns_err","model":"claude-sonnet-4-5","usage":{"input_tokens":7,"output_tokens":2}}}`),
+			[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+			[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial text"}}`),
+			[]byte(`data: {"type":"content_block_stop","index":0}`),
+			[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_ns_1","name":"get_weather","input":{}}}`),
+			[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Tok"}}`),
+			[]byte(`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`),
+		}, []byte("\n\n"))
+		out := ConvertClaudeResponseToOpenAIResponsesNonStream(ctx, "claude-sonnet-4-5", origReq, nil, rawSSE, nil)
+		root := ojson.ParseBytes(out)
+		if root.Get("status").String() != "failed" || root.Get("id").String() != "msg_ns_err" {
+			t.Fatalf("out = %s, want status=failed and id=msg_ns_err", string(out))
+		}
+		if root.Get("error.code").String() != "overloaded_error" || root.Get("error.message").String() != "Overloaded" {
+			t.Fatalf("error = %s", root.Get("error").Raw)
+		}
+		if root.Get("usage.input_tokens").Int() != 7 || root.Get("usage.output_tokens").Int() != 2 {
+			t.Fatalf("usage = %s, want input_tokens=7 output_tokens=2", root.Get("usage").Raw)
+		}
+		outputs := root.Get("output").Array()
+		if len(outputs) != 2 {
+			t.Fatalf("output len = %d, want 2; raw=%s", len(outputs), root.Get("output").Raw)
+		}
+		if outputs[0].Get("type").String() != "message" || outputs[0].Get("status").String() != "completed" || outputs[0].Get("content.0.text").String() != "partial text" {
+			t.Fatalf("output[0] = %s, want completed message with partial text", outputs[0].Raw)
+		}
+		if outputs[1].Get("type").String() != "function_call" || outputs[1].Get("status").String() != "incomplete" || outputs[1].Get("arguments").String() != `{"city":"Tok` {
+			t.Fatalf("output[1] = %s, want incomplete function_call with partial arguments", outputs[1].Raw)
+		}
+	})
+
+	t.Run("SSE error after stopped web_search without result marks web_search_call incomplete", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"message_start","message":{"id":"msg_ws_err","model":"claude-sonnet-4-5","usage":{"input_tokens":11,"output_tokens":3}}}`),
+			[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"weather tokyo"}}}`),
+			[]byte(`data: {"type":"content_block_stop","index":0}`),
+			[]byte(`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`),
+		}
+		rawSSE := bytes.Join(chunks, []byte("\n\n"))
+		out := ConvertClaudeResponseToOpenAIResponsesNonStream(ctx, "claude-sonnet-4-5", origReq, nil, rawSSE, nil)
+		root := ojson.ParseBytes(out)
+		if root.Get("status").String() != "failed" || root.Get("id").String() != "msg_ws_err" {
+			t.Fatalf("non-stream out = %s, want status=failed and id=msg_ws_err", string(out))
+		}
+		if root.Get("usage.input_tokens").Int() != 11 || root.Get("usage.output_tokens").Int() != 3 {
+			t.Fatalf("non-stream usage = %s, want input_tokens=11 output_tokens=3", root.Get("usage").Raw)
+		}
+		outputs := root.Get("output").Array()
+		if len(outputs) != 1 || outputs[0].Get("type").String() != "web_search_call" || outputs[0].Get("status").String() != "incomplete" {
+			t.Fatalf("non-stream output = %s, want single incomplete web_search_call", root.Get("output").Raw)
+		}
+
+		var param any
+		var failed ojson.Result
+		foundFailed := false
+		for _, ch := range chunks {
+			for _, emitted := range ConvertClaudeResponseToOpenAIResponses(ctx, "claude-sonnet-4-5", origReq, nil, ch, &param) {
+				event, data := parseClaudeResponsesSSEEvent(t, emitted)
+				if event == "response.failed" {
+					foundFailed = true
+					failed = data
+				}
+			}
+		}
+		if !foundFailed {
+			t.Fatalf("expected streaming response.failed event")
+		}
+		streamOutputs := failed.Get("response.output").Array()
+		if len(streamOutputs) != 1 || streamOutputs[0].Get("type").String() != "web_search_call" || streamOutputs[0].Get("status").String() != "incomplete" {
+			t.Fatalf("stream response.output = %s, want single incomplete web_search_call", failed.Get("response.output").Raw)
+		}
+	})
+
+	t.Run("native non-SSE JSON error returns failed response", func(t *testing.T) {
+		rawJSON := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}`)
+		out := ConvertClaudeResponseToOpenAIResponsesNonStream(ctx, "claude-sonnet-4-5", origReq, nil, rawJSON, nil)
+		root := ojson.ParseBytes(out)
+		if root.Get("status").String() != "failed" {
+			t.Fatalf("status = %q, want failed; out=%s", root.Get("status").String(), string(out))
+		}
+		if root.Get("error.code").String() != "rate_limit_error" || root.Get("error.message").String() != "Rate limited" {
+			t.Fatalf("error = %s, want rate_limit_error / Rate limited", root.Get("error").Raw)
+		}
+		if root.Get("created_at").Int() <= 0 {
+			t.Fatalf("created_at = %d, want > 0", root.Get("created_at").Int())
+		}
+	})
+}

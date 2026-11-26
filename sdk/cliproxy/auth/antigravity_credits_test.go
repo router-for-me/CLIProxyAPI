@@ -240,7 +240,7 @@ func TestIsAuthBlockedForModel_ClaudeWithCreditsStillBlockedDuringCooldown(t *te
 		Known:     true,
 		Available: true,
 		UpdatedAt: time.Now(),
-	})
+	}, auth.RegistrationEpoch)
 
 	blocked, reason, _ := isAuthBlockedForModel(auth, "claude-sonnet-4-6", time.Now())
 	if !blocked || reason != blockReasonCooldown {
@@ -268,7 +268,7 @@ func TestIsAuthBlockedForModel_KeepsGeminiBlockedWithoutCreditsBypass(t *testing
 		Known:     true,
 		Available: true,
 		UpdatedAt: time.Now(),
-	})
+	}, auth.RegistrationEpoch)
 
 	blocked, reason, _ := isAuthBlockedForModel(auth, "gemini-3-flash", time.Now())
 	if !blocked || reason != blockReasonCooldown {
@@ -316,11 +316,15 @@ func TestManagerExecuteAndStream_ExpiredNegativeCreditsHintRecoversDuringModelCo
 			}
 
 			// Fresh negative hint must still suppress credits fallback while model is in cooldown.
+			registered, errGet := manager.GetByID(authID)
+			if !errGet {
+				t.Fatal("registered auth not found")
+			}
 			SetAntigravityCreditsHint(authID, AntigravityCreditsHint{
 				Known:     true,
 				Available: false,
 				UpdatedAt: time.Now(),
-			})
+			}, registered.RegistrationEpoch)
 			if stream {
 				if _, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errStream == nil {
 					t.Fatal("ExecuteStream() succeeded with fresh negative credits hint, want cooldown error")
@@ -339,7 +343,7 @@ func TestManagerExecuteAndStream_ExpiredNegativeCreditsHintRecoversDuringModelCo
 				Known:     true,
 				Available: false,
 				UpdatedAt: time.Now().Add(-AntigravityCreditsHintRefreshInterval - time.Second),
-			})
+			}, registered.RegistrationEpoch)
 			if stream {
 				streamResult, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 				if errStream != nil {
@@ -371,5 +375,62 @@ func TestManagerExecuteAndStream_ExpiredNegativeCreditsHintRecoversDuringModelCo
 				}
 			}
 		})
+	}
+}
+
+func TestClearAntigravityCreditsUnavailableHintForAuth(t *testing.T) {
+	auth := &Auth{
+		ID:                fmt.Sprintf("ag-clear-hint-%d", time.Now().UnixNano()),
+		Provider:          "antigravity",
+		RegistrationEpoch: 1,
+	}
+	t.Cleanup(func() {
+		SetAntigravityCreditsHintForAuth(auth, AntigravityCreditsHint{})
+	})
+
+	// Preserve available hints even when clearFresh is true.
+	SetAntigravityCreditsHintForAuth(auth, AntigravityCreditsHint{
+		Known:           true,
+		Available:       true,
+		CreditAmount:    2516,
+		MinCreditAmount: 50,
+		PaidTierID:      "tier-1",
+		UpdatedAt:       time.Now(),
+	})
+	ClearAntigravityCreditsUnavailableHintForAuth(auth, true)
+	hint, ok := GetAntigravityCreditsHintForAuth(auth)
+	if !ok || !hint.Known || !hint.Available || hint.CreditAmount != 2516 {
+		t.Fatalf("after clearing with available hint = %#v (ok=%v), want Known=true Available=true CreditAmount=2516", hint, ok)
+	}
+
+	// Preserve fresh unavailable hints when clearFresh is false.
+	SetAntigravityCreditsHintForAuth(auth, AntigravityCreditsHint{
+		Known:     true,
+		Available: false,
+		UpdatedAt: time.Now(),
+	})
+	ClearAntigravityCreditsUnavailableHintForAuth(auth, false)
+	hint, ok = GetAntigravityCreditsHintForAuth(auth)
+	if !ok || !hint.Known || hint.Available {
+		t.Fatalf("after clearFresh=false on fresh unavailable hint = %#v (ok=%v), want Known=true Available=false", hint, ok)
+	}
+
+	// Clear fresh unavailable hints when clearFresh is true.
+	ClearAntigravityCreditsUnavailableHintForAuth(auth, true)
+	hint, ok = GetAntigravityCreditsHintForAuth(auth)
+	if !ok || hint.Known || hint.Available {
+		t.Fatalf("after clearFresh=true on fresh unavailable hint = %#v (ok=%v), want Known=false Available=false", hint, ok)
+	}
+
+	// Clear expired unavailable hints even when clearFresh is false.
+	SetAntigravityCreditsHintForAuth(auth, AntigravityCreditsHint{
+		Known:     true,
+		Available: false,
+		UpdatedAt: time.Now().Add(-AntigravityCreditsHintRefreshInterval - time.Second),
+	})
+	ClearAntigravityCreditsUnavailableHintForAuth(auth, false)
+	hint, ok = GetAntigravityCreditsHintForAuth(auth)
+	if !ok || hint.Known || hint.Available {
+		t.Fatalf("after clearFresh=false on stale unavailable hint = %#v (ok=%v), want Known=false Available=false", hint, ok)
 	}
 }

@@ -48,11 +48,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		var names []string
 		tarr := tools.Array()
 		for i := 0; i < len(tarr); i++ {
-			fns := tarr[i].Get("functionDeclarations")
-			if !fns.IsArray() {
-				continue
-			}
-			for _, fn := range fns.Array() {
+			for _, fn := range geminiToolFunctionDeclarations(tarr[i]) {
 				if v := fn.Get("name"); v.Exists() {
 					names = append(names, v.String())
 				}
@@ -231,17 +227,13 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				if fc := translatorcommon.GeminiPartFunctionCall(p); fc.Exists() {
 					fnDoc := ojson.NewDocString(`{"type":"function_call"}`)
 					if name := fc.Get("name"); name.Exists() {
-						n := name.String()
-						if short, ok := shortMap[n]; ok {
-							n = short
-						} else {
-							n = shortenNameIfNeeded(n)
-						}
-						_ = fnDoc.Set("name", n)
+						_ = fnDoc.Set("name", resolveGeminiCodexShortToolName(shortMap, name.String()))
 					}
-					if args := fc.Get("args"); args.Exists() {
-						_ = fnDoc.Set("arguments", args.Raw)
+					argsJSON := "{}"
+					if args := fc.Get("args"); args.Exists() && args.IsObject() {
+						argsJSON = args.Raw
 					}
+					_ = fnDoc.Set("arguments", argsJSON)
 					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 					id := getGeminiCallID(fc)
 					if id == "" {
@@ -306,32 +298,24 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		_ = outDoc.Set("tool_choice", "auto")
 		tarr := tools.Array()
 		for i := 0; i < len(tarr); i++ {
-			td := tarr[i]
-			fns := td.Get("functionDeclarations")
-			if !fns.IsArray() {
-				continue
-			}
-			farr := fns.Array()
+			farr := geminiToolFunctionDeclarations(tarr[i])
 			for j := 0; j < len(farr); j++ {
 				fn := farr[j]
 				toolDoc := ojson.NewDocString(`{}`)
 				_ = toolDoc.Set("type", "function")
 				if v := fn.Get("name"); v.Exists() {
-					name := v.String()
-					if short, ok := shortMap[name]; ok {
-						name = short
-					} else {
-						name = shortenNameIfNeeded(name)
-					}
-					_ = toolDoc.Set("name", name)
+					_ = toolDoc.Set("name", resolveGeminiCodexShortToolName(shortMap, v.String()))
 				}
 				if v := fn.Get("description"); v.Exists() {
 					_ = toolDoc.Set("description", v.String())
 				}
-				if prm := fn.Get("parameters"); prm.Exists() {
+				if prm := fn.Get("parameters"); prm.IsObject() {
 					cleaned := cleanGeminiCodexToolParameters(prm)
 					_ = toolDoc.SetRawBytes("parameters", cleaned)
-				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
+				} else if prm = fn.Get("parametersJsonSchema"); prm.IsObject() {
+					cleaned := cleanGeminiCodexToolParameters(prm)
+					_ = toolDoc.SetRawBytes("parameters", cleaned)
+				} else if prm = fn.Get("parameters_json_schema"); prm.IsObject() {
 					cleaned := cleanGeminiCodexToolParameters(prm)
 					_ = toolDoc.SetRawBytes("parameters", cleaned)
 				}
@@ -367,7 +351,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Fixed flags aligning with Codex expectations
 	_ = outDoc.Set("parallel_tool_calls", true)
-	setCodexToolChoiceFromGeminiToolConfigDoc(outDoc, hasTools, root.Get("toolConfig.functionCallingConfig"))
+	setCodexToolChoiceFromGeminiToolConfigDoc(outDoc, hasTools, shortMap, geminiFunctionCallingConfig(root))
 
 	genConfig := root.Get("generationConfig")
 	if !genConfig.Exists() {
@@ -387,37 +371,20 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 
 	// Convert Gemini thinkingConfig to Codex reasoning.effort.
-	// Note: Google official Python SDK sends snake_case fields (thinking_level/thinking_budget).
+	// Note: Google official Python SDK sends snake_case fields (thinking_config/thinking_level/thinking_budget).
 	effortSet := false
 	if genConfig.Exists() {
-		thinkingLevel := genConfig.Get("thinkingLevel")
-		if !thinkingLevel.Exists() {
-			thinkingLevel = genConfig.Get("thinking_level")
+		if effort := geminiThinkingLevel(genConfig); effort != "" {
+			_ = outDoc.Set("reasoning.effort", effort)
+			effortSet = true
 		}
-		if thinkingLevel.Exists() {
-			effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
-			if effort != "" {
-				_ = outDoc.Set("reasoning.effort", effort)
-				effortSet = true
-			}
-		} else if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-			thinkingLevel := thinkingConfig.Get("thinkingLevel")
-			if !thinkingLevel.Exists() {
-				thinkingLevel = thinkingConfig.Get("thinking_level")
-			}
-			if thinkingLevel.Exists() {
-				effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
-				if effort != "" {
+		if !effortSet {
+			if thinkingConfig := geminiThinkingConfig(genConfig); thinkingConfig.Exists() {
+				if effort := geminiThinkingLevel(thinkingConfig); effort != "" {
 					_ = outDoc.Set("reasoning.effort", effort)
 					effortSet = true
-				}
-			} else {
-				thinkingBudget := thinkingConfig.Get("thinkingBudget")
-				if !thinkingBudget.Exists() {
-					thinkingBudget = thinkingConfig.Get("thinking_budget")
-				}
-				if thinkingBudget.Exists() {
-					if effort, ok := thinking.ConvertBudgetToLevel(int(thinkingBudget.Int())); ok {
+				} else if budget, okBudget := geminiThinkingBudget(thinkingConfig); okBudget {
+					if effort, okConvert := thinking.ConvertBudgetToLevel(budget); okConvert {
 						_ = outDoc.Set("reasoning.effort", effort)
 						effortSet = true
 					}
@@ -470,7 +437,78 @@ func normalizedGeminiThoughtSignatureForCodexTarget(modelName, rawSignature stri
 	return translatorcommon.CodexReplaySignatureForTarget(modelName, decodeGeminiCodexThoughtSignature(rawSignature))
 }
 
-func setCodexToolChoiceFromGeminiToolConfigDoc(doc *ojson.Doc, hasTools bool, functionCallingConfig ojson.Result) {
+func geminiToolFunctionDeclarations(tool ojson.Result) []ojson.Result {
+	var declarations []ojson.Result
+	for _, key := range []string{"functionDeclarations", "function_declarations"} {
+		if fns := tool.Get(key); fns.IsArray() {
+			declarations = append(declarations, fns.Array()...)
+		}
+	}
+	return declarations
+}
+
+func resolveGeminiCodexShortToolName(shortMap map[string]string, name string) string {
+	if short, ok := shortMap[name]; ok {
+		return short
+	}
+	return shortenNameIfNeeded(name)
+}
+
+func geminiFunctionCallingConfig(root ojson.Result) ojson.Result {
+	for _, path := range []string{
+		"toolConfig.functionCallingConfig",
+		"toolConfig.function_calling_config",
+		"tool_config.function_calling_config",
+		"tool_config.functionCallingConfig",
+	} {
+		if cfg := root.Get(path); cfg.Exists() && cfg.IsObject() {
+			return cfg
+		}
+	}
+	return ojson.Result{}
+}
+
+func geminiAllowedFunctionNames(functionCallingConfig ojson.Result) ojson.Result {
+	if allowed := functionCallingConfig.Get("allowedFunctionNames"); allowed.IsArray() {
+		return allowed
+	}
+	if allowed := functionCallingConfig.Get("allowed_function_names"); allowed.IsArray() {
+		return allowed
+	}
+	return ojson.Result{}
+}
+
+func geminiThinkingConfig(genConfig ojson.Result) ojson.Result {
+	if tc := genConfig.Get("thinkingConfig"); tc.Exists() && tc.IsObject() {
+		return tc
+	}
+	if tc := genConfig.Get("thinking_config"); tc.Exists() && tc.IsObject() {
+		return tc
+	}
+	return ojson.Result{}
+}
+
+func geminiThinkingLevel(obj ojson.Result) string {
+	for _, key := range []string{"thinkingLevel", "thinking_level"} {
+		if v := obj.Get(key); v.Type == ojson.String {
+			if effort := strings.ToLower(strings.TrimSpace(v.String())); effort != "" {
+				return effort
+			}
+		}
+	}
+	return ""
+}
+
+func geminiThinkingBudget(obj ojson.Result) (int, bool) {
+	for _, key := range []string{"thinkingBudget", "thinking_budget"} {
+		if v := obj.Get(key); v.Type == ojson.Number {
+			return int(v.Int()), true
+		}
+	}
+	return 0, false
+}
+
+func setCodexToolChoiceFromGeminiToolConfigDoc(doc *ojson.Doc, hasTools bool, shortMap map[string]string, functionCallingConfig ojson.Result) {
 	if !functionCallingConfig.Exists() {
 		return
 	}
@@ -483,43 +521,45 @@ func setCodexToolChoiceFromGeminiToolConfigDoc(doc *ojson.Doc, hasTools bool, fu
 			_ = doc.Set("tool_choice", "auto")
 		}
 	case "ANY":
-		allowedNames := functionCallingConfig.Get("allowedFunctionNames")
-		allowedNameItems := allowedNames.Array()
-		if allowedNames.IsArray() && len(allowedNameItems) == 1 {
-			choice := []byte(`{"type":"function","name":""}`)
-			choice, _ = ojson.SetBytes(choice, "name", shortenNameIfNeeded(allowedNameItems[0].String()))
-			_ = doc.SetRawBytes("tool_choice", choice)
-		} else {
+		allowedNames := geminiAllowedFunctionNames(functionCallingConfig)
+		var resolved []string
+		seen := make(map[string]struct{})
+		if allowedNames.IsArray() {
+			for _, item := range allowedNames.Array() {
+				if item.Type != ojson.String {
+					continue
+				}
+				rawName := strings.TrimSpace(item.String())
+				if rawName == "" {
+					continue
+				}
+				shortName := resolveGeminiCodexShortToolName(shortMap, rawName)
+				if _, dup := seen[shortName]; dup {
+					continue
+				}
+				seen[shortName] = struct{}{}
+				resolved = append(resolved, shortName)
+			}
+		}
+		switch len(resolved) {
+		case 0:
 			_ = doc.Set("tool_choice", "required")
+		case 1:
+			choiceDoc := ojson.NewDocString(`{"type":"function","name":""}`)
+			_ = choiceDoc.Set("name", resolved[0])
+			_ = doc.SetRawBytes("tool_choice", choiceDoc.Bytes())
+		default:
+			choiceDoc := ojson.NewDocString(`{"type":"allowed_tools","mode":"required","tools":[]}`)
+			toolItems := make([][]byte, 0, len(resolved))
+			for _, name := range resolved {
+				itemDoc := ojson.NewDocString(`{"type":"function","name":""}`)
+				_ = itemDoc.Set("name", name)
+				toolItems = append(toolItems, itemDoc.Bytes())
+			}
+			_ = choiceDoc.SetRawBytes("tools", translatorcommon.JoinRawArray(toolItems))
+			_ = doc.SetRawBytes("tool_choice", choiceDoc.Bytes())
 		}
 	}
-}
-
-func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig ojson.Result) []byte {
-	if !functionCallingConfig.Exists() {
-		return out
-	}
-	mode := functionCallingConfig.Get("mode").String()
-	switch mode {
-	case "NONE":
-		out, _ = ojson.SetBytes(out, "tool_choice", "none")
-	case "AUTO":
-		current := ojson.GetBytesNoCopy(out, "tool_choice")
-		if current.Type != ojson.String || current.String() != "auto" {
-			out, _ = ojson.SetBytes(out, "tool_choice", "auto")
-		}
-	case "ANY":
-		allowedNames := functionCallingConfig.Get("allowedFunctionNames")
-		allowedNameItems := allowedNames.Array()
-		if allowedNames.IsArray() && len(allowedNameItems) == 1 {
-			choice := []byte(`{"type":"function","name":""}`)
-			choice, _ = ojson.SetBytes(choice, "name", shortenNameIfNeeded(allowedNameItems[0].String()))
-			out, _ = ojson.SetRawBytes(out, "tool_choice", choice)
-		} else {
-			out, _ = ojson.SetBytes(out, "tool_choice", "required")
-		}
-	}
-	return out
 }
 
 func cleanGeminiCodexToolParameters(parameters ojson.Result) []byte {

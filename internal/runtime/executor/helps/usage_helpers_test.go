@@ -2245,3 +2245,18 @@ func TestUsageReporterApplyPluginExecutorAttribution(t *testing.T) {
 		t.Fatalf("unexpected PluginExecutorType values")
 	}
 }
+
+func TestUsageReporterIsHierarchyParentExcludesMessageHashAliases(t *testing.T) {
+	if isHierarchyParent("msg:1111111111111111", "msg:2222222222222222") {
+		t.Fatal("isHierarchyParent(msg:*, msg:*) = true, want false")
+	}
+	if !isHierarchyParent("claude:child-1", "claude:parent-1") {
+		t.Fatal("isHierarchyParent(claude:*, claude:*) = false, want true")
+	}
+
+	reporter := NewUsageReporter(context.Background(), "antigravity", "gemini-3.7-flash-high", nil)
+	reporter.SetSessionHierarchy("msg:1111111111111111", "msg:2222222222222222")
+	if reporter.parentSessionID != "" {
+		t.Fatalf("reporter.parentSessionID = %q, want empty for message-hash alias", reporter.parentSessionID)
+	}
+}

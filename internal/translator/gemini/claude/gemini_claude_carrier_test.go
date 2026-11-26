@@ -530,3 +530,149 @@ func TestGeminiClaudeThoughtSignatureRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiClaudeNonStreamConsecutiveSignedThoughtParts(t *testing.T) {
+	sig1 := capturedGeminiThinkingSignature
+	sig2 := "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsE"
+
+	t.Run("consecutive signed thoughts", func(t *testing.T) {
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"text":"first thought","thought":true,"thoughtSignature":"` + sig1 + `"},{"text":"second thought","thought":true,"thoughtSignature":"` + sig2 + `"},{"text":"answer"}]},"finishReason":"STOP"}]}`)
+		response := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-4-carbon", nil, nil, upstream, nil)
+		blocks := ojson.GetBytes(response, "content").Array()
+		if len(blocks) != 3 {
+			t.Fatalf("got %d content blocks, want 3: %s", len(blocks), response)
+		}
+		if blocks[0].Get("type").String() != "thinking" || blocks[0].Get("thinking").String() != "first thought" || blocks[0].Get("signature").String() != sig1 {
+			t.Fatalf("block 0 mismatch: got %s", blocks[0].Raw)
+		}
+		if blocks[1].Get("type").String() != "thinking" || blocks[1].Get("thinking").String() != "second thought" || blocks[1].Get("signature").String() != sig2 {
+			t.Fatalf("block 1 mismatch: got %s", blocks[1].Raw)
+		}
+		if blocks[2].Get("type").String() != "text" || blocks[2].Get("text").String() != "answer" {
+			t.Fatalf("block 2 mismatch: got %s", blocks[2].Raw)
+		}
+
+		request := ojson.NewDocString(`{"messages":[{"role":"assistant","content":[]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+		_ = request.SetRaw("messages.0.content", ojson.GetBytes(response, "content").Raw)
+		replayed, errConvert := convertClaudeRequestToGemini("gemini-4-carbon", request.Bytes(), false, true)
+		if errConvert != nil {
+			t.Fatal(errConvert)
+		}
+		parts := ojson.GetBytes(replayed, "contents.0.parts").Array()
+		if len(parts) != 3 {
+			t.Fatalf("replayed %d parts, want 3: %s", len(parts), replayed)
+		}
+		if parts[0].Get("text").String() != "first thought" || parts[0].Get("thoughtSignature").String() != sig1 {
+			t.Fatalf("replayed part 0 mismatch: %s", parts[0].Raw)
+		}
+		if parts[1].Get("text").String() != "second thought" || parts[1].Get("thoughtSignature").String() != sig2 {
+			t.Fatalf("replayed part 1 mismatch: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("signed thought followed by unsigned thought", func(t *testing.T) {
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"text":"first thought","thought":true,"thoughtSignature":"` + sig1 + `"},{"text":"second thought","thought":true}]},"finishReason":"STOP"}]}`)
+		response := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-4-carbon", nil, nil, upstream, nil)
+		blocks := ojson.GetBytes(response, "content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("got %d content blocks, want 2: %s", len(blocks), response)
+		}
+		if blocks[0].Get("thinking").String() != "first thought" || blocks[0].Get("signature").String() != sig1 {
+			t.Fatalf("block 0 mismatch: got %s", blocks[0].Raw)
+		}
+		if blocks[1].Get("thinking").String() != "second thought" || blocks[1].Get("signature").Exists() {
+			t.Fatalf("block 1 mismatch: got %s", blocks[1].Raw)
+		}
+	})
+
+	t.Run("unsigned thought coalesced with trailing signed thought", func(t *testing.T) {
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"text":"first ","thought":true},{"text":"second","thought":true,"thoughtSignature":"` + sig1 + `"}]},"finishReason":"STOP"}]}`)
+		response := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-4-carbon", nil, nil, upstream, nil)
+		blocks := ojson.GetBytes(response, "content").Array()
+		if len(blocks) != 1 {
+			t.Fatalf("got %d content blocks, want 1: %s", len(blocks), response)
+		}
+		if blocks[0].Get("thinking").String() != "first second" || blocks[0].Get("signature").String() != sig1 {
+			t.Fatalf("block 0 mismatch: got %s", blocks[0].Raw)
+		}
+	})
+
+	t.Run("signed thought followed by empty-text signature part", func(t *testing.T) {
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"text":"first thought","thought":true,"thoughtSignature":"` + sig1 + `"},{"thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}`)
+		response := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-4-carbon", nil, nil, upstream, nil)
+		blocks := ojson.GetBytes(response, "content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("got %d content blocks, want 2: %s", len(blocks), response)
+		}
+		if blocks[0].Get("thinking").String() != "first thought" || blocks[0].Get("signature").String() != sig1 {
+			t.Fatalf("block 0 mismatch: got %s", blocks[0].Raw)
+		}
+		if blocks[1].Get("type").String() != "thinking" || blocks[1].Get("thinking").String() != "" || blocks[1].Get("signature").String() == "" {
+			t.Fatalf("block 1 mismatch: got %s", blocks[1].Raw)
+		}
+
+		request := ojson.NewDocString(`{"messages":[{"role":"assistant","content":[]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+		_ = request.SetRaw("messages.0.content", ojson.GetBytes(response, "content").Raw)
+		replayed, errConvert := convertClaudeRequestToGemini("gemini-4-carbon", request.Bytes(), false, true)
+		if errConvert != nil {
+			t.Fatal(errConvert)
+		}
+		parts := ojson.GetBytes(replayed, "contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("replayed %d parts, want 2: %s", len(parts), replayed)
+		}
+		if parts[0].Get("text").String() != "first thought" || parts[0].Get("thoughtSignature").String() != sig1 {
+			t.Fatalf("replayed part 0 signature overwritten: %s", parts[0].Raw)
+		}
+		if parts[1].Get("thoughtSignature").String() != sig2 {
+			t.Fatalf("replayed part 1 signature mismatch: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("unsigned thought signed then followed by second empty-text signature part", func(t *testing.T) {
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"text":"first thought","thought":true},{"thoughtSignature":"` + sig1 + `"},{"thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}`)
+		response := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-4-carbon", nil, nil, upstream, nil)
+		blocks := ojson.GetBytes(response, "content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("got %d content blocks, want 2: %s", len(blocks), response)
+		}
+		if blocks[0].Get("thinking").String() != "first thought" || blocks[0].Get("signature").String() != sig1 {
+			t.Fatalf("block 0 mismatch: got %s", blocks[0].Raw)
+		}
+		if blocks[1].Get("type").String() != "thinking" || blocks[1].Get("thinking").String() != "" || blocks[1].Get("signature").String() == "" {
+			t.Fatalf("block 1 mismatch: got %s", blocks[1].Raw)
+		}
+	})
+
+	t.Run("empty-text signed thought followed by non-empty signed thought", func(t *testing.T) {
+		upstream := []byte(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"` + sig1 + `"},{"thought":true,"text":"second","thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}`)
+		response := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-4-carbon", nil, nil, upstream, nil)
+		blocks := ojson.GetBytes(response, "content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("got %d content blocks, want 2: %s", len(blocks), response)
+		}
+		if blocks[0].Get("type").String() != "thinking" || blocks[0].Get("thinking").String() != "" || blocks[0].Get("signature").String() != sig1 {
+			t.Fatalf("block 0 mismatch: got %s", blocks[0].Raw)
+		}
+		if blocks[1].Get("type").String() != "thinking" || blocks[1].Get("thinking").String() != "second" || blocks[1].Get("signature").String() != sig2 {
+			t.Fatalf("block 1 mismatch: got %s", blocks[1].Raw)
+		}
+
+		request := ojson.NewDocString(`{"messages":[{"role":"assistant","content":[]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+		_ = request.SetRaw("messages.0.content", ojson.GetBytes(response, "content").Raw)
+		replayed, errConvert := convertClaudeRequestToGemini("gemini-4-carbon", request.Bytes(), false, true)
+		if errConvert != nil {
+			t.Fatal(errConvert)
+		}
+		parts := ojson.GetBytes(replayed, "contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("replayed %d parts, want 2: %s", len(parts), replayed)
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "" || parts[0].Get("thoughtSignature").String() != sig1 {
+			t.Fatalf("replayed part 0 mismatch: %s", parts[0].Raw)
+		}
+		if !parts[1].Get("thought").Bool() || parts[1].Get("text").String() != "second" || parts[1].Get("thoughtSignature").String() != sig2 {
+			t.Fatalf("replayed part 1 mismatch: %s", parts[1].Raw)
+		}
+	})
+}

@@ -3,6 +3,8 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,13 +15,17 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"gopkg.in/yaml.v3"
 )
 
 type executorManager interface {
@@ -575,6 +581,8 @@ type executorAdapter struct {
 	path              string
 	version           string
 	provider          string
+	homeAuthProvider  string
+	homePlugin        *loadedPlugin
 	usageExecutorType string
 	executor          pluginapi.ProviderExecutor
 	inputFormats      []sdktranslator.Format
@@ -584,6 +592,9 @@ type executorAdapter struct {
 func (a *executorAdapter) Identifier() string {
 	if a == nil {
 		return ""
+	}
+	if a.homeAuthProvider != "" {
+		return a.homeAuthProvider
 	}
 	return a.provider
 }
@@ -598,6 +609,124 @@ func (a *executorAdapter) UsageExecutorType() string {
 	return helps.PluginExecutorType(a.pluginID)
 }
 
+func (a *executorAdapter) executionAvailabilityError(auth *coreauth.Auth) error {
+	if a != nil && a.homeAuthProvider != "" {
+		if a.executor != nil && strings.EqualFold(strings.TrimSpace(authProvider(auth)), a.homeAuthProvider) &&
+			a.host.homeExecutorAvailable(a.pluginID, a.homePlugin, a.homeAuthProvider) {
+			return nil
+		}
+		return a.homeExecutorUnavailableError()
+	}
+	if a != nil && a.executor != nil && !a.host.isPluginFused(a.pluginID) && a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
+		return nil
+	}
+	return fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+}
+
+func (a *executorAdapter) homeExecutorLifecycleError(err error) error {
+	if err == nil || a.homeAuthProvider == "" {
+		return nil
+	}
+	if localErr, ok := errors.AsType[*coreauth.Error](err); ok && localErr != nil && localErr.Code == coreauth.ErrorCodeHomeExecutorPluginUnavailable {
+		return err
+	}
+	// Unload or quiesce can race with the last availability check before RPC.
+	var pluginErr rpcError
+	if errors.Is(err, errPluginClientClosed) || (errors.As(err, &pluginErr) && pluginErr.Code == "plugin_quiesced") {
+		return coreauth.WithCause(a.homeExecutorUnavailableError(), err)
+	}
+	return nil
+}
+
+func (a *executorAdapter) homeExecutorUnavailableError() *coreauth.Error {
+	message := fmt.Sprintf("plugin executor %q is unavailable", a.pluginID)
+	if a.homeAuthProvider != "" {
+		message = fmt.Sprintf("%s for Home credential provider %q", message, a.homeAuthProvider)
+	}
+	return &coreauth.Error{
+		Code:       coreauth.ErrorCodeHomeExecutorPluginUnavailable,
+		Message:    message,
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
+func (a *executorAdapter) validateHomeLocalExecutorRequest(ctx context.Context, req pluginapi.ExecutorRequest) error {
+	grant, local := homeplugins.ExecutorGrant(ctx)
+	if !local {
+		return nil
+	}
+	modelChanged := &coreauth.Error{Code: "local_executor_model_changed", Message: "plugin payload changes the model authorized by Home", HTTPStatus: http.StatusBadRequest}
+	if req.Model != grant.Model {
+		return modelChanged
+	}
+	for _, body := range [][]byte{req.Payload, req.OriginalRequest} {
+		doc := ojson.NewDoc(body)
+		for _, path := range []string{"model", "request.model"} {
+			if value := doc.Get(path).String(); value != "" && value != grant.Model {
+				return modelChanged
+			}
+		}
+	}
+	a.host.mu.Lock()
+	loaded := a.homePlugin
+	matches := loaded != nil && a.host.loaded[a.pluginID] == loaded && !loaded.homeSuspended
+	_, fused := a.host.fused[a.pluginID]
+	var configYAML []byte
+	if matches {
+		configYAML = loaded.configYAML
+	}
+	a.host.mu.Unlock()
+
+	var values map[string]any
+	errDecode := yaml.Unmarshal(configYAML, &values)
+	raw, errMarshal := yaml.Marshal(values)
+	if !grant.Valid() || !matches || fused || errDecode != nil || errMarshal != nil ||
+		fmt.Sprintf("%x", sha256.Sum256(raw)) != grant.ConfigDigest {
+		return a.homeExecutorUnavailableError()
+	}
+	return nil
+}
+
+func (a *executorAdapter) homeLocalExecutorError(ctx context.Context, err error) error {
+	if _, local := homeplugins.ExecutorGrant(ctx); !local || err == nil {
+		return err
+	}
+	var coded interface{ ErrorCode() string }
+	if errors.As(err, &coded) {
+		switch coded.ErrorCode() {
+		case "authentication_required":
+			return coreauth.WithCause(&coreauth.Error{
+				Code: coded.ErrorCode(), Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable,
+			}, err)
+		case "plugin_quiesced":
+			return coreauth.WithCause(a.homeExecutorUnavailableError(), err)
+		}
+	}
+	if errors.Is(err, errPluginClientClosed) {
+		return coreauth.WithCause(a.homeExecutorUnavailableError(), err)
+	}
+	return err
+}
+
+func setLocalExecutorBodyModel(doc *ojson.Doc, model string) {
+	for _, path := range []string{"model", "request.model"} {
+		if doc.Get(path).Exists() {
+			_ = helps.SetStringIfDifferentDoc(doc, path, model)
+		}
+	}
+}
+
+func (a *executorAdapter) newUsageReporter(ctx context.Context, auth *coreauth.Auth, model string) *helps.UsageReporter {
+	if auth == nil {
+		return nil
+	}
+	modelName := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if modelName == "" {
+		modelName = model
+	}
+	return helps.NewExecutorUsageReporter(ctx, a, modelName, auth)
+}
+
 type preparedExecutorCall struct {
 	req             coreexecutor.Request
 	opts            coreexecutor.Options
@@ -607,7 +736,7 @@ type preparedExecutorCall struct {
 	outputFormat    sdktranslator.Format
 }
 
-func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
+func (a *executorAdapter) prepareExecutorCall(ctx context.Context, req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
 	inputRequested := executorInputFormat(req, opts)
 	requestedFormat := executorRequestedFormat(req, opts)
 	inputFormat, errInput := a.selectExecutorInputFormat(inputRequested)
@@ -619,9 +748,13 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		return preparedExecutorCall{}, errOutput
 	}
 
+	grant, local := homeplugins.ExecutorGrant(ctx)
 	baseModel := strings.TrimSpace(req.Model)
+	if local {
+		baseModel = grant.Model
+	}
 	modelInfo := a.lookupPluginModelInfo(baseModel)
-	if parsed := thinking.ParseSuffix(req.Model); parsed.HasSuffix && modelInfo == nil {
+	if parsed := thinking.ParseSuffix(req.Model); !local && parsed.HasSuffix && modelInfo == nil {
 		baseModel = strings.TrimSpace(parsed.ModelName)
 		modelInfo = a.lookupPluginModelInfo(baseModel)
 	}
@@ -633,6 +766,14 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	nativeOpts := opts
 	var updatesChanged bool
 	if inputRequested != "" && inputRequested != inputFormat {
+		if local {
+			doc := ojson.NewDoc(req.Payload)
+			if inner := doc.Get("request"); inputRequested == sdktranslator.FormatGemini && inner.IsObject() && !doc.Get("contents").Exists() {
+				doc = ojson.NewDocString(inner.Raw)
+			}
+			setLocalExecutorBodyModel(doc, baseModel)
+			req.Payload = doc.Bytes()
+		}
 		translated := sdktranslator.TranslateRequestEnvelope(context.Background(), inputRequested, inputFormat, sdktranslator.RequestEnvelope{
 			Format: inputRequested,
 			Model:  baseModel,
@@ -645,17 +786,32 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		nativeReq.Payload = translated.Body
 		updatesChanged = translated.ConfigurationUpdatesChanged
 	}
-	hasPluginThinkingTarget := modelInfo != nil ||
+	_, hasResolvedModelInfo := coreauth.ResolvedModelInfo(req)
+	hasPluginThinkingTarget := hasResolvedModelInfo || modelInfo != nil ||
 		registry.LookupModelInfo(baseModel, a.provider) != nil ||
 		thinking.GetProviderApplier(a.provider) != nil
+	if local || hasPluginThinkingTarget {
+		nativeReq.Model = baseModel
+	}
 	originalTranslated := nativeReq.Payload
 	doc := ojson.NewDoc(nativeReq.Payload)
-	if hasPluginThinkingTarget && baseModel != "" && doc.Get("model").Exists() {
-		_ = helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	if local {
+		setLocalExecutorBodyModel(doc, baseModel)
+		original := ojson.NewDoc(opts.OriginalRequest)
+		setLocalExecutorBodyModel(original, baseModel)
+		nativeOpts.OriginalRequest = original.Bytes()
+	} else if (hasPluginThinkingTarget || a.homeAuthProvider != "") && nativeReq.Model != "" && doc.Get("model").Exists() {
+		_ = helps.SetStringIfDifferentDoc(doc, "model", nativeReq.Model)
 	}
-	if doc.Len() > 0 {
+	innerRequest := doc.Get("request")
+	wrappedGemini := inputFormat == sdktranslator.FormatGemini && innerRequest.IsObject() && !doc.Get("contents").Exists()
+	thinkingDoc := doc
+	if local && wrappedGemini {
+		thinkingDoc = ojson.NewDocString(innerRequest.Raw)
+	}
+	if thinkingDoc.Len() > 0 {
 		if errThinking := helps.ApplyRequestThinkingWithModelInfoDoc(
-			doc,
+			thinkingDoc,
 			req,
 			opts,
 			inputRequested.String(),
@@ -665,6 +821,11 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 			updatesChanged,
 		); errThinking != nil {
 			return preparedExecutorCall{}, errThinking
+		}
+	}
+	if thinkingDoc != doc {
+		if errSet := doc.SetRaw("request", thinkingDoc.String()); errSet != nil {
+			return preparedExecutorCall{}, errSet
 		}
 	}
 	// User payload rules are the last host-side mutation before the plugin sees
@@ -680,7 +841,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 				finalizeOpts.Metadata = mergeExecutorMetadata(req.Metadata, opts.Metadata)
 			}
 			root := ""
-			if inputFormat == sdktranslator.FormatAntigravity {
+			if inputFormat == sdktranslator.FormatAntigravity || wrappedGemini {
 				root = "request"
 			}
 			finalize := helps.NewPayloadFinalizer(cfg, a.provider, baseModel, inputFormat.String(), root, originalTranslated, req, finalizeOpts)
@@ -689,9 +850,6 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	}
 	if doc.Len() > 0 {
 		nativeReq.Payload = doc.Bytes()
-	}
-	if hasPluginThinkingTarget {
-		nativeReq.Model = baseModel
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
@@ -1000,28 +1158,32 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 }
 
 func (a *executorAdapter) executeWithAttribution(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, attribution *pluginapi.UsageAttribution, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
-		return coreexecutor.Response{}, nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+	if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+		if _, local := homeplugins.ExecutorGrant(ctx); local {
+			errAvailable = a.homeExecutorUnavailableError()
+		}
+		return coreexecutor.Response{}, nil, errAvailable
 	}
 
-	var reporter *helps.UsageReporter
-	if auth != nil {
-		modelName := strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName)
-		if modelName == "" {
-			modelName = req.Model
-		}
-		reporter = helps.NewExecutorUsageReporter(ctx, a, modelName, auth)
-	}
+	reporter := a.newUsageReporter(ctx, auth, req.Model)
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
 			resp = coreexecutor.Response{}
 			attribution = nil
+			if a.homeAuthProvider != "" {
+				err = a.homeExecutorUnavailableError()
+				return
+			}
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
 			if reporter != nil {
 				reporter.PublishFailure(ctx, err)
 			}
+			return
+		}
+		if errLifecycle := a.homeExecutorLifecycleError(err); errLifecycle != nil {
+			err = errLifecycle
 			return
 		}
 		if err != nil && reporter != nil {
@@ -1029,7 +1191,7 @@ func (a *executorAdapter) executeWithAttribution(ctx context.Context, auth *core
 		}
 	}()
 
-	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return coreexecutor.Response{}, nil, errPrepare
 	}
@@ -1039,9 +1201,20 @@ func (a *executorAdapter) executeWithAttribution(ctx context.Context, auth *core
 		reporter.StartResponseTTFT()
 	}
 
-	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
+	pluginReq := buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts)
+	if auth == nil {
+		if errLocal := a.validateHomeLocalExecutorRequest(ctx, pluginReq); errLocal != nil {
+			return coreexecutor.Response{}, nil, errLocal
+		}
+	}
+	if a.homeAuthProvider != "" {
+		if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+			return coreexecutor.Response{}, nil, errAvailable
+		}
+	}
+	pluginResp, errExecute := a.executor.Execute(ctx, pluginReq)
 	if errExecute != nil {
-		return coreexecutor.Response{}, nil, errExecute
+		return coreexecutor.Response{}, nil, a.homeLocalExecutorError(ctx, errExecute)
 	}
 
 	if reporter != nil {
@@ -1065,28 +1238,32 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 }
 
 func (a *executorAdapter) executeStreamWithAttribution(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (result *coreexecutor.StreamResult, attribution *pluginapi.UsageAttribution, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
-		return nil, nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+	if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+		if _, local := homeplugins.ExecutorGrant(ctx); local {
+			errAvailable = a.homeExecutorUnavailableError()
+		}
+		return nil, nil, errAvailable
 	}
 
-	var reporter *helps.UsageReporter
-	if auth != nil {
-		modelName := strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName)
-		if modelName == "" {
-			modelName = req.Model
-		}
-		reporter = helps.NewExecutorUsageReporter(ctx, a, modelName, auth)
-	}
+	reporter := a.newUsageReporter(ctx, auth, req.Model)
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
 			result = nil
 			attribution = nil
+			if a.homeAuthProvider != "" {
+				err = a.homeExecutorUnavailableError()
+				return
+			}
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
 			if reporter != nil {
 				reporter.PublishFailure(ctx, err)
 			}
+			return
+		}
+		if errLifecycle := a.homeExecutorLifecycleError(err); errLifecycle != nil {
+			err = errLifecycle
 			return
 		}
 		if err != nil && reporter != nil {
@@ -1094,7 +1271,7 @@ func (a *executorAdapter) executeStreamWithAttribution(ctx context.Context, auth
 		}
 	}()
 
-	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return nil, nil, errPrepare
 	}
@@ -1104,9 +1281,20 @@ func (a *executorAdapter) executeStreamWithAttribution(ctx context.Context, auth
 		reporter.StartResponseTTFT()
 	}
 
-	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
+	pluginReq := buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts)
+	if auth == nil {
+		if errLocal := a.validateHomeLocalExecutorRequest(ctx, pluginReq); errLocal != nil {
+			return nil, nil, errLocal
+		}
+	}
+	if a.homeAuthProvider != "" {
+		if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+			return nil, nil, errAvailable
+		}
+	}
+	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, pluginReq)
 	if errExecuteStream != nil {
-		return nil, nil, errExecuteStream
+		return nil, nil, a.homeLocalExecutorError(ctx, errExecuteStream)
 	}
 
 	if reporter != nil {
@@ -1132,7 +1320,7 @@ func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context,
 		return out
 	}
 	if reporter == nil {
-		return mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, in))
+		return a.mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, in))
 	}
 
 	observedIn := make(chan pluginapi.ExecutorStreamChunk)
@@ -1223,7 +1411,7 @@ func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context,
 	}()
 
 	translatedOut := a.translateExecutorStreamChunks(ctx, prepared, observedIn)
-	return mapExecutorStreamChunks(ctx, translatedOut)
+	return a.mapExecutorStreamChunks(ctx, translatedOut)
 }
 
 func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {
@@ -1318,24 +1506,52 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 }
 
 func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
-		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+	if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+		if _, local := homeplugins.ExecutorGrant(ctx); local {
+			errAvailable = a.homeExecutorUnavailableError()
+		}
+		return coreexecutor.Response{}, errAvailable
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.CountTokens", recovered)
 			resp = coreexecutor.Response{}
+			if a.homeAuthProvider != "" {
+				err = a.homeExecutorUnavailableError()
+				return
+			}
 			err = fmt.Errorf("plugin executor %s count tokens panic: %v", a.Identifier(), recovered)
 		}
 	}()
 
-	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
-	pluginResp, errCountTokens := a.executor.CountTokens(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
+	pluginReq := buildExecutorRequest(a.host, a.Identifier(), auth, prepared.req, prepared.opts)
+	if auth == nil {
+		if errLocal := a.validateHomeLocalExecutorRequest(ctx, pluginReq); errLocal != nil {
+			return coreexecutor.Response{}, errLocal
+		}
+	}
+	if a.homeAuthProvider != "" {
+		if errAvailable := a.executionAvailabilityError(auth); errAvailable != nil {
+			return coreexecutor.Response{}, errAvailable
+		}
+	}
+	pluginResp, errCountTokens := a.executor.CountTokens(ctx, pluginReq)
 	if errCountTokens != nil {
-		return coreexecutor.Response{}, errCountTokens
+		if errLifecycle := a.homeExecutorLifecycleError(errCountTokens); errLifecycle != nil {
+			return coreexecutor.Response{}, errLifecycle
+		}
+		if a.homeAuthProvider != "" {
+			switch clienterror.HTTPStatusFromError(errCountTokens) {
+			case http.StatusUnauthorized, http.StatusTooManyRequests:
+				usageCtx := usage.WithGenerate(ctx, false)
+				a.newUsageReporter(usageCtx, auth, req.Model).PublishFailure(usageCtx, errCountTokens)
+			}
+		}
+		return coreexecutor.Response{}, a.homeLocalExecutorError(ctx, errCountTokens)
 	}
 	var payload []byte
 	translatedTokenCount := false
@@ -1489,7 +1705,7 @@ func mergeExecutorMetadata(reqMetadata, optsMetadata map[string]any) map[string]
 	return merged
 }
 
-func mapExecutorStreamChunks(ctx context.Context, in <-chan pluginapi.ExecutorStreamChunk) <-chan coreexecutor.StreamChunk {
+func (a *executorAdapter) mapExecutorStreamChunks(ctx context.Context, in <-chan pluginapi.ExecutorStreamChunk) <-chan coreexecutor.StreamChunk {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1511,7 +1727,7 @@ func mapExecutorStreamChunks(ctx context.Context, in <-chan pluginapi.ExecutorSt
 				}
 				mapped = coreexecutor.StreamChunk{
 					Payload: bytes.Clone(chunk.Payload),
-					Err:     chunk.Err,
+					Err:     a.homeLocalExecutorError(ctx, chunk.Err),
 				}
 			}
 			select {

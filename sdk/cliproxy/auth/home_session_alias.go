@@ -245,7 +245,7 @@ func isHierarchyParent(primary, fallback string) bool {
 	idx1 := strings.Index(primary, ":")
 	idx2 := strings.Index(fallback, ":")
 	if idx1 > 0 && idx2 > 0 && primary[:idx1] == fallback[:idx2] {
-		return true
+		return primary[:idx1] != "msg"
 	}
 	if idx1 == -1 && idx2 == -1 {
 		return true
@@ -297,6 +297,11 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 							if opts.Metadata != nil {
 								opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = match.SessionID
 								opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = match.SessionID
+								if match.AccessNumber > 0 {
+									opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey] = match.AccessNumber
+								} else {
+									delete(opts.Metadata, cliproxyexecutor.LCPAccessGenerationMetadataKey)
+								}
 								if match.IsFork {
 									opts.Metadata[cliproxyexecutor.IsForkMetadataKey] = true
 									delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
@@ -305,15 +310,43 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 									opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
 									delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 									opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
+								} else {
+									delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
+									delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
+									delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
 								}
 							}
 						} else {
 							bindRes := affinity.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, "home-pending")
 							if bindRes.SessionID != "" {
 								primary = bindRes.SessionID
+								if bindRes.ParentSessionID != "" {
+									fallback = bindRes.ParentSessionID
+									if opts.Metadata != nil {
+										opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = bindRes.ParentSessionID
+									}
+								}
 								if opts.Metadata != nil {
 									opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 									opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
+									if bindRes.AccessNumber > 0 {
+										opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey] = bindRes.AccessNumber
+									} else {
+										delete(opts.Metadata, cliproxyexecutor.LCPAccessGenerationMetadataKey)
+									}
+									if bindRes.IsFork {
+										opts.Metadata[cliproxyexecutor.IsForkMetadataKey] = true
+										delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
+										opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "fork"
+									} else if bindRes.IsCompaction {
+										opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
+										delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
+										opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
+									} else {
+										delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
+										delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
+										delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
+									}
 								}
 							}
 						}

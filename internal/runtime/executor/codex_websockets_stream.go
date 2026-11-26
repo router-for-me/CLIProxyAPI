@@ -20,7 +20,11 @@ import (
 )
 
 func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", auth.ID, req.Model)
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", authID, req.Model)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -107,10 +111,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	multiAgentV2Conflict := prepared.multiAgentV2Conflict
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 
-	var authID, authLabel, authType, authValue string
-	authID = auth.ID
-	authLabel = auth.Label
-	authType, authValue = auth.AccountInfo()
+	var authLabel, authType, authValue string
+	if auth != nil {
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
 
 	wsReqBody := frameCodexWebsocketRequestBody(clientBody)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -941,6 +946,10 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
 	doc := ojson.NewDoc(body)
+	if shouldPreserveFullCodexOpenAIInclude(ctx, auth, baseURL, opts.Headers) {
+		originalTranslated = helps.PreserveCodexOpenAIResponsesInclude(originalTranslated, originalPayload, from)
+		helps.PreserveCodexOpenAIResponsesIncludeDoc(doc, req.Payload, from)
+	}
 	normalizeCodexOutputBudgetDoc(doc)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 

@@ -1338,3 +1338,91 @@ func TestHomeExecutionAttachesRequestScopedErrorConfigToContext(t *testing.T) {
 		t.Fatalf("executor context did not match request-scoped rule: matched=%v action=%q", observedMatched, observedAction)
 	}
 }
+
+func TestRequestScopedErrors_VertexResolvedFromManagerConfig(t *testing.T) {
+	vertexRules := []internalconfig.RequestScopedErrorRule{
+		{
+			Status: http.StatusBadRequest,
+			Match:  []string{"vertex_api_key_rule"},
+			Action: RequestScopedActionStop,
+		},
+	}
+	compatRules := []internalconfig.RequestScopedErrorRule{
+		{
+			Status: http.StatusBadRequest,
+			Match:  []string{"compat_rule_must_not_leak"},
+			Action: RequestScopedActionContinueAndCooldown,
+		},
+	}
+	oauthRules := []internalconfig.RequestScopedErrorRule{
+		{
+			Status: http.StatusBadRequest,
+			Match:  []string{"vertex_oauth_rule"},
+			Action: RequestScopedActionContinue,
+		},
+	}
+
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name:                "my-compat",
+				BaseURL:             "https://compat.api",
+				RequestScopedErrors: compatRules,
+			},
+		},
+		VertexCompatAPIKey: []internalconfig.VertexCompatKey{
+			{
+				APIKey:              "vk-test-0",
+				BaseURL:             "https://vertex.example.com",
+				RequestScopedErrors: vertexRules,
+			},
+			{
+				APIKey:  "vk-test-1-no-rules",
+				BaseURL: "https://vertex.example.com",
+			},
+		},
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			"vertex": oauthRules,
+		},
+	}
+
+	vertexAPIKeyAuth := &Auth{
+		ID:       "vertex-apikey-0",
+		Provider: "vertex",
+		Label:    "vertex-apikey",
+		Attributes: map[string]string{
+			AttributeSource:      "config:vertex-apikey[0]",
+			"provider_key":       "vertex",
+			AttributeConfigIndex: "0",
+		},
+	}
+	resolved := extractRequestScopedErrorRules(vertexAPIKeyAuth, cfg)
+	if len(resolved) != 1 || len(resolved[0].Match) != 1 || resolved[0].Match[0] != "vertex_api_key_rule" || resolved[0].Action != RequestScopedActionStop {
+		t.Fatalf("vertex API key resolved rules = %#v, want %#v", resolved, vertexRules)
+	}
+
+	// A Vertex API-key entry without rules must not inherit OpenAICompatibility[0] rules
+	// even though synthesizeVertexCompat sets provider_key="vertex" and config_index.
+	vertexNoRulesCfg := &internalconfig.Config{
+		OpenAICompatibility: cfg.OpenAICompatibility,
+		VertexCompatAPIKey: []internalconfig.VertexCompatKey{
+			{APIKey: "vk-no-rules", BaseURL: "https://vertex.example.com"},
+		},
+	}
+	if leaked := extractRequestScopedErrorRules(vertexAPIKeyAuth, vertexNoRulesCfg); len(leaked) != 0 {
+		t.Fatalf("vertex API key without rules unexpectedly inherited %#v", leaked)
+	}
+
+	// Vertex OAuth auth must continue resolving oauth-request-scoped-errors["vertex"].
+	vertexOAuthAuth := &Auth{
+		ID:       "vertex-oauth-0",
+		Provider: "vertex",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+	}
+	resolvedOAuth := extractRequestScopedErrorRules(vertexOAuthAuth, cfg)
+	if len(resolvedOAuth) != 1 || len(resolvedOAuth[0].Match) != 1 || resolvedOAuth[0].Match[0] != "vertex_oauth_rule" {
+		t.Fatalf("vertex OAuth resolved rules = %#v, want %#v", resolvedOAuth, oauthRules)
+	}
+}

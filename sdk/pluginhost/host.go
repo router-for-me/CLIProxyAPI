@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"fmt"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internalpluginhost "github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -151,6 +152,14 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 	}
 }
 
+// StaticExecutorModels reads a plugin's static catalog without registering request routes.
+func (h *Host) StaticExecutorModels(ctx context.Context, id, version string) ([]ModelInfo, error) {
+	if h == nil || h.inner == nil {
+		return nil, fmt.Errorf("plugin host is unavailable")
+	}
+	return h.inner.StaticExecutorModels(ctx, id, version)
+}
+
 // ModelsForProvider returns static models registered for a provider by plugins.
 func (h *Host) ModelsForProvider(provider string) []ModelInfo {
 	if h == nil || h.inner == nil {
@@ -222,10 +231,16 @@ func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
 
-// SchedulerWantsAcrossPriorities reports whether the active scheduler opted into receiving
+// SchedulerWantsAcrossPriorities reports whether any active scheduler opted into receiving
 // candidates across all priority tiers.
 func (h *Host) SchedulerWantsAcrossPriorities() bool {
 	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
+}
+
+// SchedulerWantsAllPriorityCandidates reports whether PickAuth needs candidates across all
+// priority tiers, including when multiple active schedulers may chain across excluded tiers.
+func (h *Host) SchedulerWantsAllPriorityCandidates() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsAllPriorityCandidates()
 }
 
 // HasSchedulerContinuity reports whether the active scheduler supports bounded continuity evaluation.

@@ -185,10 +185,6 @@ PackyCode provides special discounts for our software users: register using <a h
 <td>Swiftproxy provides 90M+ clean residential IPs across 220+ locations, supporting HTTP(S)/SOCKS5, IP rotation, Sticky Sessions, and precise location targeting. It helps AI API tools and automation workflows access online services reliably from different locations, making it ideal for API requests, web access, data collection, and location-based testing. Residential proxies from &#36;0.7/GB. Free testing is available, with 10% off using code PROXY90. <a href="https://www.swiftproxy.net/?code=PR67S9A95">Try Swiftproxy Now</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
-<td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> is a high-performance proxy provider built for automation and multi-account operations, offering clean residential proxies and native static ISP IPs. With 90M+ residential IPs worldwide, smart rotation, stable sessions, and high-concurrency support, RapidProxy is ideal for web scraping, browser automation, social media account management, e-commerce operations, bulk account registration, and more. Residential proxies start at just &#36;0.55/GB, with traffic that never expires. Use code RAPID10 for 10% off, and <a href="https://www.rapidproxy.io/?code=KHM9B6E6M">start your free trial today.</a></td>
-</tr>
-<tr>
 <td width="180"><a href="https://pateway.ai/?ch=jjvdb"><img src="./assets/patewayai.png" alt="PatewayAI" width="150"></a></td>
 <td>PatewayAI is an API relay service provider for experienced AI developers, with full support for the Claude and Codex model families. All models come from high-quality official channels, with no dilution or counterfeiting, and transparent, verifiable billing details. Economy mode starts at just 5% of the official price. Register through <a href="https://pateway.ai/?ch=jjvdb">this link</a> to receive trial credits and participate in occasional promotions for free credits. The platform also supports enterprise-grade concurrency, a dedicated management dashboard, formal contracts and invoices, and two-way referral rewards of up to &#36;150.</td>
 </tr>
@@ -197,19 +193,15 @@ PackyCode provides special discounts for our software users: register using <a h
 <td>kedaya.ai is a stable and efficient AI model API relay service provider, covering leading models including Claude, GPT, Gemini, Grok, Antigravity, and DeepSeek. It supports native OpenAI (including Responses), Anthropic, and Gemini protocols, enabling seamless integration with clients such as CLIProxyAPI, Claude Code, Codex, Gemini CLI, and Grok CLI. OpenAI and Grok model prices can be as low as 0.1% of official rates! <a href="https://kedaya.ai/register?aff=824X8RAHCYXM">Exclusive registration link</a>.</td>
 </tr>
 <tr>
-<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>
-    🥚 <b>[Freebie Alert!] Register & submit a ticket with code to grab $5 free credit + 15% OFF first top-up!</b><br>
-    🚀 <b>More than just API routing — an all-in-one Web workspace:</b> Enjoy Web chat, AI image generation, video creation, and automated workflows right out of the box without any frontend setup.<br>
-    ⚡ <b>All mainstream models supported:</b> High-speed routing for Claude, GPT, Gemini, DeepSeek, and more.<br>
-    🛡️ <b>Reliable guarantees:</b> Hassle-free refunds | Official invoicing | B2B & individual billing | High-availability customer support ready to help!<br><br>
-    👉 Xcode VIP Portal: <a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a><br>
-    💬 Ticket Code: <code>CLIProxyAPI</code> (Submit a ticket to claim your credits instantly)
+  <td width="180"><a href="https://apipdx.com"><img src="./assets/paidaxing.gif" alt="Paidaxing" width="150"></a></td>
+  <td>
+    🎁 <b>[5 free credits on sign-up!]</b> Promo code <code>CLIPROXYAPI</code> — enter it and it lands instantly, no ticket required!<br>
+    🚀 <b>One-stop AI gateway:</b> Claude, GPT, Gemini, DeepSeek, KIMI, GLM and other mainstream models all in one place — one key gets you the whole lineup.<br>
+    💰 <b>Cheap:</b> GPT as low as <b>0.06折</b> (0.6% of list price), DeepSeek / KIMI / GLM as low as <b>4折</b> (40% of list price) — the more you run, the more you save; heavy daily calls won't hurt a bit.<br>
+    🛡️ <b>Stable:</b> High-availability lines stay online around the clock, compatible with Claude Code, Codex and other common clients — it won't drop when it matters.<br><br>
+    👉 Paidaxing VIP portal: <a href="https://apipdx.com">https://apipdx.com</a><br>
+    💬 Promo code: <code>CLIPROXYAPI</code> (enter it at sign-up and 5 credits are added directly)
   </td>
-</tr>
-<tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
-<td>Thanks to <a href="https://x.com/chenju_ai">陈局 (Chenju)</a> for sponsoring this project! Probably the only slot here that won't ask you to sign up — no signup link, no promo code. Just raising a glass to the maintainers, because good open source deserves to be paid for. Come shoot the breeze on X: <a href="https://x.com/chenju_ai">@chenju_ai</a></td>
 </tr>
 <tr>
 <td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
@@ -222,6 +214,26 @@ PackyCode provides special discounts for our software users: register using <a h
 <tr>
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a> | China’s OpenRouter — one API for leading Chinese and global AI models.</strong> Access <strong>DeepSeek, Qwen, Kimi, GLM, GPT, Claude, Gemini, and Grok</strong>, with intelligent routing across suppliers and automatic failover. <strong>Failed requests are free, pricing is public, and every charge can be verified.</strong> Works with coding tools such as Claude Code and Codex, with <strong><a href="https://visioncoder.cn/me/keys">one-click import into CC Switch and WorkBuddy</a></strong>. Teams can purchase centrally, assign subscription packages by seat, and reclaim them for reassignment, with business bank transfers and invoicing supported. <strong>Supplier applications are open: list your model endpoints and earn traffic based on quality. Monthly settlement to business bank accounts, itemized usage records, and customer billing and invoicing handled by VisionCoder.</strong> Join the <a href="https://visioncoder.cn/challenge">VibeCoding Challenge</a> for <strong>CNY 2,350 in top-up credits per round</strong>, including <strong>CNY 1,000 in top-up credits for first place</strong>.</td>
+</tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>One key to call on AI from around the world!<br>10dian-API brings leading AI models and protocols together in one API that works with popular clients. Independent developers, AI enthusiasts, and teams get the same access, including stable connections for high volumes of concurrent requests. Prices are low, billing multipliers are public, and you get the model you choose without substitutions. The service accepts multiple top-up methods and can also pay for popular AI subscriptions on your behalf.<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">Sign up</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 All-in-One AI Models — Register &amp; Get 1,000,000 Free Tokens!</strong>
+<p>🎁 Free Trial Offer: <a href="https://subrouter.ai/register?aff=nP93">Sign up now</a> to immediately receive 1,000,000 FREE tokens for testing!</p>
+<ul>
+<li>All Top Models in One Place: Switch freely between Claude, GPT, Gemini, Grok, and DeepSeek with a single API key.</li>
+<li>Smart Routing &amp; Auto-Failover: Intelligent load balancing automatically switches failed nodes to keep your requests running smoothly.</li>
+<li>100% Transparent Billing: Every single API call displays the exact routing path and real-time cost.</li>
+<li>Balance Never Expires: True pay-as-you-go pricing—your credits stay valid forever with no monthly expiration.</li>
+<li>Flexible Top-Ups: Supports USDT, Visa, WeChat Pay, and Alipay.</li>
+</ul>
+👉 Claim Your 1M Free Tokens: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>

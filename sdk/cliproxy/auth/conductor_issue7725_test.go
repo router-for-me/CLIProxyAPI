@@ -10,7 +10,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-func TestApplyRequestAfterAuthInterceptorClonesMetadataBeforeSessionMutation_Issue7725(t *testing.T) {
+func TestPrepareRequestAfterAuthClonesMetadataBeforeSessionMutation_Issue7725(t *testing.T) {
 	t.Run("body update with empty path does not mutate caller metadata", func(t *testing.T) {
 		origMeta := map[string]any{
 			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:orig-session",
@@ -32,9 +32,9 @@ func TestApplyRequestAfterAuthInterceptorClonesMetadataBeforeSessionMutation_Iss
 			},
 		}
 
-		_, finalOpts, errIntercept := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+		_, finalOpts, errIntercept := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 		if errIntercept != nil {
-			t.Fatalf("applyRequestAfterAuthInterceptor error = %v", errIntercept)
+			t.Fatalf("prepareRequestAfterAuth error = %v", errIntercept)
 		}
 		if got := finalOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got != "session:rewritten-session" {
 			t.Fatalf("final canonical session = %v, want session:rewritten-session", got)
@@ -72,9 +72,9 @@ func TestApplyRequestAfterAuthInterceptorClonesMetadataBeforeSessionMutation_Iss
 			},
 		}
 
-		_, finalOpts, errIntercept := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+		_, finalOpts, errIntercept := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 		if errIntercept != nil {
-			t.Fatalf("applyRequestAfterAuthInterceptor error = %v", errIntercept)
+			t.Fatalf("prepareRequestAfterAuth error = %v", errIntercept)
 		}
 		if _, ok := finalOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; ok {
 			t.Fatalf("final metadata should have cleared CanonicalSessionID, got %#v", finalOpts.Metadata)
@@ -111,9 +111,9 @@ func TestApplyRequestAfterAuthInterceptorClonesMetadataBeforeSessionMutation_Iss
 			},
 		}
 
-		_, finalOpts, errIntercept := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+		_, finalOpts, errIntercept := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 		if errIntercept != nil {
-			t.Fatalf("applyRequestAfterAuthInterceptor error = %v", errIntercept)
+			t.Fatalf("prepareRequestAfterAuth error = %v", errIntercept)
 		}
 		if got := finalOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got != "header:header-session" {
 			t.Fatalf("final canonical session = %v, want header:header-session", got)

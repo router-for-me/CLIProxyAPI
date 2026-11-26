@@ -7,6 +7,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
@@ -187,8 +188,8 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningBeforeVisibleContentAndTo
 
 	result, _ := ConvertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), true)
 	contents := ojson.GetBytesNoCopy(result, "contents").Array()
-	if len(contents) != 4 {
-		t.Fatalf("contents length = %d, want 4. Output: %s", len(contents), result)
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3 merged turns. Output: %s", len(contents), result)
 	}
 	parts := contents[1].Get("parts").Array()
 	if len(parts) != 3 {
@@ -209,7 +210,10 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningBeforeVisibleContentAndTo
 	if got := parts[2].Get("thoughtSignature").String(); got != geminiFunctionThoughtSignature {
 		t.Fatalf("functionCall thoughtSignature = %q, want bypass sentinel. Output: %s", got, result)
 	}
-	if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read_file" {
+	if got := contents[2].Get("parts.0.text").String(); got != "say ok" {
+		t.Fatalf("follow-up user text = %q, want say ok. Output: %s", got, result)
+	}
+	if got := contents[2].Get("parts.1.functionResponse.name").String(); got != "read_file" {
 		t.Fatalf("functionResponse.name = %q, want read_file. Output: %s", got, result)
 	}
 }
@@ -603,11 +607,14 @@ func TestConvertOpenAIRequestToGemini_MultiTurnRepeatedToolCallID_Issue5933(t *t
 
 	out, _ := ConvertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), false)
 
-	// In Turn 1 (contents[1] = model functionCall, contents[2] = user functionResponse):
-	// functionCall.name must be "glob", and functionResponse.name must be "glob".
+	// Turn 1 places the subsequent user prompt before the function response.
 	call1Name := ojson.GetBytesNoCopy(out, "contents.1.parts.0.functionCall.name").String()
-	resp1Name := ojson.GetBytesNoCopy(out, "contents.2.parts.0.functionResponse.name").String()
-	resp1Result := ojson.GetBytesNoCopy(out, "contents.2.parts.0.functionResponse.response.result").String()
+	resp1Prompt := ojson.GetBytesNoCopy(out, "contents.2.parts.0.text").String()
+	resp1Name := ojson.GetBytesNoCopy(out, "contents.2.parts.1.functionResponse.name").String()
+	resp1Result := ojson.GetBytesNoCopy(out, "contents.2.parts.1.functionResponse.response.result").String()
+	if resp1Prompt != "read main.go" {
+		t.Fatalf("turn 1 follow-up text = %q, want %q", resp1Prompt, "read main.go")
+	}
 
 	if call1Name != "glob" {
 		t.Fatalf("turn 1 functionCall.name = %q, want glob", call1Name)
@@ -619,11 +626,10 @@ func TestConvertOpenAIRequestToGemini_MultiTurnRepeatedToolCallID_Issue5933(t *t
 		t.Fatalf("turn 1 functionResponse result = %q, want %q", resp1Result, `"[\"main.go\"]"`)
 	}
 
-	// In Turn 2 (contents[4] = model functionCall, contents[5] = user functionResponse):
-	// functionCall.name must be "read", and functionResponse.name must be "read".
-	call2Name := ojson.GetBytesNoCopy(out, "contents.4.parts.0.functionCall.name").String()
-	resp2Name := ojson.GetBytesNoCopy(out, "contents.5.parts.0.functionResponse.name").String()
-	resp2Result := ojson.GetBytesNoCopy(out, "contents.5.parts.0.functionResponse.response.result").String()
+	// Turn 2 shifts earlier because the first tool response and follow-up prompt share a turn.
+	call2Name := ojson.GetBytesNoCopy(out, "contents.3.parts.0.functionCall.name").String()
+	resp2Name := ojson.GetBytesNoCopy(out, "contents.4.parts.0.functionResponse.name").String()
+	resp2Result := ojson.GetBytesNoCopy(out, "contents.4.parts.0.functionResponse.response.result").String()
 
 	if call2Name != "read" {
 		t.Fatalf("turn 2 functionCall.name = %q, want read", call2Name)
@@ -1256,4 +1262,467 @@ func TestConvertOpenAIRequestToGemini_MixedBuiltinToolsAndFunctions(t *testing.T
 	if ojson.GetBytesNoCopy(out, "toolConfig.includeServerSideToolInvocations").Exists() {
 		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", out)
 	}
+}
+
+func TestConvertOpenAIRequestToGeminiExtraBodyGoogleThinkingConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		body             string
+		wantLevel        string
+		wantBudgetExists bool
+		wantBudget       int64
+	}{
+		{
+			name: "extra_body thinking_level",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinking_config":{"include_thoughts":true,"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "xhigh",
+		},
+		{
+			name: "extra_body thinking_budget",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"extra_body":{"google":{"thinkingConfig":{"thinkingBudget":4096}}}
+			}`,
+			wantBudgetExists: true,
+			wantBudget:       4096,
+		},
+		{
+			name: "reasoning_effort overrides extra_body",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"low",
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+		{
+			name: "generationConfig overrides extra_body",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}},
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+		{
+			name: "generation_config overrides extra_body consistently with metadata",
+			body: `{
+				"model":"gemini-4-neon",
+				"messages":[{"role":"user","content":"hi"}],
+				"generation_config":{"thinking_config":{"thinking_level":"low"}},
+				"extra_body":{"google":{"thinking_config":{"thinking_level":"xhigh"}}}
+			}`,
+			wantLevel: "low",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToGemini("gemini-4-neon", []byte(tc.body), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini() error = %v", errConvert)
+			}
+			level := ojson.GetBytesNoCopy(out, "generationConfig.thinkingConfig.thinkingLevel")
+			if tc.wantLevel != "" {
+				if got := level.String(); got != tc.wantLevel {
+					t.Fatalf("thinkingLevel = %q, want %q; output=%s", got, tc.wantLevel, out)
+				}
+				if gotMeta := thinking.ExtractReasoningEffort([]byte(tc.body), "openai", "gemini-4-neon"); gotMeta != tc.wantLevel {
+					t.Fatalf("ExtractReasoningEffort() = %q, want %q", gotMeta, tc.wantLevel)
+				}
+			} else if level.Exists() {
+				t.Fatalf("unexpected thinkingLevel %q; output=%s", level.String(), out)
+			}
+			budget := ojson.GetBytesNoCopy(out, "generationConfig.thinkingConfig.thinkingBudget")
+			if budget.Exists() != tc.wantBudgetExists {
+				t.Fatalf("thinkingBudget exists = %v, want %v; output=%s", budget.Exists(), tc.wantBudgetExists, out)
+			}
+			if tc.wantBudgetExists && budget.Int() != tc.wantBudget {
+				t.Fatalf("thinkingBudget = %d, want %d; output=%s", budget.Int(), tc.wantBudget, out)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_AdjacentUserTurns(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{"role": "user", "content": "run tool"},
+			{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test_tool", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "tool output"},
+			{"role": "user", "content": "now explain it"}
+		]
+	}`
+
+	result, errConvert := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(result, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3 merged turns. Output: %s", len(contents), result)
+	}
+	wantRoles := []string{"user", "model", "user"}
+	for i, wantRole := range wantRoles {
+		if gotRole := contents[i].Get("role").String(); gotRole != wantRole {
+			t.Fatalf("contents[%d].role = %q, want %q. Output: %s", i, gotRole, wantRole, result)
+		}
+	}
+	parts := contents[2].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("contents[2].parts length = %d, want 2. Output: %s", len(parts), result)
+	}
+	if gotText := parts[0].Get("text").String(); gotText != "now explain it" {
+		t.Fatalf("merged prompt text = %q, want now explain it. Output: %s", gotText, result)
+	}
+	if gotName := parts[1].Get("functionResponse.name").String(); gotName != "test_tool" {
+		t.Fatalf("merged functionResponse.name = %q, want test_tool. Output: %s", gotName, result)
+	}
+	if gotResponse := parts[1].Get("functionResponse.response.result").String(); gotResponse != `"tool output"` {
+		t.Fatalf("merged tool result = %q, want %q. Output: %s", gotResponse, `"tool output"`, result)
+	}
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(result); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, result)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_PreservesMergedUserPartOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role":"user","content":"inspect"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"},
+			{"role":"user","content":[
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2UtMQ=="}},
+				{"type":"text","text":"first"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2UtMg=="}},
+				{"type":"text","text":"second"}
+			]}
+		]
+	}`
+
+	result, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+	}
+	parts := ojson.GetBytesNoCopy(result, "contents.2.parts").Array()
+	if len(parts) != 5 {
+		t.Fatalf("merged parts length = %d, want 5. Output: %s", len(parts), result)
+	}
+	want := []string{
+		"image-1",
+		"first",
+		"image-2",
+		"second",
+		`"ok"`,
+	}
+	for i, part := range parts {
+		got := part.Get("functionResponse.response.result").String()
+		if got == "" {
+			got = part.Get("inlineData.data").String()
+			if decoded := map[string]string{"aW1hZ2UtMQ==": "image-1", "aW1hZ2UtMg==": "image-2"}[got]; decoded != "" {
+				got = decoded
+			}
+		}
+		if got == "" {
+			got = part.Get("text").String()
+		}
+		if got != want[i] {
+			t.Fatalf("merged parts[%d] = %q, want %q. Output: %s", i, got, want[i], result)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_PreservesDemotedInstructionBoundary(t *testing.T) {
+	inputJSON := `{
+		"model":"gemini-3-flash",
+		"messages":[
+			{"role":"user","content":"run tool"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"tool output"},
+			{"role":"developer","content":"temporary reminder"},
+			{"role":"user","content":"now explain it"}
+		]
+	}`
+
+	result, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(result, "contents").Array()
+	if len(contents) != 5 {
+		t.Fatalf("contents length = %d, want 5 preserving demoted instruction and user boundaries. Output: %s", len(contents), result)
+	}
+	if got := contents[3].Get("parts.0.text").String(); got != "<system-reminder>\ntemporary reminder\n</system-reminder>" {
+		t.Fatalf("demoted instruction = %q, want standalone reminder. Output: %s", got, result)
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_ValidatesToolCallArguments(t *testing.T) {
+	tests := []struct {
+		name         string
+		arguments    string
+		wantRawArgs  string
+		wantParams   string
+		expectParams bool
+	}{
+		{
+			name:        "valid json object",
+			arguments:   `{"path":"a.txt"}`,
+			wantRawArgs: `{"path":"a.txt"}`,
+		},
+		{
+			name:        "valid json object with whitespace",
+			arguments:   `  {"path":"a.txt"}  `,
+			wantRawArgs: `{"path":"a.txt"}`,
+		},
+		{
+			name:        "empty string defaults to empty object",
+			arguments:   "",
+			wantRawArgs: "{}",
+		},
+		{
+			name:        "whitespace defaults to empty object",
+			arguments:   "   ",
+			wantRawArgs: "{}",
+		},
+		{
+			name:         "truncated object wrapped under params",
+			arguments:    `{"path":"a.txt"`,
+			wantParams:   `{"path":"a.txt"`,
+			expectParams: true,
+		},
+		{
+			name:         "truncated array wrapped under params",
+			arguments:    `[1, 2`,
+			wantParams:   `[1, 2`,
+			expectParams: true,
+		},
+		{
+			name:         "valid json array wrapped under params",
+			arguments:    `[1,2]`,
+			wantParams:   `[1,2]`,
+			expectParams: true,
+		},
+		{
+			name:         "valid json scalar wrapped under params",
+			arguments:    "123",
+			wantParams:   "123",
+			expectParams: true,
+		},
+		{
+			name:         "plain non-json text wrapped under params",
+			arguments:    "not json",
+			wantParams:   "not json",
+			expectParams: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqDoc := ojson.NewDocString(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"},{"role":"user","content":"done"}]}`)
+			if errSet := reqDoc.Set("messages.1.tool_calls.0.function.arguments", tt.arguments); errSet != nil {
+				t.Fatalf("set arguments error: %v", errSet)
+			}
+
+			result, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", reqDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+			}
+			if !ojson.ValidBytes(result) {
+				t.Fatalf("translated request is not valid JSON: %s", result)
+			}
+			args := ojson.GetBytesNoCopy(result, "contents.1.parts.0.functionCall.args")
+			if !args.IsObject() {
+				t.Fatalf("functionCall.args = %s, want JSON object. Output: %s", args.Raw, result)
+			}
+			if tt.expectParams {
+				if got := args.Get("params").String(); got != tt.wantParams {
+					t.Fatalf("functionCall.args.params = %q, want %q. Output: %s", got, tt.wantParams, result)
+				}
+				return
+			}
+			if args.Raw != tt.wantRawArgs {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRawArgs, result)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiMapsStopSequences(t *testing.T) {
+	tests := []struct {
+		name      string
+		stopJSON  string
+		wantStops []string
+	}{
+		{
+			name:      "single string",
+			stopJSON:  `"END"`,
+			wantStops: []string{"END"},
+		},
+		{
+			name:      "single newline string preserved",
+			stopJSON:  `"\n"`,
+			wantStops: []string{"\n"},
+		},
+		{
+			name:      "array preserves whitespace and filters invalid entries",
+			stopJSON:  `["STOP","\n\n"," ","",123,null]`,
+			wantStops: []string{"STOP", "\n\n", " "},
+		},
+		{
+			name:     "null omitted",
+			stopJSON: `null`,
+		},
+		{
+			name:     "empty string omitted",
+			stopJSON: `""`,
+		},
+		{
+			name:     "empty array omitted",
+			stopJSON: `[]`,
+		},
+		{
+			name:     "only invalid entries omitted",
+			stopJSON: `["",123,null]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{"model":"gemini-3-flash","messages":[{"role":"user","content":"hi"}],"stop":` + tt.stopJSON + `}`)
+			out, errConvert := ConvertOpenAIRequestToGemini("gemini-3-flash", inputJSON, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+			}
+			got := ojson.GetBytesNoCopy(out, "generationConfig.stopSequences")
+			if len(tt.wantStops) == 0 {
+				if got.Exists() {
+					t.Fatalf("expected stopSequences to be omitted, got %s", got.Raw)
+				}
+				return
+			}
+			arr := got.Array()
+			if len(arr) != len(tt.wantStops) {
+				t.Fatalf("stopSequences = %s, want %v. Output: %s", got.Raw, tt.wantStops, out)
+			}
+			for i, want := range tt.wantStops {
+				if arr[i].String() != want {
+					t.Fatalf("stopSequences[%d] = %q, want %q", i, arr[i].String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToGemini_FollowUpUserPrecedesFunctionResponse_Issue8520(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"max_tokens": 1500,
+		"messages": [
+			{"role": "user", "content": "What is the weather in Beijing and Shanghai?"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Shanghai\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "sunny, 20C"},
+			{"role": "tool", "tool_call_id": "call_2", "content": "cloudy, 22C"},
+			{"role": "user", "content": "Please answer in French."}
+		],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "get_weather",
+				"description": "Get weather",
+				"parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+			}
+		}]
+	}`
+
+	result, errConvert := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errConvert)
+	}
+
+	contents := ojson.GetBytesNoCopy(result, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3. Output: %s", len(contents), result)
+	}
+
+	parts := contents[2].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("contents[2].parts length = %d, want 3. Output: %s", len(parts), result)
+	}
+
+	// Follow-up user text must precede functionResponse parts so Vertex AI does not
+	// reject the turn with HTTP 400 "Requests ending with a model turn are not supported."
+	if gotText := parts[0].Get("text").String(); gotText != "Please answer in French." {
+		t.Fatalf("parts[0].text = %q, want %q. Output: %s", gotText, "Please answer in French.", result)
+	}
+	if gotName := parts[1].Get("functionResponse.name").String(); gotName != "get_weather" {
+		t.Fatalf("parts[1].functionResponse.name = %q, want get_weather. Output: %s", gotName, result)
+	}
+	if gotResult := parts[1].Get("functionResponse.response.result").String(); gotResult != `"sunny, 20C"` {
+		t.Fatalf("parts[1].functionResponse.response.result = %q, want %q. Output: %s", gotResult, `"sunny, 20C"`, result)
+	}
+	if gotName := parts[2].Get("functionResponse.name").String(); gotName != "get_weather" {
+		t.Fatalf("parts[2].functionResponse.name = %q, want get_weather. Output: %s", gotName, result)
+	}
+	if gotResult := parts[2].Get("functionResponse.response.result").String(); gotResult != `"cloudy, 22C"` {
+		t.Fatalf("parts[2].functionResponse.response.result = %q, want %q. Output: %s", gotResult, `"cloudy, 22C"`, result)
+	}
+
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(result); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, result)
+	}
+
+	t.Run("multiple consecutive follow-up user turns preserve relative order before functionResponse", func(t *testing.T) {
+		multiFollowUp := `{
+			"model": "gemini-3.8-flash",
+			"messages": [
+				{"role": "user", "content": "check weather"},
+				{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]},
+				{"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+				{"role": "user", "content": "First instruction."},
+				{"role": "user", "content": "Second instruction."}
+			]
+		}`
+		out, errMulti := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(multiFollowUp), false)
+		if errMulti != nil {
+			t.Fatalf("ConvertOpenAIRequestToGemini error: %v", errMulti)
+		}
+		multiContents := ojson.GetBytesNoCopy(out, "contents").Array()
+		if len(multiContents) != 3 {
+			t.Fatalf("contents length = %d, want 3. Output: %s", len(multiContents), out)
+		}
+		multiParts := multiContents[2].Get("parts").Array()
+		if len(multiParts) != 3 {
+			t.Fatalf("contents[2].parts length = %d, want 3. Output: %s", len(multiParts), out)
+		}
+		if got := multiParts[0].Get("text").String(); got != "First instruction." {
+			t.Fatalf("parts[0].text = %q, want %q. Output: %s", got, "First instruction.", out)
+		}
+		if got := multiParts[1].Get("text").String(); got != "Second instruction." {
+			t.Fatalf("parts[1].text = %q, want %q. Output: %s", got, "Second instruction.", out)
+		}
+		if got := multiParts[2].Get("functionResponse.name").String(); got != "get_weather" {
+			t.Fatalf("parts[2].functionResponse.name = %q, want get_weather. Output: %s", got, out)
+		}
+		if errMultiPairing := signature.ValidateGeminiFunctionCallPairing(out); errMultiPairing != nil {
+			t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errMultiPairing, out)
+		}
+	})
 }

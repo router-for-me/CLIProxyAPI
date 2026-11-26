@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -191,9 +192,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
+	endpointURL := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
-		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+		endpointURL = endpointURL + "?$alt=" + url.QueryEscape(opts.Alt)
 	}
 
 	_ = doc.Delete("session_id")
@@ -201,7 +202,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, to.String())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
 	}
@@ -217,7 +218,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       endpointURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      body,
@@ -355,11 +356,11 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
+	endpointURL := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
 	if opts.Alt == "" {
-		url = url + "?alt=sse"
+		endpointURL = endpointURL + "?alt=sse"
 	} else {
-		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+		endpointURL = endpointURL + "?$alt=" + url.QueryEscape(opts.Alt)
 	}
 
 	_ = doc.Delete("session_id")
@@ -367,7 +368,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, to.String())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +384,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       endpointURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      body,
@@ -529,19 +530,16 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			reporter.ObserveResponseModel(line)
 			rawPayload := helps.JSONPayload(line)
-			if len(rawPayload) > 0 && len(pendingFilterPayload) > 0 {
-				flushed := pendingFilterPayload
-				pendingFilterPayload = nil
-				pendingFilterMsg = ""
-				if !guardAndEmitPayload(flushed) {
-					return
-				}
+			if len(rawPayload) > 0 && len(pendingFilterPayload) > 0 && !ojson.ValidBytes(rawPayload) {
+				continue
 			}
-			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
-				sawFinishReason = true
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
+				pendingFilterPayload = bytes.Clone(rawPayload)
+				pendingFilterMsg = filterMsg
+				continue
 			}
-			streamUsage.ObserveGeminiStream(rawPayload)
 			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
+				streamUsage.ObserveGeminiStream(rawPayload)
 				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
 				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)
 				if !streamUsage.PublishFailure(ctx, reporter, blockErr) {
@@ -553,10 +551,20 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				return
 			}
-			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
-				pendingFilterPayload = bytes.Clone(rawPayload)
-				pendingFilterMsg = filterMsg
-				continue
+			if len(rawPayload) > 0 && len(pendingFilterPayload) > 0 {
+				flushed := pendingFilterPayload
+				pendingFilterPayload = nil
+				pendingFilterMsg = ""
+				if !sawFinishReason && geminiStreamHasFinishSignal(flushed) {
+					sawFinishReason = true
+				}
+				if !guardAndEmitPayload(flushed) {
+					return
+				}
+			}
+			streamUsage.ObserveGeminiStream(rawPayload)
+			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
+				sawFinishReason = true
 			}
 			if len(rawPayload) == 0 {
 				continue
@@ -577,7 +585,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			return
 		}
-		if len(pendingFilterPayload) > 0 {
+		if scanner.Err() == nil && len(pendingFilterPayload) > 0 {
 			if !guardAndEmitPayload(pendingFilterPayload) {
 				return
 			}
@@ -904,6 +912,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
+		scanner.Split(helps.ScanInteractionsSSELines)
 		originalRequest := opts.OriginalRequest
 		if len(originalRequest) == 0 {
 			originalRequest = req.Payload
@@ -963,11 +972,19 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 			return true
 		}
 		for scanner.Scan() {
-			line := scanner.Bytes()
+			rawLine := scanner.Bytes()
+			hasNewline := len(rawLine) > 0 && rawLine[len(rawLine)-1] == '\n'
+			line := rawLine
+			if hasNewline {
+				line = line[:len(line)-1]
+			}
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			trimmed := bytes.TrimSpace(line)
 			if len(trimmed) == 0 {
-				if !emitFrame() {
+				if hasNewline && !emitFrame() {
 					return
 				}
 				continue
@@ -977,14 +994,19 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 			}
 			frame = append(frame, line...)
 		}
-		if !emitFrame() {
-			return
+		errScan := scanner.Err()
+		if errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		}
+		if errScan == nil && ctx.Err() == nil {
+			if !emitFrame() {
+				return
+			}
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		if errScan != nil {
 			reporter.PublishFailure(ctx, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
@@ -1308,7 +1330,7 @@ func capGeminiMaxOutputTokensDoc(doc *ojson.Doc, modelName string) bool {
 	if limit <= 0 {
 		limit = modelInfo.MaxCompletionTokens
 	}
-	if limit <= 0 || maxOut.Int() <= int64(limit) {
+	if limit <= 0 || maxOut.Num <= float64(limit) {
 		return false
 	}
 	return doc.Set("generationConfig.maxOutputTokens", limit) == nil

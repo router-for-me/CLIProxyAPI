@@ -25,6 +25,13 @@ var (
 	dataTag = []byte("data:")
 )
 
+type messageStreamState struct {
+	itemID       string
+	outputIdx    int64
+	hasOutputIdx bool
+	hasTextDelta bool
+}
+
 type toolCallStreamState struct {
 	Index            int
 	ArgumentsEmitted bool
@@ -126,6 +133,9 @@ type ConvertCliToOpenAIParams struct {
 	citationKeys          map[string]struct{}
 	emittedTextRunes      int64
 	HasMessageTextDelta   bool
+	messageStatesByID     map[string]*messageStreamState
+	messageStatesByIndex  map[int64]*messageStreamState
+	openMessageStates     map[*messageStreamState]struct{}
 	LastImageHashByItemID map[string][32]byte
 }
 
@@ -182,7 +192,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		p.ResponseID = strings.Clone(rootResult.Get("response.id").String())
 		p.CreatedAt = rootResult.Get("response.created_at").Int()
 		p.Model = strings.Clone(rootResult.Get("response.model").String())
-		p.HasMessageTextDelta = false
+		p.resetMessageTextDeltaState()
 		if p.LastImageHashByItemID == nil {
 			p.LastImageHashByItemID = make(map[string][32]byte)
 		}
@@ -239,7 +249,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			_ = templateDoc.Set("choices.0.delta.content", delta)
 			p.emittedTextRunes += int64(utf8.RuneCountInString(delta))
 			if delta != "" {
-				p.HasMessageTextDelta = true
+				p.markMessageTextDelta(rootResult)
 			}
 		}
 	} else if dataType == "response.output_text.annotation.added" || dataType == "response.output_text.done" || dataType == "response.content_part.done" {
@@ -294,10 +304,12 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		_ = templateDoc.Set("choices.0.finish_reason", finishReason)
 		_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+	} else if dataType == "response.failed" || dataType == "error" {
+		return [][]byte{buildCodexFailedOpenAIError(rootResult)}
 	} else if dataType == "response.output_item.added" {
 		itemResult := rootResult.Get("item")
 		if itemResult.Exists() && itemResult.Get("type").String() == "message" {
-			p.HasMessageTextDelta = false
+			p.startMessageState(rootResult, itemResult)
 			return [][]byte{}
 		}
 		if !itemResult.Exists() || !isCodexToolCallType(itemResult.Get("type").String()) {
@@ -376,9 +388,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			return [][]byte{}
 		}
 		if itemResult.Get("type").String() == "message" {
-			defer func() { p.HasMessageTextDelta = false }()
+			hadMessageTextDelta := p.consumeMessageTextDelta(rootResult, itemResult)
 			var fallbackText string
-			if !p.HasMessageTextDelta {
+			if !hadMessageTextDelta {
 				var sb strings.Builder
 				for _, part := range itemResult.Get("content").Array() {
 					switch part.Get("type").String() {
@@ -516,6 +528,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	rootResult := util.ParseGJSONBytesNoCopy(rawJSON)
 	// Verify this is a terminal response event.
 	responseType := rootResult.Get("type").String()
+	if responseType == "response.failed" || responseType == "error" {
+		return buildCodexFailedOpenAIError(rootResult)
+	}
 	if responseType != "response.completed" && responseType != "response.incomplete" {
 		return []byte{}
 	}
@@ -595,7 +610,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 							if text := summaryItem.Get("text").String(); text != "" {
 								reasoningText += text
 							}
-							break
 						}
 					}
 				}
@@ -726,6 +740,40 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	return templateDoc.Bytes()
 }
 
+func buildCodexFailedOpenAIError(rootResult ojson.Result) []byte {
+	errNode := rootResult.Get("response.error")
+	if !errNode.Exists() || errNode.Type == ojson.Null {
+		errNode = rootResult.Get("error")
+	}
+	var msg string
+	if errNode.Type == ojson.String {
+		msg = strings.TrimSpace(errNode.String())
+	} else {
+		msg = strings.TrimSpace(errNode.Get("message").String())
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(rootResult.Get("message").String())
+	}
+	if msg == "" {
+		msg = "upstream response failed"
+	}
+	errType := strings.TrimSpace(errNode.Get("type").String())
+	if errType == "" {
+		errType = "server_error"
+	}
+	errDoc := ojson.NewDocString(`{"error":{"message":"","type":""}}`)
+	_ = errDoc.Set("error.message", msg)
+	_ = errDoc.Set("error.type", errType)
+	code := errNode.Get("code")
+	if !code.Exists() || code.Type == ojson.Null {
+		code = rootResult.Get("code")
+	}
+	if code.Exists() && code.Type != ojson.Null && strings.TrimSpace(code.String()) != "" {
+		_ = errDoc.Set("error.code", strings.TrimSpace(code.String()))
+	}
+	return errDoc.Bytes()
+}
+
 func codexAnnotationResults(value ojson.Result) []ojson.Result {
 	if !value.Exists() {
 		return nil
@@ -806,6 +854,161 @@ func buildCodexURLCitations(annotations []ojson.Result, runeOffset int64, seen m
 		citations = append(citations, citationDoc.Bytes())
 	}
 	return citations
+}
+
+func messageEventKeys(eventResult, itemResult ojson.Result) (itemID string, outputIdx int64, hasOutputIdx bool) {
+	if itemResult.Exists() {
+		itemID = strings.TrimSpace(itemResult.Get("id").String())
+	}
+	if itemID == "" {
+		itemID = strings.TrimSpace(eventResult.Get("item_id").String())
+	}
+	if outIdx := eventResult.Get("output_index"); outIdx.Exists() && outIdx.Type == ojson.Number {
+		outputIdx = outIdx.Int()
+		hasOutputIdx = true
+	}
+	return itemID, outputIdx, hasOutputIdx
+}
+
+func (p *ConvertCliToOpenAIParams) resetMessageTextDeltaState() {
+	p.HasMessageTextDelta = false
+	p.messageStatesByID = nil
+	p.messageStatesByIndex = nil
+	p.openMessageStates = nil
+}
+
+func (p *ConvertCliToOpenAIParams) findMessageState(itemID string, outputIdx int64, hasOutputIdx bool) *messageStreamState {
+	if itemID != "" {
+		if state := p.messageStatesByID[itemID]; state != nil {
+			return state
+		}
+		if hasOutputIdx {
+			if state := p.messageStatesByIndex[outputIdx]; state != nil && state.itemID == "" {
+				return state
+			}
+		}
+		return nil
+	}
+	if hasOutputIdx {
+		return p.messageStatesByIndex[outputIdx]
+	}
+	return nil
+}
+
+func (p *ConvertCliToOpenAIParams) registerMessageState(state *messageStreamState) {
+	if state.itemID != "" {
+		if p.messageStatesByID == nil {
+			p.messageStatesByID = make(map[string]*messageStreamState)
+		}
+		p.messageStatesByID[state.itemID] = state
+	}
+	if state.hasOutputIdx {
+		if p.messageStatesByIndex == nil {
+			p.messageStatesByIndex = make(map[int64]*messageStreamState)
+		}
+		p.messageStatesByIndex[state.outputIdx] = state
+	}
+	if p.openMessageStates == nil {
+		p.openMessageStates = make(map[*messageStreamState]struct{})
+	}
+	p.openMessageStates[state] = struct{}{}
+}
+
+func (p *ConvertCliToOpenAIParams) unlinkMessageState(state *messageStreamState) {
+	if state == nil {
+		return
+	}
+	if state.itemID != "" && p.messageStatesByID[state.itemID] == state {
+		delete(p.messageStatesByID, state.itemID)
+	}
+	if state.hasOutputIdx && p.messageStatesByIndex[state.outputIdx] == state {
+		delete(p.messageStatesByIndex, state.outputIdx)
+	}
+	delete(p.openMessageStates, state)
+}
+
+func (p *ConvertCliToOpenAIParams) startMessageState(eventResult, itemResult ojson.Result) {
+	itemID, outputIdx, hasOutputIdx := messageEventKeys(eventResult, itemResult)
+	if itemID == "" && !hasOutputIdx {
+		p.HasMessageTextDelta = false
+		return
+	}
+	if existing := p.findMessageState(itemID, outputIdx, hasOutputIdx); existing != nil {
+		p.unlinkMessageState(existing)
+	}
+	state := &messageStreamState{
+		itemID:       strings.Clone(itemID),
+		outputIdx:    outputIdx,
+		hasOutputIdx: hasOutputIdx,
+	}
+	p.registerMessageState(state)
+}
+
+func (p *ConvertCliToOpenAIParams) markMessageTextDelta(eventResult ojson.Result) {
+	itemID, outputIdx, hasOutputIdx := messageEventKeys(eventResult, ojson.Result{})
+	if itemID == "" && !hasOutputIdx {
+		if len(p.openMessageStates) == 1 {
+			for state := range p.openMessageStates {
+				state.hasTextDelta = true
+			}
+			return
+		}
+		p.HasMessageTextDelta = true
+		return
+	}
+	state := p.findMessageState(itemID, outputIdx, hasOutputIdx)
+	if state == nil {
+		state = &messageStreamState{
+			itemID:       strings.Clone(itemID),
+			outputIdx:    outputIdx,
+			hasOutputIdx: hasOutputIdx,
+		}
+	} else {
+		if itemID != "" && state.itemID == "" {
+			state.itemID = strings.Clone(itemID)
+		}
+		if hasOutputIdx && !state.hasOutputIdx {
+			state.outputIdx = outputIdx
+			state.hasOutputIdx = true
+		}
+	}
+	state.hasTextDelta = true
+	p.registerMessageState(state)
+}
+
+func (p *ConvertCliToOpenAIParams) consumeMessageTextDelta(eventResult, itemResult ojson.Result) bool {
+	itemID, outputIdx, hasOutputIdx := messageEventKeys(eventResult, itemResult)
+	if itemID == "" && !hasOutputIdx {
+		if len(p.openMessageStates) == 1 {
+			for state := range p.openMessageStates {
+				hadDelta := state.hasTextDelta
+				p.unlinkMessageState(state)
+				if !hadDelta && p.HasMessageTextDelta {
+					hadDelta = true
+					p.HasMessageTextDelta = false
+				}
+				return hadDelta
+			}
+		}
+		hadDelta := p.HasMessageTextDelta
+		p.HasMessageTextDelta = false
+		return hadDelta
+	}
+	state := p.findMessageState(itemID, outputIdx, hasOutputIdx)
+	if state != nil {
+		hadDelta := state.hasTextDelta
+		p.unlinkMessageState(state)
+		if !hadDelta && p.HasMessageTextDelta {
+			hadDelta = true
+			p.HasMessageTextDelta = false
+		}
+		return hadDelta
+	}
+	if p.HasMessageTextDelta {
+		p.HasMessageTextDelta = false
+		return true
+	}
+	return false
 }
 
 func registerToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult ojson.Result, state *toolCallStreamState) {

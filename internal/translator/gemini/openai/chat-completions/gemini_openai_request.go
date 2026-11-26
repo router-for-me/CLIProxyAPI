@@ -7,6 +7,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -60,6 +61,9 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			}
 		}
 	}
+	if thinkingPath := "generationConfig.thinkingConfig"; !outDoc.Get(thinkingPath+".thinkingLevel").Exists() && !outDoc.Get(thinkingPath+".thinkingBudget").Exists() {
+		thinking.ApplyOpenAIGoogleThinkingConfigDoc(outDoc, rawJSON, thinkingPath)
+	}
 
 	// Temperature/top_p/top_k
 	if tr := ojson.GetBytesNoCopy(rawJSON, "temperature"); tr.Exists() && tr.Type == ojson.Number {
@@ -77,6 +81,9 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		_ = outDoc.Set("generationConfig.maxOutputTokens", mt.Num)
 	} else if mct := ojson.GetBytesNoCopy(rawJSON, "max_completion_tokens"); mct.Exists() && mct.Type == ojson.Number {
 		_ = outDoc.Set("generationConfig.maxOutputTokens", mct.Num)
+	}
+	if stopSequences := translatorcommon.OpenAIStopSequences(ojson.GetBytesNoCopy(rawJSON, "stop")); len(stopSequences) > 0 {
+		_ = outDoc.Set("generationConfig.stopSequences", stopSequences)
 	}
 
 	// Candidate count (OpenAI 'n' parameter)
@@ -123,6 +130,11 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		arr := messages.Array()
 		systemParts := make([][]byte, 0, 2)
 		contentItems := make([][]byte, 0, len(arr))
+		contentCanMergeWithToolResponse := make([]bool, 0, len(arr))
+		appendContent := func(content []byte, canMerge bool) {
+			contentItems = append(contentItems, content)
+			contentCanMergeWithToolResponse = append(contentCanMergeWithToolResponse, canMerge)
+		}
 
 		hasEncounteredConversation := false
 		for i := 0; i < len(arr); i++ {
@@ -194,7 +206,7 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				// Whitespace-only text is forwarded but never keeps an emptied turn alive.
 				drops.EndTurn(translatorcommon.CountSendableGeminiParts(partItems))
 				if len(partItems) > 0 {
-					contentItems = append(contentItems, geminiContentNode("user", partItems))
+					appendContent(geminiContentNode("user", partItems), role == "user")
 				}
 			} else if role == "assistant" {
 				hasEncounteredConversation = true
@@ -215,12 +227,8 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 								partItems = append(partItems, geminiTextPart(text))
 							}
 						case "image_url":
-							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									partItems = append(partItems, geminiInlineDataPart(pieces[0], pieces[1][7:], ""))
-								}
+							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String()); ok {
+								partItems = append(partItems, geminiInlineDataPart(mimeType, data, ""))
 							}
 						}
 					}
@@ -243,9 +251,16 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if functionName == "" {
 							continue
 						}
-						partDoc := ojson.NewDocString(`{"functionCall":{"name":""}}`)
+						partDoc := ojson.NewDocString(`{"functionCall":{"name":"","args":{}}}`)
 						_ = partDoc.Set("functionCall.name", functionName)
-						_ = partDoc.SetRaw("functionCall.args", tc.Get("function.arguments").String())
+						functionArgs := strings.TrimSpace(tc.Get("function.arguments").String())
+						if functionArgs != "" {
+							if ojson.Valid(functionArgs) && ojson.Parse(functionArgs).IsObject() {
+								_ = partDoc.SetRaw("functionCall.args", functionArgs)
+							} else {
+								_ = partDoc.Set("functionCall.args.params", functionArgs)
+							}
+						}
 						_ = partDoc.Set("thoughtSignature", openAIToolCallGeminiThoughtSignature(tc))
 						partItems = append(partItems, partDoc.Bytes())
 						toolCalls = append(toolCalls, assistantToolCall{
@@ -254,7 +269,7 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						})
 					}
 					if len(partItems) > 0 {
-						contentItems = append(contentItems, geminiContentNode("model", partItems))
+						appendContent(geminiContentNode("model", partItems), false)
 					}
 
 					// Collect tool responses scoped to this assistant turn.
@@ -286,10 +301,10 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						responseParts = append(responseParts, partDoc.Bytes())
 					}
 					if len(responseParts) > 0 {
-						contentItems = append(contentItems, geminiContentNode("user", responseParts))
+						appendContent(geminiContentNode("user", responseParts), false)
 					}
 				} else if len(partItems) > 0 {
-					contentItems = append(contentItems, geminiContentNode("model", partItems))
+					appendContent(geminiContentNode("model", partItems), false)
 				}
 			}
 		}
@@ -300,37 +315,14 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 		if len(contentItems) > 0 && ojson.GetBytesNoCopy(contentItems[len(contentItems)-1], "role").String() == "model" {
 			contentItems = contentItems[:len(contentItems)-1]
+			contentCanMergeWithToolResponse = contentCanMergeWithToolResponse[:len(contentCanMergeWithToolResponse)-1]
 		}
+		contentItems = mergeGeminiOpenAIToolResponseUserContents(contentItems, contentCanMergeWithToolResponse)
 		translatorcommon.SetRawArrayItemsDoc(outDoc, "contents", contentItems)
 	}
 
 	// tools -> tools[].functionDeclarations + tools[].googleSearch/codeExecution/urlContext passthrough
-	allowedToolNames := make(map[string]struct{})
-	isAllowedTools := false
-	allowedMode := "auto"
-	if toolChoice := ojson.GetBytesNoCopy(rawJSON, "tool_choice"); toolChoice.Exists() && toolChoice.IsObject() && toolChoice.Get("type").String() == "allowed_tools" {
-		isAllowedTools = true
-		toolList := toolChoice.Get("allowed_tools.tools").Array()
-		if len(toolList) == 0 {
-			toolList = toolChoice.Get("tools").Array()
-		}
-		for _, t := range toolList {
-			fnName := strings.TrimSpace(t.Get("function.name").String())
-			if fnName == "" {
-				fnName = strings.TrimSpace(t.Get("name").String())
-			}
-			if fnName != "" {
-				allowedToolNames[fnName] = struct{}{}
-			}
-		}
-		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
-		if modeVal == "" {
-			modeVal = strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
-		}
-		if modeVal != "" {
-			allowedMode = modeVal
-		}
-	}
+	allowedToolNames, isAllowedTools, allowedMode := parseGeminiOpenAIAllowedTools(rawJSON)
 
 	declaredOriginalToSanitized := make(map[string]string)
 	sanitizedToOriginalCounts := make(map[string]int)
@@ -537,6 +529,36 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	return outDoc.Bytes(), drops.Err()
 }
 
+func parseGeminiOpenAIAllowedTools(rawJSON []byte) (map[string]struct{}, bool, string) {
+	allowedToolNames := make(map[string]struct{})
+	isAllowedTools := false
+	allowedMode := "auto"
+	if toolChoice := ojson.GetBytesNoCopy(rawJSON, "tool_choice"); toolChoice.Exists() && toolChoice.IsObject() && toolChoice.Get("type").String() == "allowed_tools" {
+		isAllowedTools = true
+		toolList := toolChoice.Get("allowed_tools.tools").Array()
+		if len(toolList) == 0 {
+			toolList = toolChoice.Get("tools").Array()
+		}
+		for _, t := range toolList {
+			fnName := strings.TrimSpace(t.Get("function.name").String())
+			if fnName == "" {
+				fnName = strings.TrimSpace(t.Get("name").String())
+			}
+			if fnName != "" {
+				allowedToolNames[fnName] = struct{}{}
+			}
+		}
+		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
+		if modeVal == "" {
+			modeVal = strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
+		}
+		if modeVal != "" {
+			allowedMode = modeVal
+		}
+	}
+	return allowedToolNames, isAllowedTools, allowedMode
+}
+
 func geminiTextPart(text string) []byte {
 	part := []byte(`{"text":""}`)
 	part, _ = ojson.SetBytes(part, "text", text)
@@ -551,6 +573,55 @@ func geminiInlineDataPart(mimeType, data, thoughtSignature string) []byte {
 		_ = partDoc.Set("thoughtSignature", thoughtSignature)
 	}
 	return partDoc.Bytes()
+}
+
+func mergeGeminiOpenAIToolResponseUserContents(contents [][]byte, canMerge []bool) [][]byte {
+	if len(contents) <= 1 {
+		return contents
+	}
+	merged := make([][]byte, 0, len(contents))
+	for i := 0; i < len(contents); i++ {
+		content := contents[i]
+		if ojson.GetBytesNoCopy(content, "role").String() != "user" ||
+			!translatorcommon.ContentHasGeminiFunctionResponse(content) {
+			merged = append(merged, content)
+			continue
+		}
+
+		j := i + 1
+		partCount := len(ojson.GetBytesNoCopy(content, "parts").Array())
+		for j < len(contents) && j < len(canMerge) && canMerge[j] {
+			partCount += len(ojson.GetBytesNoCopy(contents[j], "parts").Array())
+			j++
+		}
+		if j == i+1 {
+			merged = append(merged, content)
+			continue
+		}
+
+		// Place follow-up user parts before functionResponse parts so Vertex AI
+		// does not reject the turn with HTTP 400 "Requests ending with a model
+		// turn are not supported." while preserving relative part order within
+		// both groups.
+		parts := make([][]byte, 0, partCount)
+		for _, current := range contents[i+1 : j] {
+			for _, part := range ojson.GetBytesNoCopy(current, "parts").Array() {
+				parts = append(parts, []byte(part.Raw))
+			}
+		}
+		for _, part := range ojson.GetBytesNoCopy(content, "parts").Array() {
+			parts = append(parts, []byte(part.Raw))
+		}
+		contentDoc := ojson.NewDoc(content)
+		if errSet := contentDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(parts)); errSet != nil {
+			merged = append(merged, contents[i:j]...)
+			i = j - 1
+			continue
+		}
+		merged = append(merged, contentDoc.Bytes())
+		i = j - 1
+	}
+	return merged
 }
 
 func geminiContentNode(role string, parts [][]byte) []byte {

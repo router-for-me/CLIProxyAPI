@@ -162,6 +162,14 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
+// SetAttemptModel changes the usage model to the actual scheduling target while
+// preserving the caller alias. Call only before publishing or starting a stream.
+func (r *UsageReporter) SetAttemptModel(model string) {
+	if r != nil {
+		r.model = model
+	}
+}
+
 // SetStream records whether the request was executed in streaming mode.
 func (r *UsageReporter) SetStream(stream bool) {
 	if r == nil {
@@ -227,7 +235,7 @@ func isHierarchyParent(primary, parent string) bool {
 	idx1 := strings.Index(primary, ":")
 	idx2 := strings.Index(parent, ":")
 	if idx1 > 0 && idx2 > 0 && primary[:idx1] == parent[:idx2] {
-		return true
+		return primary[:idx1] != "msg"
 	}
 	if idx1 == -1 && idx2 == -1 {
 		return true

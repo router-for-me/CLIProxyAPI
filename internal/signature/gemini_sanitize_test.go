@@ -699,3 +699,260 @@ func TestSanitizeNonVertexGeminiRequestThoughtSignaturesDoc_ReplacesVertexBareTi
 		t.Fatalf("text signature should be dropped: %s", doc.String())
 	}
 }
+
+func TestSanitizeGeminiRequestThoughtSignaturesDoc_SnakeCaseFunctionCallAndResponse(t *testing.T) {
+	input := []byte(`{"contents":[` +
+		`{"role":"model","parts":[{"function_call":{"name":"get_weather"},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `"}]},` +
+		`{"role":"user","parts":[{"function_response":{"name":"get_weather","response":{}},"thoughtSignature":"abc"}]}` +
+		`]}`)
+	doc := ojson.NewDoc(input)
+	SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
+
+	if got := doc.Get("contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("snake_case function_call sentinel = %q, want %q; out=%s", got, GeminiSkipThoughtSignatureValidator, doc.String())
+	}
+	if doc.Get("contents.1.parts.0.thoughtSignature").Exists() {
+		t.Fatalf("snake_case function_response thoughtSignature should be stripped; out=%s", doc.String())
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_SnakeCaseFunctionCallBypassAndParallel(t *testing.T) {
+	t.Run("unsigned_first_function_call_gets_bypass", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"function_call":{"name":"first","args":{}}},{"function_call":{"name":"second","args":{}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if got := ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+			t.Fatalf("first snake_case function_call signature = %q, want bypass sentinel; out=%s", got, out)
+		}
+		if ojson.GetBytes(out, "contents.0.parts.1.thoughtSignature").Exists() {
+			t.Fatalf("second parallel snake_case function_call should stay unsigned; out=%s", out)
+		}
+	})
+
+	t.Run("parallel_bypass_stripped_on_sibling_only", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[` +
+			`{"function_call":{"name":"first","args":{}},"thought_signature":"` + GeminiSkipThoughtSignatureValidator + `"},` +
+			`{"function_call":{"name":"second","args":{}},"thought_signature":"` + GeminiSkipThoughtSignatureValidator + `"}` +
+			`]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if got := ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+			t.Fatalf("first snake_case function_call signature = %q, want bypass sentinel; out=%s", got, out)
+		}
+		if ojson.GetBytes(out, "contents.0.parts.0.thought_signature").Exists() {
+			t.Fatalf("first snake_case function_call should normalize thought_signature to thoughtSignature; out=%s", out)
+		}
+		if ojson.GetBytes(out, "contents.0.parts.1.thoughtSignature").Exists() || ojson.GetBytes(out, "contents.0.parts.1.thought_signature").Exists() {
+			t.Fatalf("sibling snake_case function_call bypass should be stripped; out=%s", out)
+		}
+	})
+
+	t.Run("mixed_snake_and_camel_parallel_calls", func(t *testing.T) {
+		nativeSig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+		input := []byte(`{"contents":[{"role":"model","parts":[` +
+			`{"function_call":{"name":"first","args":{}},"thoughtSignature":"` + nativeSig + `"},` +
+			`{"functionCall":{"name":"second","args":{}}}` +
+			`]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if got := ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != nativeSig {
+			t.Fatalf("first snake_case function_call signature = %q, want %q; out=%s", got, nativeSig, out)
+		}
+		if ojson.GetBytes(out, "contents.0.parts.1.thoughtSignature").Exists() {
+			t.Fatalf("camelCase sibling after snake_case function_call should stay unsigned; out=%s", out)
+		}
+	})
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_SnakeCaseNestedSignatures(t *testing.T) {
+	t.Run("replaces_nested_function_call_signature", func(t *testing.T) {
+		sig := testGeminiThoughtSignature([]byte("e24830a7-5cd6-42fe-998b-ee539e72b9c3"))
+		input := []byte(`{"contents":[{"role":"model","parts":[{"function_call":{"name":"f","args":{},"thought_signature":"` + sig + `","thoughtSignature":"` + sig + `"}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if got := ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+			t.Fatalf("thoughtSignature = %q, want bypass sentinel; out=%s", got, out)
+		}
+		if ojson.GetBytes(out, "contents.0.parts.0.function_call.thought_signature").Exists() ||
+			ojson.GetBytes(out, "contents.0.parts.0.function_call.thoughtSignature").Exists() {
+			t.Fatalf("nested function_call signature fields should be removed; out=%s", out)
+		}
+	})
+
+	t.Run("strips_top_level_and_nested_function_response_signatures", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"user","parts":[{"function_response":{"name":"f","response":{"result":"ok"},"thoughtSignature":"bad1","thought_signature":"bad2"},"thought_signature":"bad3"}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		for _, path := range []string{
+			"contents.0.parts.0.thoughtSignature",
+			"contents.0.parts.0.thought_signature",
+			"contents.0.parts.0.function_response.thoughtSignature",
+			"contents.0.parts.0.function_response.thought_signature",
+		} {
+			if ojson.GetBytes(out, path).Exists() {
+				t.Fatalf("expected %s to be stripped; out=%s", path, out)
+			}
+		}
+	})
+
+	t.Run("reuses_unsigned_snake_case_function_response_payload", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"user","parts":[{"function_response":{"name":"f","response":{"result":"ok"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if &out[0] != &input[0] {
+			t.Fatal("unsigned snake_case function_response payload was copied")
+		}
+	})
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesDoc_EmptyThoughtSignaturePromotesFallback(t *testing.T) {
+	sig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+
+	tests := []struct {
+		name           string
+		partJSON       string
+		fallbackRemove string
+	}{
+		{
+			name:           "empty_string_with_extra_content_fallback",
+			partJSON:       `{"functionCall":{"name":"get_weather","args":{}},"thoughtSignature":"","extra_content":{"google":{"thought_signature":"` + sig + `"}}}`,
+			fallbackRemove: "contents.0.parts.0.extra_content.google.thought_signature",
+		},
+		{
+			name:           "whitespace_with_extra_content_fallback",
+			partJSON:       `{"functionCall":{"name":"get_weather","args":{}},"thoughtSignature":"   ","extra_content":{"google":{"thought_signature":"` + sig + `"}}}`,
+			fallbackRemove: "contents.0.parts.0.extra_content.google.thought_signature",
+		},
+		{
+			name:           "null_with_extra_content_fallback",
+			partJSON:       `{"functionCall":{"name":"get_weather","args":{}},"thoughtSignature":null,"extra_content":{"google":{"thought_signature":"` + sig + `"}}}`,
+			fallbackRemove: "contents.0.parts.0.extra_content.google.thought_signature",
+		},
+		{
+			name:           "empty_string_with_snake_case_thought_signature_fallback",
+			partJSON:       `{"functionCall":{"name":"get_weather","args":{}},"thoughtSignature":"","thought_signature":"` + sig + `"}`,
+			fallbackRemove: "contents.0.parts.0.thought_signature",
+		},
+		{
+			name:           "empty_string_with_nested_functionCall_fallback",
+			partJSON:       `{"functionCall":{"name":"get_weather","args":{},"thoughtSignature":"` + sig + `"},"thoughtSignature":""}`,
+			fallbackRemove: "contents.0.parts.0.functionCall.thoughtSignature",
+		},
+		{
+			name:           "empty_string_on_text_part_with_extra_content_fallback",
+			partJSON:       `{"text":"previous answer","thoughtSignature":"","extra_content":{"google":{"thought_signature":"` + sig + `"}}}`,
+			fallbackRemove: "contents.0.parts.0.extra_content.google.thought_signature",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := ojson.NewDoc([]byte(`{"contents":[{"role":"model","parts":[` + tt.partJSON + `]}]}`))
+			SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
+
+			if got := doc.Get("contents.0.parts.0.thoughtSignature").String(); got != sig {
+				t.Fatalf("thoughtSignature = %q, want %q; out=%s", got, sig, doc.String())
+			}
+			if doc.Get(tt.fallbackRemove).Exists() {
+				t.Fatalf("expected fallback field %s to be removed; out=%s", tt.fallbackRemove, doc.String())
+			}
+		})
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_AllEmptySignaturePaths(t *testing.T) {
+	t.Run("first_function_call_gets_bypass_and_clears_empty_fallback", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"","extra_content":{"google":{"thought_signature":"   "}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if got := ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+			t.Fatalf("thoughtSignature = %q, want bypass sentinel; out=%s", got, out)
+		}
+		if ojson.GetBytes(out, "contents.0.parts.0.extra_content.google.thought_signature").Exists() {
+			t.Fatalf("empty fallback field should be removed; out=%s", out)
+		}
+	})
+
+	t.Run("text_part_strips_all_empty_signature_fields", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"text":"answer","thoughtSignature":"","thought_signature":null}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").Exists() ||
+			ojson.GetBytes(out, "contents.0.parts.0.thought_signature").Exists() {
+			t.Fatalf("empty signature fields on text part should be stripped; out=%s", out)
+		}
+	})
+
+	t.Run("function_response_strips_all_empty_signature_fields", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"}},"thoughtSignature":"","extra_content":{"google":{"thought_signature":""}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		if ojson.GetBytes(out, "contents.0.parts.0.thoughtSignature").Exists() ||
+			ojson.GetBytes(out, "contents.0.parts.0.extra_content.google.thought_signature").Exists() {
+			t.Fatalf("empty signature fields on functionResponse should be stripped; out=%s", out)
+		}
+	})
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_PrunesEmptyExtraContentShell(t *testing.T) {
+	sig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+
+	t.Run("function_call_prunes_empty_extra_content_shell", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{}},"extra_content":{"google":{"thought_signature":"` + sig + `"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+		part := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if got := part.Get("thoughtSignature").String(); got != sig {
+			t.Fatalf("thoughtSignature = %q, want %q; part=%s", got, sig, part.Raw)
+		}
+		if part.Get("extra_content").Exists() {
+			t.Fatalf("empty extra_content shell should be pruned; part=%s", part.Raw)
+		}
+	})
+
+	t.Run("function_response_prunes_empty_extra_content_shell", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"}},"extra_content":{"google":{"thought_signature":"` + sig + `"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+		part := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if part.Get("extra_content").Exists() {
+			t.Fatalf("empty extra_content shell on functionResponse should be pruned; part=%s", part.Raw)
+		}
+	})
+
+	t.Run("preserves_non_empty_sibling_fields", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"text":"a","extra_content":{"google":{"thought_signature":"` + sig + `","keep":"yes"}}},{"text":"b","extra_content":{"google":{"thought_signature":"` + sig + `"},"keep":"yes"}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		p0 := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if p0.Get("extra_content.google.thought_signature").Exists() || p0.Get("extra_content.google.keep").String() != "yes" {
+			t.Fatalf("p0 should strip signature but preserve non-empty extra_content.google sibling: %s", p0.Raw)
+		}
+		p1 := ojson.GetBytesNoCopy(out, "contents.0.parts.1")
+		if p1.Get("extra_content.google").Exists() || p1.Get("extra_content.keep").String() != "yes" {
+			t.Fatalf("p1 should prune empty google but preserve extra_content sibling: %s", p1.Raw)
+		}
+	})
+
+	t.Run("duplicate_google_and_extra_content_wrappers_pruned_and_siblings_preserved", func(t *testing.T) {
+		input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{}},"extra_content":{"google":{"thought_signature":"` + sig + `"},"google":{}}},{"text":"two-google-sigs","extra_content":{"google":{"thought_signature":"` + sig + `"},"google":{"thought_signature":"` + sig + `"}}},{"text":"google-keep-and-sig","extra_content":{"google":{"keep":"yes"},"google":{"thought_signature":"` + sig + `"}}},{"text":"two-extra-sigs","extra_content":{"google":{"thought_signature":"` + sig + `"}},"extra_content":{"google":{"thought_signature":"` + sig + `"}}},{"text":"extra-keep-and-sig","extra_content":{"google":{"thought_signature":"` + sig + `"},"keep":"yes"},"extra_content":{"google":{"thought_signature":"` + sig + `"}}}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+		p0 := ojson.GetBytesNoCopy(out, "contents.0.parts.0")
+		if p0.Get("thoughtSignature").String() != sig || p0.Get("extra_content").Exists() || strings.Contains(p0.Raw, "thought_signature") {
+			t.Fatalf("p0 should normalize signature and prune duplicate empty google wrapper: %s", p0.Raw)
+		}
+		for _, idx := range []int{1, 3} {
+			p := ojson.GetBytesNoCopy(out, fmt.Sprintf("contents.0.parts.%d", idx))
+			if p.Get("thoughtSignature").String() != sig || p.Get("extra_content").Exists() || strings.Contains(p.Raw, "thought_signature") {
+				t.Fatalf("p%d left extra_content or thought_signature: %s", idx, p.Raw)
+			}
+		}
+		p2 := ojson.GetBytesNoCopy(out, "contents.0.parts.2")
+		if p2.Get("thoughtSignature").String() != sig || strings.Contains(p2.Raw, "thought_signature") || p2.Get("extra_content.google.keep").String() != "yes" || strings.Count(p2.Raw, `"google"`) != 1 {
+			t.Fatalf("p2 should strip duplicate google sig and keep non-empty google sibling: %s", p2.Raw)
+		}
+		p4 := ojson.GetBytesNoCopy(out, "contents.0.parts.4")
+		if p4.Get("thoughtSignature").String() != sig || strings.Contains(p4.Raw, "thought_signature") || strings.Contains(p4.Raw, `"google"`) || p4.Get("extra_content.keep").String() != "yes" || strings.Count(p4.Raw, `"extra_content"`) != 1 {
+			t.Fatalf("p4 should prune empty duplicate extra_content and keep sibling: %s", p4.Raw)
+		}
+	})
+}

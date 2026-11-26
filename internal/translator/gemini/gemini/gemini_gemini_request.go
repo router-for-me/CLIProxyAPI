@@ -62,7 +62,16 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) ([]byte
 						declarationsChanged = true
 					} else if parametersJSONSchema := declarationResult.Get("parametersJsonSchema"); parametersJSONSchema.Exists() {
 						if normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parametersJSONSchema.Raw); normalizedParams != parametersJSONSchema.Raw {
-							declaration, _ = ojson.SetRawBytes(declaration, "parametersJsonSchema", []byte(normalizedParams))
+							declDoc := ojson.NewDocString(declarationResult.Raw)
+							_ = declDoc.SetRaw("parametersJsonSchema", normalizedParams)
+							declaration = declDoc.Bytes()
+							declarationsChanged = true
+						}
+					} else if parametersJSONSchema := declarationResult.Get("parameters_json_schema"); parametersJSONSchema.Exists() {
+						if normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parametersJSONSchema.Raw); normalizedParams != parametersJSONSchema.Raw {
+							declDoc := ojson.NewDocString(declarationResult.Raw)
+							_ = declDoc.SetRaw("parameters_json_schema", normalizedParams)
+							declaration = declDoc.Bytes()
 							declarationsChanged = true
 						}
 					}
@@ -151,16 +160,60 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) ([]byte
 
 	out = signature.SanitizeGeminiRequestThoughtSignatures(out, "contents")
 
-	if responseSchema := ojson.GetBytesNoCopy(out, "generationConfig.responseSchema"); responseSchema.Exists() {
-		normalizedSchema := util.NormalizeJSONSchemaNumericConstraints(responseSchema.Raw)
-		outDoc := ojson.NewDoc(out)
-		_ = outDoc.SetRaw("generationConfig.responseJsonSchema", normalizedSchema)
-		_ = outDoc.Delete("generationConfig.responseSchema")
-		out = outDoc.Bytes()
-	} else if responseJSONSchema := ojson.GetBytesNoCopy(out, "generationConfig.responseJsonSchema"); responseJSONSchema.Exists() {
-		if normalizedSchema := util.NormalizeJSONSchemaNumericConstraints(responseJSONSchema.Raw); normalizedSchema != responseJSONSchema.Raw {
-			out, _ = ojson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(normalizedSchema))
+	var respSchemaDoc *ojson.Doc
+	ensureRespSchemaDoc := func() *ojson.Doc {
+		if respSchemaDoc == nil {
+			respSchemaDoc = ojson.NewDoc(out)
 		}
+		return respSchemaDoc
+	}
+	for _, cfg := range []struct {
+		container   string
+		protoKey    string
+		protoAltKey string
+		jsonKey     string
+		jsonAltKey  string
+	}{
+		{
+			container:   "generationConfig",
+			protoKey:    "responseSchema",
+			protoAltKey: "response_schema",
+			jsonKey:     "responseJsonSchema",
+			jsonAltKey:  "response_json_schema",
+		},
+		{
+			container:   "generation_config",
+			protoKey:    "response_schema",
+			protoAltKey: "responseSchema",
+			jsonKey:     "response_json_schema",
+			jsonAltKey:  "responseJsonSchema",
+		},
+	} {
+		if !ojson.GetBytesNoCopy(out, cfg.container).IsObject() {
+			continue
+		}
+		if responseSchema := ojson.GetBytesNoCopy(out, cfg.container+"."+cfg.protoKey); responseSchema.Exists() {
+			normalizedSchema := util.NormalizeJSONSchemaNumericConstraints(responseSchema.Raw)
+			d := ensureRespSchemaDoc()
+			_ = d.SetRaw(cfg.container+"."+cfg.jsonKey, normalizedSchema)
+			_ = d.Delete(cfg.container + "." + cfg.protoKey)
+		} else if responseSchema := ojson.GetBytesNoCopy(out, cfg.container+"."+cfg.protoAltKey); responseSchema.Exists() {
+			normalizedSchema := util.NormalizeJSONSchemaNumericConstraints(responseSchema.Raw)
+			d := ensureRespSchemaDoc()
+			_ = d.SetRaw(cfg.container+"."+cfg.jsonKey, normalizedSchema)
+			_ = d.Delete(cfg.container + "." + cfg.protoAltKey)
+		} else if responseJSONSchema := ojson.GetBytesNoCopy(out, cfg.container+"."+cfg.jsonKey); responseJSONSchema.Exists() {
+			if normalizedSchema := util.NormalizeJSONSchemaNumericConstraints(responseJSONSchema.Raw); normalizedSchema != responseJSONSchema.Raw {
+				_ = ensureRespSchemaDoc().SetRaw(cfg.container+"."+cfg.jsonKey, normalizedSchema)
+			}
+		} else if responseJSONSchema := ojson.GetBytesNoCopy(out, cfg.container+"."+cfg.jsonAltKey); responseJSONSchema.Exists() {
+			if normalizedSchema := util.NormalizeJSONSchemaNumericConstraints(responseJSONSchema.Raw); normalizedSchema != responseJSONSchema.Raw {
+				_ = ensureRespSchemaDoc().SetRaw(cfg.container+"."+cfg.jsonAltKey, normalizedSchema)
+			}
+		}
+	}
+	if respSchemaDoc != nil {
+		out = respSchemaDoc.Bytes()
 	}
 
 	// Backfill empty functionResponse.name from the preceding functionCall.name.

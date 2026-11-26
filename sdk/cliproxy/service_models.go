@@ -2,16 +2,18 @@ package cliproxy
 
 import (
 	"context"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
@@ -99,7 +101,6 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case constant.GeminiInteractions:
 		models = registry.GetGeminiModels()
 		if entry := resolveConfigInteractionsKeyForConfig(cfg, a); entry != nil {
@@ -110,7 +111,6 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
@@ -124,10 +124,8 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		} else {
 			models = appendVertexServiceAccountModels(cfg, a, models)
 		}
-		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
-		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		if !(cfg != nil && cfg.Home.Enabled) {
 			expectedRegEpoch := GlobalModelRegistry().ClientRegistrationEpoch(a.ID)
@@ -144,7 +142,6 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		} else {
 			models = registry.GetAntigravityModels()
 		}
-		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		if entry := resolveConfigClaudeKeyForConfig(cfg, a); entry != nil {
@@ -155,14 +152,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	case "codex":
 		if authKind == "apikey" {
 			if entry := resolveConfigCodexKeyForConfig(cfg, a); entry != nil {
 				models = buildCodexConfigModels(entry)
 				excluded = entry.ExcludedModels
 			}
-			models = applyExcludedModels(models, excluded)
 			break
 		}
 
@@ -182,10 +177,8 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		default:
 			models = registry.GetCodexProModels()
 		}
-		models = applyExcludedModels(models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
-		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := resolveConfigXAIKeyForConfig(cfg, a); entry != nil {
@@ -196,10 +189,20 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
-	case "devin":
-		models = registry.GetDevinModels()
-		models = applyExcludedModels(models, excluded)
+	case "copilot", "devin":
+		if provider == "copilot" {
+			for _, route := range a.ActiveCopilotCatalog(time.Now()).Routes() {
+				setCopilotModelDisplayName(route.Info, route.Info.ID)
+				models = append(models, route.Info)
+			}
+		} else {
+			models = registry.GetDevinModels()
+		}
+		for _, model := range models {
+			if model != nil {
+				applyModelNamespace(model, provider, model.ID, model.ID)
+			}
+		}
 	case "meta":
 		models = registry.GetMetaModels()
 		if entry := resolveConfigMetaKeyForConfig(cfg, a); entry != nil {
@@ -210,7 +213,6 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if cfg != nil {
@@ -296,13 +298,26 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return published
 				}
 			}
-			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(indexed) {
+			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && openAICompatMatchesAuth(indexed.Name, indexed.BaseURL, compatName, a) && registerCompat(indexed) {
 				return published
 			}
-			for i := range cfg.OpenAICompatibility {
-				compat := &cfg.OpenAICompatibility[i]
-				if strings.EqualFold(compat.Name, compatName) && registerCompat(compat) {
-					return published
+			var attrBase string
+			if a.Attributes != nil {
+				attrBase = strings.TrimSpace(a.Attributes["base_url"])
+			}
+			if attrBase != "" {
+				for i := range cfg.OpenAICompatibility {
+					compat := &cfg.OpenAICompatibility[i]
+					if openAICompatMatchesAuth(compat.Name, compat.BaseURL, compatName, a) && registerCompat(compat) {
+						return published
+					}
+				}
+			} else {
+				for i := range cfg.OpenAICompatibility {
+					compat := &cfg.OpenAICompatibility[i]
+					if strings.EqualFold(strings.TrimSpace(compat.Name), strings.TrimSpace(compatName)) && registerCompat(compat) {
+						return published
+					}
 				}
 			}
 			if isCompatAuth {
@@ -320,15 +335,22 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	if ctx.Err() != nil {
 		return true
 	}
-	models = applyOAuthModelAliasForAuth(cfg, provider, authKind, a.Attributes, models)
-	if ctx.Err() != nil {
-		return true
-	}
 	key := provider
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
 	}
-	models = s.appendPluginModels(key, models, excluded)
+	staticModels := s.pluginModelsForProvider(key)
+	if provider == "copilot" {
+		// Copilot plugin routes share the account catalog's namespace and OAuth aliases.
+		models = appendDistinctModels(models, s.copilotPublicPluginModels(a, staticModels))
+		staticModels = nil
+	}
+	models = applyExcludedModels(models, excluded)
+	models = applyOAuthModelAliasForAuth(cfg, provider, authKind, a.Attributes, models)
+	if ctx.Err() != nil {
+		return true
+	}
+	models = appendDistinctModels(models, applyExcludedModels(staticModels, excluded))
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, provider, authKind, models)
 		published = s.registerResolvedModelsForAuthFenced(a, fence, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
@@ -432,6 +454,86 @@ func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
 	return &entries[index]
 }
 
+func authHasConfigIndex(auth *coreauth.Auth) bool {
+	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig || auth.Attributes == nil {
+		return false
+	}
+	return strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex]) != ""
+}
+
+func authAPIKeyCredentials(auth *coreauth.Auth) (apiKey, baseURL string) {
+	if auth == nil || auth.Attributes == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"])
+}
+
+func configBaseURLsEqual(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	parsedA, errA := url.Parse(a)
+	parsedB, errB := url.Parse(b)
+	if errA != nil || errB != nil || parsedA.Scheme == "" || parsedB.Scheme == "" || parsedA.Host == "" || parsedB.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsedA.Scheme, parsedB.Scheme) &&
+		strings.EqualFold(parsedA.Host, parsedB.Host) &&
+		parsedA.User.String() == parsedB.User.String() &&
+		parsedA.EscapedPath() == parsedB.EscapedPath() &&
+		parsedA.ForceQuery == parsedB.ForceQuery &&
+		parsedA.RawQuery == parsedB.RawQuery &&
+		parsedA.Fragment == parsedB.Fragment
+}
+
+func configAPIKeyMatchesConfigAuth(cfgKey, cfgBase, attrKey, attrBase string) bool {
+	cfgKey = strings.TrimSpace(cfgKey)
+	cfgBase = strings.TrimSpace(cfgBase)
+	if attrKey == "" && attrBase == "" {
+		return false
+	}
+	return cfgKey == attrKey && configBaseURLsEqual(cfgBase, attrBase)
+}
+
+func configAPIKeyMatchesLegacyAuth(cfgKey, cfgBase, attrKey, attrBase string) bool {
+	cfgKey = strings.TrimSpace(cfgKey)
+	cfgBase = strings.TrimSpace(cfgBase)
+	if attrKey != "" && attrBase != "" {
+		return cfgKey == attrKey && configBaseURLsEqual(cfgBase, attrBase)
+	}
+	if attrKey != "" {
+		return cfgKey == attrKey && cfgBase == ""
+	}
+	return attrBase != "" && configBaseURLsEqual(cfgBase, attrBase)
+}
+
+func openAICompatMatchesAuth(entryName, entryBaseURL, expectedName string, auth *coreauth.Auth) bool {
+	entryName = strings.TrimSpace(entryName)
+	expectedName = strings.TrimSpace(expectedName)
+	var attrBase string
+	if auth != nil && auth.Attributes != nil {
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	nameMatches := false
+	if entryName != "" && expectedName != "" {
+		nameMatches = strings.EqualFold(entryName, expectedName)
+	} else if entryName == "" && (expectedName == "" || strings.EqualFold(expectedName, "openai-compatibility")) {
+		nameMatches = attrBase != ""
+	}
+	if !nameMatches {
+		return false
+	}
+	if attrBase != "" {
+		return configBaseURLsEqual(entryBaseURL, attrBase)
+	}
+	return true
+}
+
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
 	return resolveConfigClaudeKeyForConfig(s.currentConfig(), auth)
 }
@@ -440,37 +542,29 @@ func resolveConfigClaudeKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *c
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
-		return entry
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+		for i := range cfg.ClaudeKey {
+			entry := &cfg.ClaudeKey[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
+		}
+		return nil
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
 			return entry
 		}
 	}
 	if attrKey != "" {
 		for i := range cfg.ClaudeKey {
 			entry := &cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+			if strings.TrimSpace(entry.APIKey) == attrKey {
 				return entry
 			}
 		}
@@ -508,26 +602,31 @@ func resolveConfigGeminiKeyEntryForConfig(cfg *config.Config, auth *coreauth.Aut
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
-		return entry
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, entries); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+		for i := range entries {
+			entry := &entries[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
+		}
+		return nil
 	}
 	for i := range entries {
 		entry := &entries[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if strings.TrimSpace(entry.APIKey) == attrKey && strings.TrimSpace(entry.BaseURL) == "" {
 				return entry
 			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
 		}
 	}
 	return nil
@@ -541,32 +640,29 @@ func resolveConfigVertexCompatKeyForConfig(cfg *config.Config, auth *coreauth.Au
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
-		return entry
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
+		}
+		for i := range cfg.VertexCompatAPIKey {
+			entry := &cfg.VertexCompatAPIKey[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
+		}
+		return nil
 	}
 	for i := range cfg.VertexCompatAPIKey {
 		entry := &cfg.VertexCompatAPIKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
 			return entry
 		}
 	}
 	if attrKey != "" {
 		for i := range cfg.VertexCompatAPIKey {
 			entry := &cfg.VertexCompatAPIKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+			if strings.TrimSpace(entry.APIKey) == attrKey {
 				return entry
 			}
 		}
@@ -582,7 +678,7 @@ func resolveConfigCodexKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *co
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.CodexKey, true)
+	return resolveConfigCodexStyleKey(auth, cfg.CodexKey)
 }
 
 func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
@@ -593,7 +689,7 @@ func resolveConfigXAIKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *conf
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.XAIKey, false)
+	return resolveConfigCodexStyleKey(auth, cfg.XAIKey)
 }
 
 func (s *Service) resolveConfigMetaKey(auth *coreauth.Auth) *config.MetaKey {
@@ -604,35 +700,38 @@ func resolveConfigMetaKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *con
 	if cfg == nil {
 		return nil
 	}
-	return resolveConfigCodexStyleKey(auth, cfg.MetaKey, false)
+	return resolveConfigCodexStyleKey(auth, cfg.MetaKey)
 }
 
-func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
+func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey) *config.CodexKey {
 	if auth == nil {
 		return nil
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	matchesCredentials := func(entry *config.CodexKey) bool {
-		if entry == nil {
-			return false
+	attrKey, attrBase := authAPIKeyCredentials(auth)
+	if authHasConfigIndex(auth) {
+		if entry := configEntryForAuthIndex(auth, entries); entry != nil && configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+			return entry
 		}
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" {
-			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
+		for i := range entries {
+			entry := &entries[i]
+			if configAPIKeyMatchesConfigAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
+				return entry
+			}
 		}
-		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
-	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
-		return entry
+		return nil
 	}
 	for i := range entries {
-		if entry := &entries[i]; matchesCredentials(entry) {
+		entry := &entries[i]
+		if configAPIKeyMatchesLegacyAuth(entry.APIKey, entry.BaseURL, attrKey, attrBase) {
 			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if strings.TrimSpace(entry.APIKey) == attrKey && strings.TrimSpace(entry.BaseURL) == "" {
+				return entry
+			}
 		}
 	}
 	return nil
@@ -652,6 +751,58 @@ func oauthExcludedModelsForConfig(cfg *config.Config, provider, authKind string)
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func applyModelNamespace(model *ModelInfo, provider, nativeID, routeID string) {
+	prefix := provider + "/"
+	model.ID = prefix + routeID
+	model.SourceModelID = prefix + nativeID
+	model.MetadataModelID = nativeID
+}
+
+func setCopilotModelDisplayName(model *ModelInfo, nativeID string) {
+	displayName := strings.TrimSpace(model.DisplayName)
+	if displayName == "" {
+		displayName = nativeID
+	}
+	const suffix = " (Copilot)"
+	model.DisplayName = strings.TrimSuffix(displayName, suffix) + suffix
+}
+
+func (s *Service) copilotPluginExecutes() bool {
+	if s.pluginHost == nil || s.coreManager == nil {
+		return false
+	}
+	exec, _ := s.coreManager.Executor("copilot")
+	return s.pluginHost.OwnsExecutor(exec)
+}
+
+func (s *Service) copilotPublicPluginModels(auth *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	var out []*ModelInfo
+	catalog := auth.ActiveCopilotCatalog(time.Now())
+	pluginExecutes := s.copilotPluginExecutes()
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		// Plugins can declare either a native ID or an already qualified route.
+		// Keep exact route suffixes public, but use the base as the native ID.
+		routeID := strings.TrimPrefix(strings.TrimSpace(model.ID), "copilot/")
+		nativeID := strings.TrimSpace(thinking.ParseSuffix(routeID).ModelName)
+		if nativeID == "" {
+			continue
+		}
+		if _, available := catalog.Route(nativeID); pluginExecutes || available {
+			clone := *model
+			setCopilotModelDisplayName(&clone, nativeID)
+			applyModelNamespace(&clone, "copilot", nativeID, routeID)
+			out = append(out, &clone)
+		}
+	}
+	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
@@ -675,9 +826,10 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 			continue
 		}
 		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		sourceID := strings.ToLower(strings.TrimSpace(model.SourceModelID))
 		blocked := false
 		for _, pattern := range patterns {
-			if matchWildcard(pattern, modelID) {
+			if modelconfig.MatchExcludedModelPattern(pattern, modelID) || (sourceID != "" && sourceID != modelID && modelconfig.MatchExcludedModelPattern(pattern, sourceID)) {
 				blocked = true
 				break
 			}
@@ -706,6 +858,17 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 	trimmedPrefix := strings.TrimSpace(prefix)
 	if trimmedPrefix == "" || len(models) == 0 {
 		return models
+	}
+
+	// A published name can already contain the credential prefix. Preserve
+	// that route when an optional prefixed copy would have the same name.
+	explicitNames := make(map[string]struct{})
+	if !forceModelPrefix {
+		for _, model := range models {
+			if model != nil && model.SourceModelID != "" {
+				explicitNames[strings.TrimSpace(model.ID)] = struct{}{}
+			}
+		}
 	}
 
 	out := make([]*ModelInfo, 0, len(models)*2)
@@ -737,63 +900,21 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		if !forceModelPrefix || trimmedPrefix == baseID {
 			addModel(model)
 		}
+		prefixedID := trimmedPrefix + "/" + baseID
+		if _, exists := explicitNames[prefixedID]; exists {
+			continue
+		}
 		clone := cloneModelInfoForCatalogRoute(model)
-		clone.ID = trimmedPrefix + "/" + baseID
+		clone.ID = prefixedID
 		if clone.MetadataModelID == "" {
 			clone.MetadataModelID = baseID
 		}
 		if clone.Name != "" {
 			clone.Name = rewriteModelInfoName(clone.Name, baseID, clone.ID)
 		}
-		clone.ExplicitThinking = model.ExplicitThinking
-		clone.ExplicitInputModalities = model.ExplicitInputModalities
 		addModel(&clone)
 	}
 	return out
-}
-
-// matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.
-func matchWildcard(pattern, value string) bool {
-	if pattern == "" {
-		return false
-	}
-
-	// Fast path for exact match (no wildcard present).
-	if !strings.Contains(pattern, "*") {
-		return pattern == value
-	}
-
-	parts := strings.Split(pattern, "*")
-	// Handle prefix.
-	if prefix := parts[0]; prefix != "" {
-		if !strings.HasPrefix(value, prefix) {
-			return false
-		}
-		value = value[len(prefix):]
-	}
-
-	// Handle suffix.
-	if suffix := parts[len(parts)-1]; suffix != "" {
-		if !strings.HasSuffix(value, suffix) {
-			return false
-		}
-		value = value[:len(value)-len(suffix)]
-	}
-
-	// Handle middle segments in order.
-	for i := 1; i < len(parts)-1; i++ {
-		segment := parts[i]
-		if segment == "" {
-			continue
-		}
-		idx := strings.Index(value, segment)
-		if idx < 0 {
-			return false
-		}
-		value = value[idx+len(segment):]
-	}
-
-	return true
 }
 
 type modelEntry interface {
@@ -1313,13 +1434,11 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			seen[mappedID] = struct{}{}
 			clone := cloneModelInfoForCatalogRoute(model)
 			clone.ID = mappedID
-			if model.MetadataModelID != "" {
-				clone.MetadataModelID = model.MetadataModelID
-			} else {
+			clone.OAuthAlias = mappedID
+			clone.OAuthAliasSource = id
+			if clone.MetadataModelID == "" {
 				clone.MetadataModelID = id
 			}
-			clone.ExplicitThinking = model.ExplicitThinking
-			clone.ExplicitInputModalities = model.ExplicitInputModalities
 			if entry.displayName != "" {
 				clone.DisplayName = entry.displayName
 			}
@@ -1376,7 +1495,7 @@ func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*Mod
 		if model == nil {
 			continue
 		}
-		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name)
+		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name, model.SourceModelID)
 		if setting != nil && setting.MaxContextLength > 0 {
 			clone := *model
 			clone.ContextLength = setting.MaxContextLength

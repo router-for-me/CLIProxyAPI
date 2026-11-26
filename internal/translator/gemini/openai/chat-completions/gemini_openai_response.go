@@ -51,6 +51,74 @@ func geminiOpenAIToolThoughtSignature(raw string) string {
 	return signature
 }
 
+// geminiOpenAISanitizedToolNameMap builds the sanitized-name -> original-name map
+// matching the effective function tool declarations emitted by ConvertOpenAIRequestToGemini
+// (including tool_choice.allowed_tools filtering and collision exclusion), while also
+// accepting legacy top-level tool declarations without a type field.
+func geminiOpenAISanitizedToolNameMap(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !ojson.ValidBytes(rawJSON) {
+		return nil
+	}
+	tools := ojson.GetBytesNoCopy(rawJSON, "tools")
+	if !tools.IsArray() {
+		return nil
+	}
+
+	allowedToolNames, isAllowedTools, _ := parseGeminiOpenAIAllowedTools(rawJSON)
+	sanitizedToOriginal := make(map[string]string)
+	collided := make(map[string]bool)
+
+	recordName := func(originalName string) {
+		if originalName == "" {
+			return
+		}
+		if isAllowedTools {
+			if _, ok := allowedToolNames[originalName]; !ok {
+				return
+			}
+		}
+		sanitizedName := util.SanitizeFunctionName(originalName)
+		if sanitizedName == "" {
+			return
+		}
+		if existing, exists := sanitizedToOriginal[sanitizedName]; exists {
+			if existing != originalName {
+				collided[sanitizedName] = true
+			}
+			return
+		}
+		sanitizedToOriginal[strings.Clone(sanitizedName)] = strings.Clone(originalName)
+	}
+
+	tools.ForEach(func(_, t ojson.Result) bool {
+		toolType := t.Get("type").String()
+		if toolType == "function" {
+			if fn := t.Get("function"); fn.Exists() && fn.IsObject() {
+				recordName(fn.Get("name").String())
+			}
+			return true
+		}
+		if toolType == "" {
+			if name := strings.TrimSpace(t.Get("name").String()); name != "" {
+				recordName(name)
+			}
+		}
+		return true
+	})
+
+	var out map[string]string
+	for sanitizedName, originalName := range sanitizedToOriginal {
+		if collided[sanitizedName] || sanitizedName == originalName {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[sanitizedName] = originalName
+	}
+	return out
+}
+
 // ConvertGeminiResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini event types and transforms them into OpenAI-compatible JSON responses.
@@ -74,7 +142,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			SawToolCall:              make(map[int]bool),
 			SawFinishReason:          make(map[int]bool),
 			UpstreamFinishReason:     make(map[int]string),
-			SanitizedNameMap:         util.SanitizedToolNameMap(originalRequestRawJSON),
+			SanitizedNameMap:         geminiOpenAISanitizedToolNameMap(originalRequestRawJSON),
 			SanitizedNameMapResolved: true,
 		}
 	}
@@ -104,7 +172,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	}
 	if !p.SanitizedNameMapResolved {
 		if p.SanitizedNameMap == nil {
-			p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+			p.SanitizedNameMap = geminiOpenAISanitizedToolNameMap(originalRequestRawJSON)
 		}
 		p.SanitizedNameMapResolved = true
 	}
@@ -128,21 +196,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		for _, idx := range indices {
 			p.SawFinishReason[idx] = true
 			finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(p.UpstreamFinishReason[idx], p.SawToolCall[idx])
-			templateDoc := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
-			_ = templateDoc.Set("created", p.UnixTimestamp)
-			if p.ModelVersion != "" {
-				_ = templateDoc.Set("model", p.ModelVersion)
-			}
-			if p.ResponseID != "" {
-				_ = templateDoc.Set("id", p.ResponseID)
-			}
+			var pendingUsage ojson.Result
 			if len(p.PendingUsageMetadata) > 0 {
-				applyGeminiOpenAIUsageMetadataDoc(templateDoc, util.ParseGJSONBytesNoCopy(p.PendingUsageMetadata))
+				pendingUsage = util.ParseGJSONBytesNoCopy(p.PendingUsageMetadata)
 			}
-			_ = templateDoc.Set("choices.0.index", idx)
-			_ = templateDoc.Set("choices.0.finish_reason", finishReason)
-			_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
-			doneChunks = append(doneChunks, templateDoc.Bytes())
+			terminalDoc := buildGeminiOpenAITerminalChunkDoc(p, idx, finishReason, nativeFinishReason, pendingUsage)
+			doneChunks = append(doneChunks, terminalDoc.Bytes())
 		}
 		return doneChunks
 	}
@@ -178,12 +237,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		_ = baseDoc.Set("id", p.ResponseID)
 	}
 
-	// Extract and set usage metadata (token counts).
-	// Usage is applied to the base template so it appears in the chunks.
+	// Extract usage metadata (token counts). Apply it per emitted chunk below so
+	// split terminal frames attach usage only to the final chunk.
 	usageResult := ojson.GetBytesNoCopy(rawJSON, "usageMetadata")
 	usageExists := usageResult.Exists()
 	if usageExists {
-		applyGeminiOpenAIUsageMetadataDoc(baseDoc, usageResult)
 		p.PendingUsageMetadata = nil
 	} else if pendingUsage := ojson.GetBytesNoCopy(rawJSON, "cpaUsageMetadata"); pendingUsage.Exists() {
 		p.PendingUsageMetadata = append(p.PendingUsageMetadata[:0], pendingUsage.Raw...)
@@ -204,8 +262,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			candidateIndex := int(candidate.Get("index").Int())
 			_ = templateDoc.Set("choices.0.index", candidateIndex)
 
-			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				p.UpstreamFinishReason[candidateIndex] = strings.Clone(strings.ToUpper(finishReasonResult.String()))
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Type == ojson.String {
+				if reason := strings.TrimSpace(finishReasonResult.String()); reason != "" {
+					p.UpstreamFinishReason[candidateIndex] = strings.Clone(strings.ToUpper(reason))
+				}
 			}
 
 			partsResult := candidate.Get("content.parts")
@@ -213,6 +273,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			sawNoopFunctionCall := false
 			toolCallsInitialized := false
 			imagesCount := 0
+			hasNonEmptyDelta := false
 			setAssistantRole := func() {
 				if assistantRoleSet {
 					return
@@ -248,7 +309,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				hasReasoningContent := false
 				for i := 0; i < len(partResults); i++ {
 					partResult := partResults[i]
-					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription") {
+					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription", "audio_transcription") {
 						delete(p.LastToolCallIndex, candidateIndex)
 						if p.ActiveToolCall[candidateIndex] != nil {
 							p.HasIncompleteToolCall[candidateIndex] = true
@@ -271,6 +332,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					// Speech-to-text models (gemini-3.5-transcribe) deliver the
 					// transcript in an audioTranscription part instead of text.
 					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if !audioTranscriptionResult.Exists() {
+						audioTranscriptionResult = partResult.Get("audio_transcription")
+					}
 					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
 						partTextResult = audioTranscriptionResult.Get("text")
 					}
@@ -390,7 +454,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 								p.ActiveToolCall[candidateIndex] = nil
 							}
 							rawName := strings.TrimSpace(functionCallResult.Get("name").String())
-							if rawName == "" && !functionCallResult.Get("args").Exists() {
+							if rawName == "" && !functionCallResult.Get("args").IsObject() {
 								appendToolSignature(thoughtSignature)
 								sawNoopFunctionCall = true
 								continue
@@ -404,7 +468,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 							ensureToolCallsArray()
 
-							fcDoc := ojson.NewDocString(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":""}}`)
+							fcDoc := ojson.NewDocString(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":"{}"}}`)
 							fcName := util.RestoreSanitizedToolName(p.SanitizedNameMap, rawName)
 							fcID := strings.TrimSpace(functionCallResult.Get("id").String())
 							if fcID == "" {
@@ -413,7 +477,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 							_ = fcDoc.Set("id", fcID)
 							_ = fcDoc.Set("index", functionCallIndex)
 							_ = fcDoc.Set("function.name", fcName)
-							if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+							if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.IsObject() {
 								_ = fcDoc.Set("function.arguments", fcArgsResult.Raw)
 							}
 							if thoughtSignature != "" {
@@ -463,21 +527,37 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				if hasReasoningContent {
 					_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
 				}
+				hasNonEmptyDelta = textContent.Len() > 0 || reasoningContent.Len() > 0 || toolCallsInitialized || imagesCount > 0
 			}
 
 			upstreamFinishReason := p.UpstreamFinishReason[candidateIndex]
 			sawToolCall := p.SawToolCall[candidateIndex]
-			isFinalChunk := upstreamFinishReason != "" && usageExists && p.ActiveToolCall[candidateIndex] == nil && !p.HasIncompleteToolCall[candidateIndex]
+			isFinalChunk := !p.SawFinishReason[candidateIndex] && upstreamFinishReason != "" && usageExists && p.ActiveToolCall[candidateIndex] == nil && !p.HasIncompleteToolCall[candidateIndex]
 
 			if isFinalChunk {
 				p.SawFinishReason[candidateIndex] = true
 				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, sawToolCall)
-				_ = templateDoc.Set("choices.0.finish_reason", finishReason)
-				_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+				terminalDoc := buildGeminiOpenAITerminalChunkDoc(p, candidateIndex, finishReason, nativeFinishReason, usageResult)
+				if hasNonEmptyDelta {
+					// Strict Chat Completions parsers reject chunks that combine a delta payload
+					// with a non-null finish_reason, so emit the payload chunk first and finish
+					// the choice in a dedicated terminal chunk.
+					responseStrings = append(responseStrings, templateDoc.Bytes())
+				}
+				responseStrings = append(responseStrings, terminalDoc.Bytes())
+				return true
 			}
 
-			if sawNoopFunctionCall && !assistantRoleSet && !isFinalChunk && !usageExists {
+			if p.SawFinishReason[candidateIndex] && !hasNonEmptyDelta {
 				return true
+			}
+
+			if sawNoopFunctionCall && !assistantRoleSet && !usageExists {
+				return true
+			}
+
+			if usageExists {
+				applyGeminiOpenAIUsageMetadataDoc(templateDoc, usageResult)
 			}
 
 			responseStrings = append(responseStrings, templateDoc.Bytes())
@@ -489,18 +569,35 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			if upstreamFinishReason := p.UpstreamFinishReason[0]; upstreamFinishReason != "" && !p.SawFinishReason[0] && p.ActiveToolCall[0] == nil && !p.HasIncompleteToolCall[0] {
 				p.SawFinishReason[0] = true
 				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, p.SawToolCall[0])
+				terminalDoc := buildGeminiOpenAITerminalChunkDoc(p, 0, finishReason, nativeFinishReason, usageResult)
+				responseStrings = append(responseStrings, terminalDoc.Bytes())
+			} else if !p.SawFinishReason[0] {
 				chunkDoc := ojson.NewDoc(baseTemplate)
-				_ = chunkDoc.Set("choices.0.finish_reason", finishReason)
-				_ = chunkDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+				applyGeminiOpenAIUsageMetadataDoc(chunkDoc, usageResult)
 				responseStrings = append(responseStrings, chunkDoc.Bytes())
-			} else {
-				chunk := append([]byte(nil), baseTemplate...)
-				responseStrings = append(responseStrings, chunk)
 			}
 		}
 	}
 
 	return responseStrings
+}
+
+func buildGeminiOpenAITerminalChunkDoc(p *convertGeminiResponseToOpenAIChatParams, candidateIndex int, finishReason, nativeFinishReason string, usageResult ojson.Result) *ojson.Doc {
+	terminalDoc := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":null,"native_finish_reason":null}]}`)
+	_ = terminalDoc.Set("created", p.UnixTimestamp)
+	if p.ModelVersion != "" {
+		_ = terminalDoc.Set("model", p.ModelVersion)
+	}
+	if p.ResponseID != "" {
+		_ = terminalDoc.Set("id", p.ResponseID)
+	}
+	if usageResult.Exists() {
+		applyGeminiOpenAIUsageMetadataDoc(terminalDoc, usageResult)
+	}
+	_ = terminalDoc.Set("choices.0.index", candidateIndex)
+	_ = terminalDoc.Set("choices.0.finish_reason", finishReason)
+	_ = terminalDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+	return terminalDoc
 }
 
 // ConvertGeminiResponseToOpenAINonStream converts a non-streaming Gemini response to a non-streaming OpenAI response.
@@ -517,7 +614,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	sanitizedNameMap := geminiOpenAISanitizedToolNameMap(originalRequestRawJSON)
 	var unixTimestamp int64
 	// Initialize template with an empty choices array to support multiple candidates.
 	templateDoc := ojson.NewDocString(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[]}`)
@@ -572,15 +669,17 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			_ = choiceDoc.Set("index", candidate.Get("index").Int())
 
 			// Set finish reason.
-			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				finishReason := strings.ToLower(finishReasonResult.String())
-				if strings.EqualFold(strings.TrimSpace(finishReasonResult.String()), "MAX_TOKENS") {
-					finishReason = "length"
-				} else if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
-					finishReason = "content_filter"
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Type == ojson.String {
+				if rawReason := strings.TrimSpace(finishReasonResult.String()); rawReason != "" {
+					finishReason := strings.ToLower(rawReason)
+					if strings.EqualFold(rawReason, "MAX_TOKENS") {
+						finishReason = "length"
+					} else if isGeminiContentFilterFinishReason(rawReason) {
+						finishReason = "content_filter"
+					}
+					_ = choiceDoc.Set("finish_reason", finishReason)
+					_ = choiceDoc.Set("native_finish_reason", strings.ToLower(rawReason))
 				}
-				_ = choiceDoc.Set("finish_reason", finishReason)
-				_ = choiceDoc.Set("native_finish_reason", strings.ToLower(finishReasonResult.String()))
 			}
 
 			partsResult := candidate.Get("content.parts")
@@ -597,7 +696,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 				for i := 0; i < len(partsResults); i++ {
 					partResult := partsResults[i]
-					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription") {
+					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription", "audio_transcription") {
 						lastToolCall = nil
 						continue
 					}
@@ -615,6 +714,9 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					// Speech-to-text models (gemini-3.5-transcribe) deliver the
 					// transcript in an audioTranscription part instead of text.
 					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if !audioTranscriptionResult.Exists() {
+						audioTranscriptionResult = partResult.Get("audio_transcription")
+					}
 					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
 						partTextResult = audioTranscriptionResult.Get("text")
 					}
@@ -646,7 +748,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					} else if functionCallResult.Exists() {
 						// Append function call content to the tool_calls array.
 						hasFunctionCall = true
-						fcItemDoc := ojson.NewDocString(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+						fcItemDoc := ojson.NewDocString(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
 						fcName := util.RestoreSanitizedToolName(sanitizedNameMap, functionCallResult.Get("name").String())
 						fcID := strings.TrimSpace(functionCallResult.Get("id").String())
 						if fcID == "" {
@@ -654,7 +756,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						}
 						_ = fcItemDoc.Set("id", fcID)
 						_ = fcItemDoc.Set("function.name", fcName)
-						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.IsObject() {
 							_ = fcItemDoc.Set("function.arguments", fcArgsResult.Raw)
 						}
 						if signature := geminiOpenAIToolThoughtSignature(thoughtSignatureResult.String()); signature != "" {

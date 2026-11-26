@@ -15,32 +15,57 @@ type SchedulerContext struct {
 }
 
 type schedulerContextKey struct{}
+type executorPluginsContextKey struct{}
 
 // WithSchedulerContext carries request-scoped scheduling inputs through legacy dispatcher interfaces.
 func WithSchedulerContext(ctx context.Context, input SchedulerContext) context.Context {
 	return context.WithValue(ctx, schedulerContextKey{}, input)
 }
 
+// WithExecutorPlugins carries the ready plugin IDs and their supported auth providers.
+func WithExecutorPlugins(ctx context.Context, plugins map[string][]string) context.Context {
+	return context.WithValue(ctx, executorPluginsContextKey{}, plugins)
+}
+
 type authDispatchRequest struct {
-	SchedulerContext    *SchedulerContext `json:"scheduler_context,omitempty"`
-	Type                string            `json:"type"`
-	Model               string            `json:"model"`
-	Count               int               `json:"count"`
-	ConcurrencyProtocol int               `json:"concurrency_protocol,omitempty"`
-	SessionID           string            `json:"session_id,omitempty"`
-	ParentSessionID     string            `json:"parent_session_id,omitempty"`
-	NodeKind            string            `json:"node_kind,omitempty"`
-	Headers             map[string]string `json:"headers,omitempty"`
-	CredentialPolicy    string            `json:"credential_policy,omitempty"`
-	RetryRound          *int              `json:"retry_round,omitempty"`
-	ExcludedAuthIDs     *[]string         `json:"excluded_auth_ids,omitempty"`
-	PinnedAuthID        string            `json:"pinned_auth_id,omitempty"`
+	SchedulerContext    *SchedulerContext   `json:"scheduler_context,omitempty"`
+	Type                string              `json:"type"`
+	Model               string              `json:"model"`
+	Count               int                 `json:"count"`
+	ConcurrencyProtocol int                 `json:"concurrency_protocol,omitempty"`
+	ExecutorPlugins     map[string][]string `json:"executor_plugins,omitzero"`
+	SessionID           string              `json:"session_id,omitempty"`
+	ParentSessionID     string              `json:"parent_session_id,omitempty"`
+	NodeKind            string              `json:"node_kind,omitempty"`
+	Headers             map[string]string   `json:"headers,omitempty"`
+	CredentialPolicy    string              `json:"credential_policy,omitempty"`
+	RetryRound          *int                `json:"retry_round,omitempty"`
+	ExcludedAuthIDs     *[]string           `json:"excluded_auth_ids,omitempty"`
+	PinnedAuthID        string              `json:"pinned_auth_id,omitempty"`
 }
 
 type modelsRequest struct {
 	Type    string            `json:"type"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Query   map[string]string `json:"query,omitempty"`
+	Model   string            `json:"model,omitempty"`
+}
+
+const LocalExecutorDispatchKind = "local-plugin"
+
+// LocalExecutorDecision is the Home reply for a credential-free plugin route.
+type LocalExecutorDecision struct {
+	Kind         string `json:"kind"`
+	Plugin       string `json:"plugin"`
+	Version      string `json:"version"`
+	ConfigDigest string `json:"config_digest"`
+	Model        string `json:"model"`
+	Principal    string `json:"principal"`
+	Access       string `json:"access_provider"`
+	Error        *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 type refreshRequest struct {

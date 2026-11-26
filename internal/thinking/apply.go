@@ -2,6 +2,7 @@
 package thinking
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 
@@ -316,6 +317,14 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
+	if (isOpenAIFamily(providerFormat) || providerFormat == "xai") && !isPluginApplier && detectModelCapability(modelInfo) == CapabilityHybrid {
+		// OpenAI Chat/Responses and xAI appliers accept effort levels only.
+		// Keep the original budget range in the model catalog.
+		levelModel, levelSupport := *modelInfo, *modelInfo.Thinking
+		levelSupport.Min, levelSupport.Max = 0, 0
+		levelModel.Thinking = &levelSupport
+		modelInfo = &levelModel
+	}
 	if nativeResponses {
 		normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
 		modified = modified || normalized
@@ -348,7 +357,7 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 		}
 		return modified, nil
 	}
-	if !isPluginApplier && fromFormat == "claude" && providerFormat == "claude" && !suffixResult.HasSuffix && (!docValid || !doc.Get("thinking").Exists()) {
+	if !isPluginApplier && fromFormat == "claude" && providerFormat == "claude" && !suffixResult.HasSuffix && (!docValid || !doc.Get("thinking").Exists() || doc.Get("thinking").Type == ojson.Null) {
 		// Native Claude effort is independent of thinking activation.
 		if applySummaryConfigForProviderDoc(doc, docValid, providerFormat, baseModel, providerKey, modelInfo, summaryConfig) {
 			modified = true
@@ -360,22 +369,39 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 		return modified || userMod, errUser
 	}
 	if modelInfo.Thinking == nil {
+		if responseTarget {
+			if stripResponsesEffortDoc(doc, docValid) {
+				log.WithFields(log.Fields{
+					"model":    baseModel,
+					"provider": providerFormat,
+				}).Debug("thinking: model does not support thinking, stripping config |")
+				return true, nil
+			}
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    baseModel,
+			}).Debug("thinking: model does not support thinking, passthrough |")
+			return modified, nil
+		}
 		config := extractThinkingConfigDoc(doc, docValid, providerFormat)
-		if hasThinkingConfig(config) || summaryConfig.Mode != SummaryUnspecified {
+		hasRawThinkingField := docValid && ((providerFormat == "claude" && doc.Get("thinking").Exists()) ||
+			(providerFormat == "openai" && doc.Get("reasoning_effort").Exists()))
+		if hasThinkingConfig(config) || summaryConfig.Mode != SummaryUnspecified || hasRawThinkingField {
 			log.WithFields(log.Fields{
 				"model":    baseModel,
 				"provider": providerFormat,
 			}).Debug("thinking: model does not support thinking, stripping config |")
-			if responseTarget {
-				if stripResponsesEffortDoc(doc, docValid) {
-					modified = true
-				}
-				return modified, nil
-			}
 			if docValid && stripThinkingFieldsDoc(doc, providerFormat) {
 				modified = true
 			}
 			return modified, nil
+		}
+		if docValid && (providerFormat == "gemini" || providerFormat == "antigravity" || providerFormat == "interactions") && stripThinkingFieldsDoc(doc, providerFormat) {
+			log.WithFields(log.Fields{
+				"model":    baseModel,
+				"provider": providerFormat,
+			}).Debug("thinking: model does not support thinking, stripping config |")
+			return true, nil
 		}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -478,7 +504,7 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	if errApply != nil {
 		return modified, errApply
 	}
-	if thinkingIsFullyDisabled(*validated) || nativeResponses {
+	if thinkingIsFullyDisabled(*validated) || nativeResponses || (!isPluginApplier && thinkingConfigRemovedByApplierDoc(providerFormat, doc, docValid)) {
 		return modified, nil
 	}
 	if providerFormat == "claude" && thinkingRequestedOff(config) {
@@ -516,6 +542,16 @@ func invokeProviderApplierOnDoc(applier ProviderApplier, doc *ojson.Doc, docVali
 
 func thinkingIsFullyDisabled(config ThinkingConfig) bool {
 	return config.Mode == ModeNone && config.Budget == 0 && config.Level == ""
+}
+
+func thinkingConfigRemovedByApplierDoc(providerFormat string, doc *ojson.Doc, docValid bool) bool {
+	if doc == nil || !docValid {
+		return false
+	}
+	if providerFormat == "antigravity" {
+		return !doc.Get("request.generationConfig.thinkingConfig").Exists()
+	}
+	return false
 }
 
 func thinkingRequestedOff(config ThinkingConfig) bool {
@@ -576,7 +612,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		}
 	}
 
-	// 2. Try level parsing (minimal, low, medium, high, xhigh)
+	// 2. Try level parsing (minimal, low, medium, high, xhigh, max)
 	if level, ok := ParseLevelSuffix(rawSuffix); ok {
 		return ThinkingConfig{Mode: ModeLevel, Level: level}
 	}
@@ -652,6 +688,11 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	}
 
 	if !isPluginApplier {
+		if modelInfo != nil && modelInfo.Thinking != nil {
+			if normalized, errValidate := ValidateConfig(config, modelInfo, fromFormat, toFormat, suffixResult.HasSuffix); errValidate == nil {
+				config = *normalized
+			}
+		}
 		config = normalizeUserDefinedConfig(config, modelInfo, fromFormat, toFormat)
 	}
 	log.WithFields(log.Fields{
@@ -665,7 +706,7 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	if err != nil {
 		return modified, err
 	}
-	if thinkingIsFullyDisabled(config) || nativeResponses {
+	if thinkingIsFullyDisabled(config) || nativeResponses || (!isPluginApplier && thinkingConfigRemovedByApplierDoc(toFormat, doc, docValid)) {
 		return modified, nil
 	}
 	if applySummaryConfigForProviderDoc(doc, docValid, toFormat, modelID, providerKey, modelInfo, summaryConfig) {
@@ -737,6 +778,43 @@ func extractThinkingConfigFromGetter(get func(string) ojson.Result, provider str
 
 func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
+}
+
+// RequestedAntigravityThinkingLevel returns the explicit discrete thinking intent before
+// applying model defaults, validation, or clamping. Numeric budgets use the
+// canonical budget conversion. An explicit suffix always takes precedence.
+func RequestedAntigravityThinkingLevel(body []byte, provider, model string) ThinkingLevel {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	var config ThinkingConfig
+	if suffix := ParseSuffix(model); suffix.HasSuffix {
+		config = parseSuffixToConfig(strings.TrimSpace(suffix.RawSuffix), provider, model)
+		if !hasThinkingConfig(config) {
+			// A catalog may advertise a discrete level the static parser does not know yet.
+			config = ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(suffix.RawSuffix)}
+		}
+	} else {
+		switch provider {
+		case "openai":
+			config = extractAntigravityOpenAIThinking(body)
+		case "interactions":
+			config = extractAntigravityInteractionsThinking(body)
+		default:
+			config = extractThinkingConfigForUsage(body, provider)
+		}
+	}
+	switch config.Mode {
+	case ModeLevel:
+		level := ThinkingLevel(strings.ToLower(strings.TrimSpace(string(config.Level))))
+		if level != LevelAuto && level != LevelNone {
+			return level
+		}
+	case ModeBudget:
+		if config.Budget > 0 {
+			level, _ := ConvertBudgetToLevel(config.Budget)
+			return ThinkingLevel(level)
+		}
+	}
+	return ""
 }
 
 // ExtractReasoningEffort returns the source request's thinking setting as a
@@ -820,7 +898,7 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 	case ModeAuto:
 		return string(LevelAuto)
 	case ModeLevel:
-		return strings.ToLower(strings.TrimSpace(string(config.Level)))
+		return strings.Clone(strings.ToLower(strings.TrimSpace(string(config.Level))))
 	case ModeBudget:
 		level, ok := ConvertBudgetToLevel(config.Budget)
 		if !ok {
@@ -839,11 +917,12 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 }
 
 func extractClaudeConfigFromGetter(get func(string) ojson.Result) ThinkingConfig {
+	thinkingNode := get("thinking")
 	thinkingType := get("thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	}
-	if !get("thinking").Exists() || thinkingType == "adaptive" || thinkingType == "auto" {
+	if !thinkingNode.Exists() || thinkingNode.Type == ojson.Null || thinkingType == "adaptive" || thinkingType == "auto" {
 		if effort := get("output_config.effort"); effort.Exists() && effort.Type == ojson.String {
 			value := strings.ToLower(strings.TrimSpace(effort.String()))
 			if value == "" {
@@ -861,7 +940,7 @@ func extractClaudeConfigFromGetter(get func(string) ojson.Result) ThinkingConfig
 		return ThinkingConfig{}
 	}
 
-	if budget := get("thinking.budget_tokens"); budget.Exists() {
+	if budget := get("thinking.budget_tokens"); budget.Type == ojson.Number {
 		value := int(budget.Int())
 		switch value {
 		case 0:
@@ -900,32 +979,66 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 }
 
 func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider string) ThinkingConfig {
-	prefix := "generationConfig.thinkingConfig"
+	prefixes := []string{
+		"generationConfig.thinkingConfig",
+		"generationConfig.thinking_config",
+		"generation_config.thinking_config",
+		"generation_config.thinkingConfig",
+	}
 	if provider == "antigravity" {
-		prefix = "request.generationConfig.thinkingConfig"
-	}
-
-	level := get(prefix + ".thinkingLevel")
-	if !level.Exists() {
-		level = get(prefix + ".thinking_level")
-	}
-	if level.Exists() {
-		value := level.String()
-		switch value {
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		prefixes = []string{
+			"request.generationConfig.thinkingConfig",
+			"request.generationConfig.thinking_config",
+			"request.generation_config.thinking_config",
+			"request.generation_config.thinkingConfig",
 		}
 	}
 
-	budget := get(prefix + ".thinkingBudget")
-	if !budget.Exists() {
-		budget = get(prefix + ".thinking_budget")
+	var level, budget ojson.Result
+	for _, prefix := range prefixes {
+		if level.Type != ojson.String || strings.TrimSpace(level.String()) == "" {
+			if v := get(prefix + ".thinkingLevel"); v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+				level = v
+			} else if v = get(prefix + ".thinking_level"); v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+				level = v
+			}
+		}
+		if budget.Type != ojson.Number {
+			if v := get(prefix + ".thinkingBudget"); v.Type == ojson.Number {
+				budget = v
+			} else if v = get(prefix + ".thinking_budget"); v.Type == ojson.Number {
+				budget = v
+			}
+		}
 	}
-	if budget.Exists() {
+	return geminiThinkingConfigFromValues(level, budget)
+}
+
+func thinkingConfigFromLevelString(raw string) ThinkingConfig {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ThinkingConfig{}
+	}
+	lower := strings.ToLower(trimmed)
+	switch lower {
+	case "none":
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	case "auto":
+		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+	}
+	if _, ok := ConvertLevelToBudget(lower); ok {
+		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(lower)}
+	}
+	return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(trimmed)}
+}
+
+func geminiThinkingConfigFromValues(level, budget ojson.Result) ThinkingConfig {
+	if level.Type == ojson.String {
+		if cfg := thinkingConfigFromLevelString(level.String()); hasThinkingConfig(cfg) {
+			return cfg
+		}
+	}
+	if budget.Type == ojson.Number {
 		value := int(budget.Int())
 		switch value {
 		case 0:
@@ -954,12 +1067,21 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinking_config.thinkingLevel",
 		"generation_config.thinkingConfig.thinking_level",
 		"generation_config.thinkingConfig.thinkingLevel",
+		"generationConfig.thinking_level",
+		"generationConfig.thinkingLevel",
+		"generationConfig.thinking_config.thinking_level",
+		"generationConfig.thinking_config.thinkingLevel",
+		"generationConfig.thinkingConfig.thinking_level",
+		"generationConfig.thinkingConfig.thinkingLevel",
 	} {
 		level := get(path)
-		if !level.Exists() {
+		if level.Type != ojson.String {
 			continue
 		}
 		value := strings.ToLower(strings.TrimSpace(level.String()))
+		if value == "" {
+			continue
+		}
 		switch value {
 		case "none":
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -977,12 +1099,17 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinking_config.thinkingBudget",
 		"generation_config.thinkingConfig.thinking_budget",
 		"generation_config.thinkingConfig.thinkingBudget",
+		"generationConfig.thinking_budget",
+		"generationConfig.thinkingBudget",
+		"generationConfig.thinking_config.thinking_budget",
+		"generationConfig.thinking_config.thinkingBudget",
+		"generationConfig.thinkingConfig.thinking_budget",
+		"generationConfig.thinkingConfig.thinkingBudget",
 	} {
-		budget := get(path)
-		if !budget.Exists() {
+		value, ok := parseInteractionsBudgetValue(get(path))
+		if !ok {
 			continue
 		}
-		value := int(budget.Int())
 		switch value {
 		case 0:
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -996,6 +1123,25 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 	return ThinkingConfig{}
 }
 
+func parseInteractionsBudgetValue(budget ojson.Result) (int, bool) {
+	switch budget.Type {
+	case ojson.Number:
+		return int(budget.Int()), true
+	case ojson.String:
+		raw := strings.TrimSpace(budget.String())
+		if raw == "" {
+			return 0, false
+		}
+		value, errParse := strconv.Atoi(raw)
+		if errParse != nil {
+			return 0, false
+		}
+		return value, true
+	default:
+		return 0, false
+	}
+}
+
 func extractOpenAIConfig(body []byte) ThinkingConfig {
 	return extractOpenAIConfigFromGetter(func(path string) ojson.Result {
 		return ojson.GetBytesNoCopy(body, path)
@@ -1003,14 +1149,12 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 }
 
 func extractOpenAIConfigFromGetter(get func(string) ojson.Result) ThinkingConfig {
-	if effort := get("reasoning_effort"); effort.Exists() {
-		value := effort.String()
-		if value == "none" {
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	if effort := get("reasoning_effort"); effort.Type == ojson.String {
+		if cfg := thinkingConfigFromLevelString(effort.String()); hasThinkingConfig(cfg) {
+			return cfg
 		}
-		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
-	return ThinkingConfig{}
+	return extractOpenAIGoogleThinkingFallbackConfigFromGetter(get)
 }
 
 func extractKimiConfig(body []byte) ThinkingConfig {
@@ -1060,12 +1204,8 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 }
 
 func extractCodexConfigFromGetter(get func(string) ojson.Result) ThinkingConfig {
-	if effort := get("reasoning.effort"); effort.Exists() {
-		value := effort.String()
-		if value == "none" {
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		}
-		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	if effort := get("reasoning.effort"); effort.Type == ojson.String {
+		return thinkingConfigFromLevelString(effort.String())
 	}
 	return ThinkingConfig{}
 }

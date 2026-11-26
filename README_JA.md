@@ -84,10 +84,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>Swiftproxyは、世界220以上の国と地域をカバーする9,000万以上のクリーンな住宅IPを提供し、HTTP(S)/SOCKS5、IPローテーション、Sticky Session、詳細な地域指定に対応しています。AI APIツールや自動化ワークフローが異なる地域からオンラインサービスへ安定してアクセスできるよう支援し、APIリクエスト、Webアクセス、データ収集、地域別テストなどに最適です。住宅プロキシは&#36;0.7/GBから利用でき、無料テストにも対応しています。割引コードPROXY90の使用で10%割引になります。<a href="https://www.swiftproxy.net/?code=PR67S9A95">今すぐSwiftproxyを試す</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
-<td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> は、自動化や複数アカウント運用向けに設計された高性能プロキシプロバイダーで、クリーンな住宅プロキシとネイティブ静的 ISP IP を提供しています。世界中に9,000万以上の住宅 IP を保有し、スマートローテーション、安定したセッション、高い同時接続性能に対応しています。Webスクレイピング、ブラウザ自動化、SNSアカウント管理、EC運用、アカウントの一括登録などに最適です。住宅プロキシはわずか &#36;0.55/GB から利用でき、トラフィックに有効期限はありません。コード RAPID10 の使用で10%割引になり、<a href="https://www.rapidproxy.io/?code=KHM9B6E6M">今すぐ無料トライアルを開始できます。</a></td>
-</tr>
-<tr>
 <td width="180"><a href="https://pateway.ai/?ch=jjvdb"><img src="./assets/patewayai.png" alt="PatewayAI" width="150"></a></td>
 <td>PatewayAI は、経験豊富な AI 開発者向けの API リレーサービスプロバイダーで、Claude および Codex シリーズのモデルを完全にサポートしています。すべてのモデルは高品質な公式チャネルから提供され、希釈や偽装は一切なく、課金明細も透明で確認可能です。エコノミーモードは公式価格のわずか5%から利用できます。<a href="https://pateway.ai/?ch=jjvdb">こちらのリンク</a>から登録するとトライアルクレジットを受け取れるほか、不定期のキャンペーンで無料クレジットを獲得できます。また、エンタープライズ級の同時接続、専用管理ダッシュボード、正式な契約書と請求書に対応し、双方に最大150米ドルが付与される紹介特典も提供しています。</td>
 </tr>
@@ -96,19 +92,15 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>kedaya.ai は、安定性と効率性に優れた AI モデル API 中継サービスプロバイダーです。Claude、GPT、Gemini、Grok、Antigravity、DeepSeek などの主要モデルをカバーし、OpenAI（Responses を含む）、Anthropic、Gemini のネイティブプロトコルに対応しているため、CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI などのクライアントにシームレスに接続できます。OpenAI および Grok モデルの価格は、最安で公式価格の 0.1% から！専用リンク：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>
-    🥚 <b>【タダポチ案件！】登録＆合言葉で $5 相当の無料クレジット + 初回チャージ 15% OFF！</b><br>
-    🚀 <b>単なる API 中継ではなく、オールインワンの Web ワークスペース：</b> フロントエンド構築不要で、Web チャット・AI 画像生成・動画生成・自動ワークフローがブラウザ上ですぐ使えます。<br>
-    ⚡ <b>主要モデル完全網羅：</b> Claude、GPT、Gemini、DeepSeek などの最先端モデルを高速集約。<br>
-    🛡️ <b>安心のサポート体制：</b> いつでも返金可能 ｜ 請求書・領収書対応 ｜ 法人・個人問わず利用可能 ｜ ユーザーの声を大切にする充実のサポート！<br><br>
-    👉 Xcode VIP 専用リンク：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a><br>
-    💬 チケット申請用合言葉：<code>CLIProxyAPI</code>（チケット送信で即時付与）
+  <td width="180"><a href="https://apipdx.com"><img src="./assets/paidaxing.gif" alt="派大星" width="150"></a></td>
+  <td>
+    🎁 <b>【登録で 5 クレジット進呈！】</b>クーポンコード <code>CLIPROXYAPI</code> を入力すれば即時到着、チケット申請は不要！<br>
+    🚀 <b>オールインワン AI 中継サービス：</b>Claude、GPT、Gemini、DeepSeek、KIMI、GLM などの主要モデルを一挙に集約。1 つのキーで全部まとめて使えます。<br>
+    💰 <b>安い：</b>GPT は最安 <b>0.06 折</b>（定価の 0.6%）、DeepSeek・KIMI・GLM は最安 <b>4 折</b>（定価の 40%）。たくさん使うほどお得で、日常の高頻度利用も気にならない。<br>
+    🛡️ <b>安定：</b>高可用な回線で長時間オンライン。Claude Code・Codex などの一般的なクライアントに対応し、ここぞという時に落ちません。<br><br>
+    👉 派大星 VIP 専用入口：<a href="https://apipdx.com">https://apipdx.com</a><br>
+    💬 クーポンコード：<code>CLIPROXYAPI</code>（登録時に入力すると 5 クレジットが直接付与）
   </td>
-</tr>
-<tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
-<td><a href="https://x.com/chenju_ai">陈局 (Chenju)</a> による本プロジェクトへのご支援に感謝します！おそらくこの欄で唯一、登録リンクもプロモーションコードもない枠です。優れたオープンソースプロジェクトには対価が支払われるべきという想いから、メンテナーに敬意を表して一杯おごります。X の <a href="https://x.com/chenju_ai">@chenju_ai</a> で気軽に雑談しましょう。</td>
 </tr>
 <tr>
 <td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="OriginCoder" width="150"></a></td>
@@ -117,6 +109,26 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <tr>
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜中国発の OpenRouter 型サービス。中国・海外の主要 AI モデルを、1つの API で。</strong> <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong> に対応。複数サプライヤーから接続先を自動選択し、障害時は別の接続先へ切り替えます。<strong>失敗したリクエストは課金なし。料金を公開し、請求額の計算も確認できます。</strong> Claude Code、Codex などの開発ツールに対応し、<strong><a href="https://visioncoder.cn/me/keys">CC Switch と WorkBuddy へワンクリックでインポート</a></strong>。企業は一括購入したサブスクリプションをメンバーごとに割り当て、回収・再割り当ても可能。法人名義の銀行振込と請求書発行にも対応します。<strong>サプライヤー募集中：モデルの接続先を登録し、品質に応じてトラフィックを獲得。法人向け月次精算・利用明細の確認に対応し、ユーザーへの課金・請求書発行は VisionCoder が担当します。</strong> <a href="https://visioncoder.cn/challenge">VibeCoding チャレンジ</a>も開催。各回の賞品は <strong>合計2,350元相当の追加利用クレジット</strong>、最優秀賞は <strong>1,000元相当の追加利用クレジット</strong>。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>ひとつのキーで、世界中の AI を呼び出そう！<br>10dian-API は主要な AI モデルとプロトコルをひとつの API にまとめ、一般的なクライアントから利用できます。個人開発者や AI 愛好家もチームと同じ条件で利用でき、多数の同時リクエストでも安定して接続できます。料金は手頃で、課金倍率も公開しています。選んだモデルが別のモデルにすり替わることはありません。複数のチャージ方法に加え、主要な AI サブスクリプションの支払い代行にも対応しています。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">登録はこちら</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 主要 AI モデルをひとつに。登録で 100 万トークンを無料プレゼント！</strong>
+<p>🎁 無料トライアル: <a href="https://subrouter.ai/register?aff=nP93">今すぐ登録</a>すると、テストに使える 100 万トークンをすぐに受け取れます！</p>
+<ul>
+<li>主要モデルをひとつの API キーで：Claude、GPT、Gemini、Grok、DeepSeek を自由に切り替えられます。</li>
+<li>スマートルーティングと自動フェイルオーバー：ノードに障害が発生すると、負荷分散システムが正常なノードに自動で切り替え、リクエストの処理を継続します。</li>
+<li>透明な料金体系：API 呼び出しごとに実際のルーティング経路と料金をリアルタイムで確認できます。</li>
+<li>残高に有効期限なし：使った分だけ支払う従量課金制で、クレジットは月をまたいでも失効しません。</li>
+<li>選べるチャージ方法：USDT、Visa、WeChat Pay、Alipay に対応しています。</li>
+</ul>
+👉 無料の 100 万トークンを受け取る: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>

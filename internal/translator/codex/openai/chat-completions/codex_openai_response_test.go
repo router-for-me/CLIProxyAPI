@@ -1216,3 +1216,209 @@ func TestConvertCodexResponseToOpenAI_RefusalStreamAndNonStream(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertCodexResponseToOpenAI_OverlappingMessageOutputItems(t *testing.T) {
+	ctx := context.Background()
+
+	collectContent := func(chunks [][]byte) string {
+		var param any
+		var sb strings.Builder
+		for _, chunk := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					sb.WriteString(v.String())
+				}
+			}
+		}
+		return sb.String()
+	}
+
+	t.Run("overlapping_items_by_id_do_not_duplicate_first_item", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_a","delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("overlapping_items_preserve_unstreamed_fallback_without_duplicating_streamed_item", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "BetaAlpha" {
+			t.Fatalf("stream content = %q, want %q", got, "BetaAlpha")
+		}
+	})
+
+	t.Run("overlapping_items_by_id_without_output_index_do_not_duplicate", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","item_id":"msg_a","delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("overlapping_items_by_output_index_only_do_not_duplicate", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":1,"delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("added_links_id_and_output_index_across_partial_delta_and_done", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("unkeyed_delta_attributes_to_sole_open_message_item", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("response_created_resets_per_item_delta_state_across_reused_param", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"First"}`),
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_2","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Second"}]}}`),
+		}
+		if got := collectContent(chunks); got != "FirstSecond" {
+			t.Fatalf("stream content = %q, want %q", got, "FirstSecond")
+		}
+	})
+}
+
+func TestConvertCodexResponseToOpenAINonStream_MultipleSummaryTextItems(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("concatenates all summary_text items", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_sum_multi","created_at":1700000000,"model":"gpt-5.4","status":"completed","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"Step 1."},{"type":"summary_text","text":"Step 2."}]},{"type":"message","content":[{"type":"output_text","text":"Done"}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+		got := ojson.GetBytesNoCopy(out, "choices.0.message.reasoning_content").String()
+		if got != "Step 1.Step 2." {
+			t.Fatalf("reasoning_content = %q, want %q; payload=%s", got, "Step 1.Step 2.", string(out))
+		}
+	})
+
+	t.Run("leading empty summary_text does not drop subsequent items", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_sum_empty","created_at":1700000000,"model":"gpt-5.4","status":"completed","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":""},{"type":"summary_text","text":"Step 2."}]},{"type":"message","content":[{"type":"output_text","text":"Done"}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+		got := ojson.GetBytesNoCopy(out, "choices.0.message.reasoning_content").String()
+		if got != "Step 2." {
+			t.Fatalf("reasoning_content = %q, want %q; payload=%s", got, "Step 2.", string(out))
+		}
+	})
+}
+
+func TestConvertCodexResponseToOpenAI_ResponseFailedAndError(t *testing.T) {
+	ctx := context.Background()
+
+	failedJSON := []byte(`{"type":"response.failed","response":{"error":{"message":"rate limit exceeded","type":"rate_limit_error","code":"rate_limit"}}}`)
+
+	t.Run("streaming response.failed emits OpenAI error payload", func(t *testing.T) {
+		var param any
+		chunks := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, append([]byte("data: "), failedJSON...), &param)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk for response.failed, got %d", len(chunks))
+		}
+		if got := ojson.GetBytesNoCopy(chunks[0], "error.message").String(); got != "rate limit exceeded" {
+			t.Fatalf("error.message = %q, want %q; payload=%s", got, "rate limit exceeded", string(chunks[0]))
+		}
+		if got := ojson.GetBytesNoCopy(chunks[0], "error.type").String(); got != "rate_limit_error" {
+			t.Fatalf("error.type = %q, want %q; payload=%s", got, "rate_limit_error", string(chunks[0]))
+		}
+		if got := ojson.GetBytesNoCopy(chunks[0], "error.code").String(); got != "rate_limit" {
+			t.Fatalf("error.code = %q, want %q; payload=%s", got, "rate_limit", string(chunks[0]))
+		}
+	})
+
+	t.Run("non-stream response.failed emits OpenAI error payload", func(t *testing.T) {
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, failedJSON, nil)
+		if len(out) == 0 {
+			t.Fatalf("expected non-empty error payload for response.failed")
+		}
+		if got := ojson.GetBytesNoCopy(out, "error.message").String(); got != "rate limit exceeded" {
+			t.Fatalf("error.message = %q, want %q; payload=%s", got, "rate limit exceeded", string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "error.type").String(); got != "rate_limit_error" {
+			t.Fatalf("error.type = %q, want %q; payload=%s", got, "rate_limit_error", string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "error.code").String(); got != "rate_limit" {
+			t.Fatalf("error.code = %q, want %q; payload=%s", got, "rate_limit", string(out))
+		}
+	})
+
+	t.Run("top-level error event and missing fields use safe defaults", func(t *testing.T) {
+		topLevelErr := []byte(`{"type":"error","error":{"message":"backend boom","code":null}}`)
+		var param any
+		chunks := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, append([]byte("data: "), topLevelErr...), &param)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk for error event, got %d", len(chunks))
+		}
+		if got := ojson.GetBytesNoCopy(chunks[0], "error.message").String(); got != "backend boom" {
+			t.Fatalf("error.message = %q, want %q; payload=%s", got, "backend boom", string(chunks[0]))
+		}
+		if got := ojson.GetBytesNoCopy(chunks[0], "error.type").String(); got != "server_error" {
+			t.Fatalf("error.type = %q, want %q; payload=%s", got, "server_error", string(chunks[0]))
+		}
+		if ojson.GetBytesNoCopy(chunks[0], "error.code").Exists() {
+			t.Fatalf("expected null error.code to be omitted; payload=%s", string(chunks[0]))
+		}
+
+		emptyFailed := []byte(`{"type":"response.failed","response":{}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, emptyFailed, nil)
+		if got := ojson.GetBytesNoCopy(out, "error.message").String(); got != "upstream response failed" {
+			t.Fatalf("error.message = %q, want %q; payload=%s", got, "upstream response failed", string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "error.type").String(); got != "server_error" {
+			t.Fatalf("error.type = %q, want %q; payload=%s", got, "server_error", string(out))
+		}
+	})
+}

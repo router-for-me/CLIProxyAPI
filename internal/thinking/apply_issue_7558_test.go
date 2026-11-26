@@ -7,11 +7,20 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/antigravity"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/gemini"
 )
 
 func TestApplyThinking_UserDefinedNativeGeminiPreservesThinkingLevel(t *testing.T) {
-	for _, level := range []string{"medium", "high", "xhigh"} {
+	for _, tc := range []struct {
+		level           string
+		wantAntigravity string
+	}{
+		{level: "medium", wantAntigravity: "MEDIUM"},
+		{level: "high", wantAntigravity: "HIGH"},
+		{level: "xhigh", wantAntigravity: "XHIGH"},
+	} {
+		level := tc.level
 		t.Run("user_defined_gemini_to_gemini_"+level, func(t *testing.T) {
 			modelInfo := &registry.ModelInfo{
 				ID:          "custom-gemini-4-model",
@@ -54,8 +63,8 @@ func TestApplyThinking_UserDefinedNativeGeminiPreservesThinkingLevel(t *testing.
 			if errApply != nil {
 				t.Fatalf("ApplyThinking() error = %v", errApply)
 			}
-			if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
-				t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, out)
+			if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.wantAntigravity {
+				t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, tc.wantAntigravity, out)
 			}
 			if ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Exists() {
 				t.Fatalf("unexpected thinkingBudget in Antigravity payload: %s", out)
@@ -79,6 +88,24 @@ func TestApplyThinking_UserDefinedNativeGeminiPreservesThinkingLevel(t *testing.
 }
 
 func TestApplyThinking_UserDefinedCrossProtocolAndSpecialLevelBehavior(t *testing.T) {
+	t.Run("openai_to_claude_user_defined_clamps_translated_budget", func(t *testing.T) {
+		modelInfo := &registry.ModelInfo{
+			ID:          "custom-claude",
+			Type:        "claude",
+			UserDefined: true,
+			Thinking:    &registry.ThinkingSupport{Min: 1024, Max: 20000},
+		}
+		body := []byte(`{"max_tokens":200000,"thinking":{"type":"enabled","budget_tokens":128000}}`)
+		source := []byte(`{"reasoning_effort":"max"}`)
+		out, errApply := thinking.ApplyThinkingWithModelInfo(body, source, modelInfo.ID, "openai", "claude", "claude", modelInfo)
+		if errApply != nil {
+			t.Fatal(errApply)
+		}
+		if got := ojson.GetBytes(out, "thinking.budget_tokens").Int(); got != 20000 {
+			t.Fatalf("budget_tokens = %d, want 20000; body=%s", got, out)
+		}
+	})
+
 	t.Run("openai_to_gemini_opaque_user_defined_converts_to_budget", func(t *testing.T) {
 		modelInfo := &registry.ModelInfo{
 			ID:          "opaque-custom",

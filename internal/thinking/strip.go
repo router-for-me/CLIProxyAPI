@@ -59,9 +59,19 @@ func stripThinkingFieldsDoc(doc *ojson.Doc, format string, keepTopLevelEffort ..
 			paths = []string{"thinking", "output_config.effort"}
 		}
 	case "gemini":
-		paths = []string{"generationConfig.thinkingConfig"}
+		paths = []string{
+			"generationConfig.thinkingConfig",
+			"generationConfig.thinking_config",
+			"generation_config.thinkingConfig",
+			"generation_config.thinking_config",
+		}
 	case "antigravity":
-		paths = []string{"request.generationConfig.thinkingConfig"}
+		paths = []string{
+			"request.generationConfig.thinkingConfig",
+			"request.generationConfig.thinking_config",
+			"request.generation_config.thinkingConfig",
+			"request.generation_config.thinking_config",
+		}
 	case "interactions":
 		paths = []string{
 			"generation_config.thinking_level",
@@ -72,6 +82,14 @@ func stripThinkingFieldsDoc(doc *ojson.Doc, format string, keepTopLevelEffort ..
 			"generation_config.thinkingSummaries",
 			"generation_config.thinking_config",
 			"generation_config.thinkingConfig",
+			"generationConfig.thinking_level",
+			"generationConfig.thinkingLevel",
+			"generationConfig.thinking_budget",
+			"generationConfig.thinkingBudget",
+			"generationConfig.thinking_summaries",
+			"generationConfig.thinkingSummaries",
+			"generationConfig.thinking_config",
+			"generationConfig.thinkingConfig",
 		}
 	case "openai":
 		if keepEffort {
@@ -94,9 +112,30 @@ func stripThinkingFieldsDoc(doc *ojson.Doc, format string, keepTopLevelEffort ..
 	}
 
 	modified := false
+	deletedAliasContainer := ""
+	switch provider {
+	case "gemini":
+		deletedAliasContainer = "generation_config"
+	case "antigravity":
+		deletedAliasContainer = "request.generation_config"
+	case "interactions":
+		deletedAliasContainer = "generationConfig"
+	}
+	deletedFromAliasContainer := false
 	for _, path := range paths {
 		if doc.Get(path).Exists() {
 			if doc.Delete(path) == nil {
+				modified = true
+				if deletedAliasContainer != "" && strings.HasPrefix(path, deletedAliasContainer+".") {
+					deletedFromAliasContainer = true
+				}
+			}
+		}
+	}
+
+	if deletedFromAliasContainer {
+		if container := doc.Get(deletedAliasContainer); container.Exists() && container.IsObject() && len(container.Map()) == 0 {
+			if util.DeleteJSONDocIfExists(doc, deletedAliasContainer) == nil {
 				modified = true
 			}
 		}

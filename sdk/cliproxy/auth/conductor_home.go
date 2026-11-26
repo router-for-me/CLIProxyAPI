@@ -3,11 +3,14 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/json"
@@ -65,6 +68,30 @@ func (m *Manager) HomeDispatchBundle() *HomeDispatchBundle {
 		return nil
 	}
 	return m.homeDispatchBundle.Load()
+}
+
+// AuthorizeHomeLocalExecutor uses the currently attached Home lifetime for the
+// authorization and returns its validity check for the executor.
+func (m *Manager) AuthorizeHomeLocalExecutor(ctx context.Context, model string, headers http.Header, query url.Values) (home.LocalExecutorDecision, func() bool, error) {
+	bundle := m.HomeDispatchBundle()
+	if bundle == nil || !bundle.client.HeartbeatOK() {
+		return home.LocalExecutorDecision{}, nil, errors.New("home control center unavailable")
+	}
+	valid := func() bool { return m.HomeEnabled() && m.HomeDispatchBundle() == bundle && bundle.client.HeartbeatOK() }
+	client, ok := bundle.client.(interface {
+		AuthorizeLocalExecutor(context.Context, string, http.Header, url.Values) (home.LocalExecutorDecision, error)
+	})
+	if !ok {
+		return home.LocalExecutorDecision{Kind: "credential"}, valid, nil
+	}
+	decision, errAuthorize := client.AuthorizeLocalExecutor(ctx, model, headers, query)
+	if !valid() {
+		return home.LocalExecutorDecision{}, nil, errors.New("home control center unavailable")
+	}
+	if errAuthorize == nil && decision.Kind == home.LocalExecutorDispatchKind && decision.Error == nil {
+		setHomeUserAPIKeyOnGinContext(ctx, decision.Principal)
+	}
+	return decision, valid, errAuthorize
 }
 
 // SetHomeExecutionRegistry preserves the legacy registry API for callers that also install the current dispatcher.
@@ -357,16 +384,30 @@ func repeatedHomeAuthError() *Error {
 }
 
 type homeAuthDispatchResponse struct {
-	SelectionID   string                 `json:"selection_id,omitempty"`
-	Model         string                 `json:"model"`
-	Provider      string                 `json:"provider"`
-	AuthIndex     string                 `json:"auth_index"`
-	UserAPIKey    string                 `json:"user_api_key"`
-	RequestRetry  *int                   `json:"request_retry,omitempty"`
-	ForceMapping  bool                   `json:"force_mapping"`
-	OriginalAlias string                 `json:"original_alias"`
-	ModelInfo     *homeDispatchModelInfo `json:"model_info,omitempty"`
-	Auth          Auth                   `json:"auth"`
+	SelectionID    string                 `json:"selection_id,omitempty"`
+	Model          string                 `json:"model"`
+	Provider       string                 `json:"provider"`
+	ExecutorPlugin string                 `json:"executor_plugin,omitempty"`
+	AuthIndex      string                 `json:"auth_index"`
+	UserAPIKey     string                 `json:"user_api_key"`
+	RequestRetry   *int                   `json:"request_retry,omitempty"`
+	ForceMapping   bool                   `json:"force_mapping"`
+	OriginalAlias  string                 `json:"original_alias"`
+	ModelInfo      *homeDispatchModelInfo `json:"model_info,omitempty"`
+	Auth           Auth                   `json:"auth"`
+}
+
+// HomePluginExecutorResolver exposes the live plugin executors that accept Home credentials.
+type HomePluginExecutorResolver interface {
+	HomeExecutorPlugins() map[string][]string
+	ResolveHomePluginExecutor(pluginID, authProvider string) (ProviderExecutor, error)
+}
+
+// SetHomePluginExecutorResolver installs the plugin host for Home dispatch.
+func (m *Manager) SetHomePluginExecutorResolver(resolver HomePluginExecutorResolver) {
+	m.mu.Lock()
+	m.homePluginExecutors = resolver
+	m.mu.Unlock()
 }
 
 type homeDispatchModelInfo struct {
@@ -872,11 +913,18 @@ func (m *Manager) replaceHomeSelectionAuth(selection *HomeDispatchSelection, aut
 		return
 	}
 	for sessionID, owners := range m.homeRuntimeAuthOwners {
+		sessionAuths := m.homeRuntimeAuths[sessionID]
+		if sessionAuths == nil {
+			continue
+		}
 		for authID, owner := range owners {
-			if owner != selection || m.homeRuntimeAuths[sessionID] == nil {
+			if owner != selection {
 				continue
 			}
-			m.homeRuntimeAuths[sessionID][authID] = updated.Clone()
+			if existing, exists := sessionAuths[authID]; !exists || existing == nil {
+				continue
+			}
+			sessionAuths[authID] = updated.Clone()
 		}
 	}
 	m.mu.Unlock()
@@ -1115,6 +1163,17 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		ExecutionSessionID: homeExecutionSessionIDFromMetadata(opts.Metadata),
 		RequestedModel:     stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey),
 	})
+	m.mu.RLock()
+	pluginExecutors := m.homePluginExecutors
+	m.mu.RUnlock()
+	var readyPlugins map[string][]string
+	if pluginExecutors != nil {
+		readyPlugins = pluginExecutors.HomeExecutorPlugins()
+	}
+	if readyPlugins == nil {
+		readyPlugins = make(map[string][]string)
+	}
+	ctx = home.WithExecutorPlugins(ctx, readyPlugins)
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
@@ -1273,11 +1332,31 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		auth.EnsureIndex()
 	}
 
-	executor, okExecutor := m.Executor(executorKey)
+	authExecutor, okExecutor := m.Executor(executorKey)
 	if !okExecutor && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
-		executor, okExecutor = m.Executor("openai-compatibility")
+		authExecutor, okExecutor = m.Executor("openai-compatibility")
 	}
-	if !okExecutor {
+	executor := authExecutor
+	executorPlugin := strings.TrimSpace(dispatch.ExecutorPlugin)
+	if executorPlugin != "" {
+		if isAuthDisabled(&auth) || strings.TrimSpace(dispatch.Model) == "" {
+			endScope()
+			return nil, &Error{Code: "invalid_auth", Message: "home plugin dispatch requires an enabled auth and an upstream model", HTTPStatus: http.StatusBadGateway}
+		}
+		var errPlugin error
+		if pluginExecutors == nil {
+			errPlugin = fmt.Errorf("plugin executor %q is unavailable: plugin host is not configured", executorPlugin)
+		} else {
+			executor, errPlugin = pluginExecutors.ResolveHomePluginExecutor(executorPlugin, logicalProvider)
+			if errPlugin == nil && executor == nil {
+				errPlugin = fmt.Errorf("plugin executor %q is unavailable", executorPlugin)
+			}
+		}
+		if errPlugin != nil {
+			endScope()
+			return nil, &Error{Code: ErrorCodeHomeExecutorPluginUnavailable, Message: errPlugin.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
+	} else if !okExecutor {
 		endScope()
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered", HTTPStatus: http.StatusBadGateway}
 	}
@@ -1302,6 +1381,8 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		endScope()
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
+	selection.ExecutorPlugin = executorPlugin
+	selection.authExecutor = authExecutor
 	selection.modelInfo = dispatch.ModelInfo.registryModelInfo()
 	if dispatch.ModelInfo != nil {
 		selection.configurationUpdateSupport = dispatch.ModelInfo.SupportConfigurationUpdate
@@ -1322,6 +1403,15 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	selection.SelectionID = strings.TrimSpace(dispatch.SelectionID)
 	selection.CanonicalSessionID = sessionID
 	selection.ParentSessionID = parentSessionID
+	if lcpSessionID := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); lcpSessionID != "" {
+		selection.lcpAffinitySessionID = lcpSessionID
+		selection.sessionAffinityProvider = sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey)
+		selection.sessionAffinityModel = sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityModelMetadataKey)
+		selection.lcpAccessGeneration, _ = opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey].(uint64)
+		selection.isLCPFork, _ = opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
+		selection.isLCPCompaction, _ = opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool)
+		selection.lcpNodeKind = sessionMetadataString(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
+	}
 	return selection, nil
 }
 
@@ -1374,6 +1464,11 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	selectionModel := authSelectionModelFromOptions(opts, routeModel)
+	selectionModelKey := canonicalModelKey(selectionModel)
+	routeModelKey := canonicalModelKey(routeModel)
+	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
 	if affinity, ok := m.selector.(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever {
@@ -1386,16 +1481,27 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		}
 	}
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || auth.RequiresSignIn ||
+			hasUnauthorizedAuthFailure(auth) || auth.credentialRetryAfter.After(now) || auth.nonAuthCredentialRetryAfter.After(now) {
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
 			continue
 		}
+		if !eligibility.allows(auth) {
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
+		if selectionModelKey != "" && !m.authSupportsRouteModel(registryRef, auth, selectionModel) {
+			continue
+		}
+		if routeModelKey != "" && !sameCanonicalModelKey(routeModelKey, selectionModelKey) && !m.authSupportsRouteModel(registryRef, auth, routeModel) {
+			continue
+		}
+		targetModel := m.selectionModelKeyForAuth(auth, routeModel)
+		if !strings.Contains(strings.ToLower(strings.TrimSpace(targetModel)), "claude") {
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
@@ -1404,18 +1510,22 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		candidates = append(candidates, creditsCandidateEntry{
-			auth:     auth.Clone(),
-			executor: executor,
-			provider: providerKey,
+			auth:        auth.Clone(),
+			executor:    executor,
+			provider:    providerKey,
+			targetModel: targetModel,
 		})
 	}
 	m.mu.RUnlock()
 
-	now := time.Now()
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
 	for _, candidate := range candidates {
-		hint, okHint, errHint := GetAntigravityCreditsHintRequired(ctx, candidate.auth.ID)
+		if !antigravityCreditsAllowsCandidateModel(ctx, candidate.auth, routeModel, candidate.targetModel, opts, cfg, now) {
+			continue
+		}
+		hint, okHint, errHint := GetAntigravityCreditsHintForAuthRequired(ctx, candidate.auth)
 		if errHint != nil {
 			return nil, antigravityCreditsKVUnavailableError(errHint)
 		}
@@ -1442,9 +1552,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 }
 
 type creditsCandidateEntry struct {
-	auth     *Auth
-	executor ProviderExecutor
-	provider string
+	auth        *Auth
+	executor    ProviderExecutor
+	provider    string
+	targetModel string
 }
 
 func hasAntigravityProvider(providers []string) bool {
@@ -1585,8 +1696,8 @@ func parseAntigravityTextRetryHintDuration(lowerBody string) (time.Duration, boo
 	return total, true
 }
 
-func hasAntigravityShortRetryHint(err error, lowerBody string) bool {
-	if ra := retryAfterFromError(err); ra != nil && *ra < antigravityCreditsShortCooldownThreshold {
+func hasAntigravityShortRetryHint(retryAfter *time.Duration, lowerBody string) bool {
+	if retryAfter != nil && *retryAfter < antigravityCreditsShortCooldownThreshold {
 		return true
 	}
 	if d, ok := parseAntigravityTextRetryHintDuration(lowerBody); ok && d < antigravityCreditsShortCooldownThreshold {
@@ -1668,7 +1779,7 @@ func hasPositiveQuotaErrorMetadata(err error) bool {
 	return false
 }
 
-func isAntigravityCreditsQuota429(err error) bool {
+func isAntigravityCreditsQuota429(err error, retryAfter *time.Duration) bool {
 	if isTransientRateLimitError(err) || isCloudflareChallengeError(err) {
 		return false
 	}
@@ -1691,22 +1802,19 @@ func isAntigravityCreditsQuota429(err error) bool {
 			})
 		}
 		if sawRateLimitReason {
-			ra := retryAfterFromError(err)
-			return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+			return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 		}
 		if isAntigravityRateLimitCode(errorCodeFromError(err)) {
-			ra := retryAfterFromError(err)
-			return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+			return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 		}
 		codePaths := []string{"error.code", "error.type", "code", "type", "response.error.code", "response.error.type"}
 		for _, path := range codePaths {
 			if isAntigravityRateLimitCode(ojson.Get(body, path).String()) {
-				ra := retryAfterFromError(err)
-				return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+				return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 			}
 		}
 		msgLower := extractAntigravityJSONErrorMessageLower(body)
-		if hasAntigravityShortRetryHint(err, msgLower) || hasAntigravityRateLimitPhrase(msgLower) {
+		if hasAntigravityShortRetryHint(retryAfter, msgLower) || hasAntigravityRateLimitPhrase(msgLower) {
 			return false
 		}
 		if sawQuotaReason {
@@ -1722,19 +1830,18 @@ func isAntigravityCreditsQuota429(err error) bool {
 			return true
 		}
 		if strings.EqualFold(strings.TrimSpace(ojson.Get(body, "error.status").String()), "RESOURCE_EXHAUSTED") {
-			if ra := retryAfterFromError(err); ra != nil {
-				return *ra >= antigravityCreditsShortCooldownThreshold
+			if retryAfter != nil {
+				return *retryAfter >= antigravityCreditsShortCooldownThreshold
 			}
 			return hasExplicitAntigravityQuotaPhrase(msgLower)
 		}
 		return hasExplicitAntigravityQuotaPhrase(msgLower)
 	}
-	if hasAntigravityShortRetryHint(err, lowerBody) || hasAntigravityRateLimitPhrase(lowerBody) {
+	if hasAntigravityShortRetryHint(retryAfter, lowerBody) || hasAntigravityRateLimitPhrase(lowerBody) {
 		return false
 	}
 	if isAntigravityRateLimitCode(errorCodeFromError(err)) {
-		ra := retryAfterFromError(err)
-		return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+		return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 	}
 	if hasPositiveQuotaErrorMetadata(err) {
 		return true
@@ -1810,17 +1917,23 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	}
 	switch status {
 	case http.StatusTooManyRequests:
-		return isAntigravityCreditsQuota429(lastErr)
+		retryAfter := retryAfterFromError(lastErr)
+		var cooldownErr *modelCooldownError
+		if errors.As(lastErr, &cooldownErr) && cooldownErr != nil {
+			// A modelCooldownError wrapped in trustedRetryAfterError exposes the live
+			// remaining cooldown rather than the original upstream retry hint; defer to
+			// any hint carried by the underlying cause so credits admission uses the
+			// stored upstream hint instead of mistaking final countdown minutes for a
+			// short transient rate limit.
+			retryAfter = retryAfterFromError(cooldownErr.Unwrap())
+		}
+		return isAntigravityCreditsQuota429(lastErr, retryAfter)
 	case http.StatusServiceUnavailable:
 		return isAntigravityCreditsCapacity503(lastErr)
 	case 0:
 		var authErr *Error
 		if errors.As(lastErr, &authErr) && authErr != nil {
 			return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
-		}
-		var cooldownErr *modelCooldownError
-		if errors.As(lastErr, &cooldownErr) {
-			return true
 		}
 		return false
 	default:
@@ -1886,10 +1999,18 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		return cliproxyexecutor.Response{}, false, nil
 	}
 	routeModel := req.Model
-	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(ctx, routeModel, opts)
+	candidateOpts := opts
+	if len(candidateOpts.OriginalRequest) == 0 && len(req.Payload) > 0 {
+		candidateOpts.OriginalRequest = req.Payload
+	}
+	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(ctx, routeModel, candidateOpts)
 	if errCandidates != nil {
 		return cliproxyexecutor.Response{}, false, errCandidates
 	}
+	return m.tryAntigravityCreditsExecuteCandidates(ctx, req, opts, routeModel, candidates)
+}
+
+func (m *Manager) tryAntigravityCreditsExecuteCandidates(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, candidates []creditsCandidateEntry) (cliproxyexecutor.Response, bool, error) {
 	maxRetryCredentials := m.MaxRetryCredentials()
 	refusedAuths := requestRefusedAuthsFromContext(ctx)
 	attempted := make(map[string]struct{})
@@ -1909,10 +2030,8 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		attempted[c.auth.ID] = struct{}{}
 		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
+		creditsCtx = m.WithAuthTransport(creditsCtx, c.auth)
+		creditsCtx = m.withAntigravityModelState(creditsCtx, c.auth)
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
@@ -1920,6 +2039,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				c.auth = preparedAuth
+			}
 			if errAbort := m.handleAntigravityCreditsPrepareError(creditsCtx, c, routeModel, creditsOpts, errPrepare); errAbort != nil {
 				return cliproxyexecutor.Response{}, false, errAbort
 			}
@@ -1927,14 +2049,20 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
+		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
 			execOpts := creditsOpts
+			payload := execOpts.OriginalRequest
+			if len(payload) == 0 {
+				payload = execReq.Payload
+			}
+			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(creditsCtx, c.executor, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = prepareRequestAfterAuth(creditsCtx, c.executor, c.auth, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				if isCredentialTerminatedError(errIntercept) {
 					recordRequestRefusedAuth(ctx, c.auth.ID)
@@ -1942,18 +2070,55 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				}
 				return cliproxyexecutor.Response{}, false, errIntercept
 			}
-			creditsCtx = syncMetadataSessionToContext(creditsCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(c.auth)
+			refreshExecCtx := func(base context.Context) context.Context {
+				return m.withExecutionAuthRefresh(syncMetadataSessionToContext(base, execOpts.Metadata), executionAuthRefreshOptions{
+					onAuthUpdated: func(updated *Auth) {
+						if updated != nil {
+							activeAuth.Store(updated.Clone())
+						}
+					},
+				})
+			}
+			syncActiveAuth := func() {
+				if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != c.auth {
+					c.auth = currentAuth
+				}
+			}
+			creditsCtx = refreshExecCtx(creditsCtx)
 			executionSeq := m.nextExecutionSeq()
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
+			syncActiveAuth()
 			errExec = markUpstreamExecutionAttemptFromContext(creditsCtx, errExec)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(creditsCtx, c.auth, execOpts.Headers), RefreshToken: authRefreshToken(c.auth), CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				if errCtx := creditsCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, false, errCtx
 				}
-				if errCancel := claudeOAuthRequestCancellation(creditsCtx, c.auth, errExec); errCancel != nil {
-					return cliproxyexecutor.Response{}, false, errCancel
+				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(creditsCtx), c.auth, errExec, didRefreshOnUnauthorized, execOpts.Headers)
+				if errCtx := creditsCtx.Err(); errCtx != nil {
+					return cliproxyexecutor.Response{}, false, errCtx
 				}
+				if okRefresh {
+					c.auth = refreshed
+					activeAuth.Store(c.auth)
+					publishSelectedAuthMetadata(execOpts.Metadata, c.auth)
+					didRefreshOnUnauthorized = true
+					creditsCtx = refreshExecCtx(m.newUpstreamAttemptContext(creditsCtx))
+					executionSeq = m.nextExecutionSeq()
+					resp, errExec = c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
+					syncActiveAuth()
+					errExec = markUpstreamExecutionAttemptFromContext(creditsCtx, errExec)
+					if errCtx := creditsCtx.Err(); errCtx != nil {
+						return cliproxyexecutor.Response{}, false, errCtx
+					}
+				}
+			}
+			if errCancel := claudeOAuthRequestCancellation(creditsCtx, c.auth, errExec); errCancel != nil {
+				return cliproxyexecutor.Response{}, false, errCancel
+			}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(creditsCtx, c.auth, execOpts.Headers), RefreshToken: authRefreshToken(c.auth), CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -1996,10 +2161,18 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		return nil, false, nil
 	}
 	routeModel := req.Model
-	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(ctx, routeModel, opts)
+	candidateOpts := opts
+	if len(candidateOpts.OriginalRequest) == 0 && len(req.Payload) > 0 {
+		candidateOpts.OriginalRequest = req.Payload
+	}
+	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(ctx, routeModel, candidateOpts)
 	if errCandidates != nil {
 		return nil, false, errCandidates
 	}
+	return m.tryAntigravityCreditsExecuteStreamCandidates(ctx, req, opts, routeModel, candidates)
+}
+
+func (m *Manager) tryAntigravityCreditsExecuteStreamCandidates(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, candidates []creditsCandidateEntry) (*cliproxyexecutor.StreamResult, bool, error) {
 	maxRetryCredentials := m.MaxRetryCredentials()
 	refusedAuths := requestRefusedAuthsFromContext(ctx)
 	attempted := make(map[string]struct{})
@@ -2019,10 +2192,8 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		attempted[c.auth.ID] = struct{}{}
 		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
+		creditsCtx = m.WithAuthTransport(creditsCtx, c.auth)
+		creditsCtx = m.withAntigravityModelState(creditsCtx, c.auth)
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
@@ -2030,6 +2201,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				c.auth = preparedAuth
+			}
 			if errAbort := m.handleAntigravityCreditsPrepareError(creditsCtx, c, routeModel, creditsOpts, errPrepare); errAbort != nil {
 				return nil, false, errAbort
 			}

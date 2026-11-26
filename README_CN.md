@@ -84,10 +84,6 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>Swiftproxy 提供 9000万+ 纯净住宅 IP，覆盖全球 220+ 个国家和地区，支持 HTTP(S)/SOCKS5、IP 轮换、Sticky Session 及精准地域定位。帮助 AI API 工具和自动化工作流从不同地区稳定访问在线服务，适用于 API 请求、网页访问、数据采集及地域测试等场景。住宅代理低至 &#36;0.7/GB，支持免费测试，使用优惠码 PROXY90 可享 9 折优惠。<a href="https://www.swiftproxy.net/?code=PR67S9A95">立即体验 Swiftproxy</a>。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
-<td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> 是一家专为自动化和多账户运营打造的高性能代理服务商，提供纯净住宅代理和原生静态 ISP IP。RapidProxy 拥有遍布全球的 9000 万+住宅 IP，并支持智能轮换、稳定会话和高并发，是网页抓取、浏览器自动化、社交媒体账户管理、电商运营、批量账户注册等场景的理想选择。住宅代理仅 &#36;0.55/GB 起，流量永不过期。使用优惠码 RAPID10 可享 9 折优惠，<a href="https://www.rapidproxy.io/?code=KHM9B6E6M">立即开始免费试用</a>。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://pateway.ai/?ch=jjvdb"><img src="./assets/patewayai.png" alt="PatewayAI" width="150"></a></td>
 <td>PatewayAI 是一家面向资深 AI 开发者的 API 中继服务商，完整支持 Claude 与 Codex 系列模型。所有模型均来自官方高质量渠道，绝无稀释、绝无伪造，计费明细透明可查。经济模式低至 0.5 折，通过<a href="https://pateway.ai/?ch=jjvdb">此链接</a>注册即可获得试用额度，还可参与不定时营销活动领取免费额度。平台同时支持企业级并发、专属管理后台、正式合同与发票，并提供最高 150 美元的双向推荐奖励。</td>
 </tr>
@@ -96,19 +92,15 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>kedaya.ai 是一家稳定高效的 AI 模型 API 中转服务商，覆盖 Claude、GPT、Gemini、Grok、Antigravity、DeepSeek 等主流模型，兼容 OpenAI（含 Responses）、Anthropic、Gemini 原生协议，可无缝接入 CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI 等客户端。OpenAI及Grok模型价格最低可达官方0.01折！专属入口：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>
-    🥚 <b>【免费领鸡蛋！】注册提工单报暗号，白嫖 $5 额度 + 首充 85 折！</b><br>
-    🚀 <b>不只是 API 中转，更是全能 Web 工作台：</b>无需自建前端，网页直接用对话、AI绘图、视频生成、自动化工作流。<br>
-    ⚡ <b>全主流覆盖：</b>Claude、GPT、Gemini、DeepSeek 等顶尖模型极速聚合。<br>
-    🛡️ <b>服务保障：</b>随时退款 ｜ 免费开票 ｜ 对公对私 ｜ 客服长时在线，主打一个听劝！<br><br>
-    👉 Xcode贵宾入口：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best/register?aff=OuDv</a><br>
-    💬 工单暗号：<code>CLIProxyAPI</code>（提交工单即可直接到账）
+  <td width="180"><a href="https://apipdx.com"><img src="./assets/paidaxing.gif" alt="派大星" width="150"></a></td>
+  <td>
+    🎁 <b>【注册即送 5 额度！】优惠码 <code>CLIPROXYAPI</code>，填了就到账，不用提工单！</b><br>
+    🚀 <b>一站式 AI 中转站：</b>Claude、GPT、Gemini、DeepSeek、KIMI、GLM 等主流模型全聚合，一个 Key 走遍全家桶。<br>
+    💰 <b>便宜：</b>GPT 低至 <b>0.06 折</b>，DeepSeek、KIMI、GLM 低至 <b>4 折</b>，量大更省，日常高频调用也不心疼。<br>
+    🛡️ <b>稳定：</b>高可用线路长时在线，兼容 Claude Code、Codex 等常用客户端，关键时候不掉链子。<br><br>
+    👉 派大星贵宾入口：<a href="https://apipdx.com">https://apipdx.com</a><br>
+    💬 优惠码：<code>CLIPROXYAPI</code>（注册时填写，直接送 5 额度）
   </td>
-</tr>
-<tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="陈局" width="150"></a></td>
-<td>感谢 <a href="https://x.com/chenju_ai">陈局</a> 赞助了本项目！这大概是本栏唯一一个不打站点广告的。好的开源项目值得被付费，陈局来随个份子，敬作者一杯。X 上找 <a href="https://x.com/chenju_ai">陈局</a> 吹吹水。</td>
 </tr>
 <tr>
 <td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
@@ -121,6 +113,26 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <tr>
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜国内版 OpenRouter，一个 API 接入国内外主流大模型。</strong> 覆盖 <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong>，多供应商智能选路、故障自动切换，<strong>失败请求不收费，价格公开、账单可复算</strong>。适配 Claude Code、Codex 等编程工具，支持 <strong><a href="https://visioncoder.cn/me/keys">CC Switch 和 WorkBuddy 一键导入</a></strong>。企业统一采购，按席位下发订阅套餐、收回再分配，支持对公转账与开票。<strong>供应商入驻开放：上架线路，按质量拿流量；月结对公、用量可查，用户侧计费开票交给平台。</strong> 更有 <a href="https://visioncoder.cn/challenge">VibeCoding 挑战赛</a>，每期奖励合计 <strong>2,350 元加油包</strong>，一等奖 <strong>1,000 元加油包</strong>。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>“用一把钥匙，召唤全世界的 AI～”<br>10dian-API 提供全品类主流 AI 模型与协议的 API 聚合接入，兼容常见客户端，个人开发者、AI 热爱者和团队用户均可低门槛使用。价格透明、低价不复杂；模型真实、倍率透明、不偷换模型；高并发稳定接入，并支持主流 AI 订阅代充。全品类一站式，支持多种充值方式，个人与团队同权，高并发接入门槛更低。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">点击注册</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 一站式 AI 模型平台：注册即送 100 万免费 Token！</strong>
+<p>🎁 免费试用: <a href="https://subrouter.ai/register?aff=nP93">立即注册</a>，即可领取 100 万免费 Token 用于测试！</p>
+<ul>
+<li>主流模型一站接入：用一个 API 密钥即可在 Claude、GPT、Gemini、Grok 和 DeepSeek 之间自由切换。</li>
+<li>智能路由与自动故障切换：节点发生故障时，负载均衡系统会自动切换到可用节点，确保请求顺利执行。</li>
+<li>计费完全透明：每次 API 调用均可查看实际路由路径和实时费用。</li>
+<li>余额永不过期：按量付费，未用完的额度不会按月清零。</li>
+<li>充值方式灵活：支持 USDT、Visa、微信支付和支付宝。</li>
+</ul>
+👉 领取 100 万免费 Token: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
 </tr>
 </tbody>
 </table>

@@ -208,7 +208,7 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				_ = fcDoc.Set("functionCall.id", toolID)
 			}
 			_ = templateDoc.SetRawBytes("candidates.0.content.parts.-1", fcDoc.Bytes())
-			_ = templateDoc.Set("candidates.0.finishReason", "STOP")
+			// Do not set candidates.0.finishReason here; message_delta emits the authoritative finishReason.
 			outBytes := templateDoc.Bytes()
 			(*param).(*ConvertAnthropicResponseToGeminiParams).LastStorageOutput = append([]byte(nil), outBytes...)
 			// cleanup used state for this index
@@ -227,20 +227,10 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 
 	case "message_delta":
 		// Handle message-level changes (like stop reason and usage information)
+		_ = templateDoc.Set("candidates.0.finishReason", "STOP")
 		if delta := root.Get("delta"); delta.Exists() {
-			if stopReason := delta.Get("stop_reason"); stopReason.Exists() {
-				switch stopReason.String() {
-				case "end_turn":
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				case "tool_use":
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				case "max_tokens":
-					_ = templateDoc.Set("candidates.0.finishReason", "MAX_TOKENS")
-				case "stop_sequence":
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				default:
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				}
+			if stopReason := delta.Get("stop_reason"); stopReason.Exists() && stopReason.String() == "max_tokens" {
+				_ = templateDoc.Set("candidates.0.finishReason", "MAX_TOKENS")
 			}
 		}
 
@@ -273,7 +263,6 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 			// Set traffic type (required by Gemini API)
 			_ = templateDoc.Set("usageMetadata.trafficType", "PROVISIONED_THROUGHPUT")
 		}
-		_ = templateDoc.Set("candidates.0.finishReason", "STOP")
 
 		return [][]byte{templateDoc.Bytes()}
 	case "message_stop":
@@ -297,6 +286,44 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 	}
 }
 
+type claudeGeminiUsageTokens struct {
+	inputTokens              int64
+	outputTokens             int64
+	cacheCreationInputTokens int64
+	cacheReadInputTokens     int64
+	thinkingTokens           int64
+	hasCacheReadTokens       bool
+	hasThinkingTokens        bool
+	hasUsage                 bool
+}
+
+func (u *claudeGeminiUsageTokens) merge(usage ojson.Result) {
+	if !usage.Exists() || !usage.IsObject() {
+		return
+	}
+	u.hasUsage = true
+	if inputTokens := usage.Get("input_tokens"); inputTokens.Exists() {
+		u.inputTokens = inputTokens.Int()
+	}
+	if outputTokens := usage.Get("output_tokens"); outputTokens.Exists() {
+		u.outputTokens = outputTokens.Int()
+	}
+	if cacheCreationTokens := usage.Get("cache_creation_input_tokens"); cacheCreationTokens.Exists() {
+		u.cacheCreationInputTokens = cacheCreationTokens.Int()
+	}
+	if cacheReadTokens := usage.Get("cache_read_input_tokens"); cacheReadTokens.Exists() {
+		u.cacheReadInputTokens = cacheReadTokens.Int()
+		u.hasCacheReadTokens = true
+	}
+	if thinkingTokens := usage.Get("thinking_tokens"); thinkingTokens.Exists() {
+		u.thinkingTokens = thinkingTokens.Int()
+		u.hasThinkingTokens = true
+	} else if nestedThinkingTokens := usage.Get("output_tokens_details.thinking_tokens"); nestedThinkingTokens.Exists() {
+		u.thinkingTokens = nestedThinkingTokens.Int()
+		u.hasThinkingTokens = true
+	}
+}
+
 // ConvertClaudeResponseToGeminiNonStream converts a non-streaming Claude Code response to a non-streaming Gemini response.
 // This function processes the complete Claude Code response and transforms it into a single Gemini-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
@@ -311,6 +338,8 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 // Returns:
 //   - []byte: A Gemini-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	rawJSON, _ = translatorcommon.ClaudeMessagesJSONToSSE(rawJSON)
+
 	// Base Gemini response template for non-streaming with default values
 	templateDoc := ojson.NewDoc([]byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}`))
 
@@ -352,7 +381,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 
 	// Process each streaming event and collect parts
 	var allParts [][]byte
-	var finalUsageJSON []byte
+	var usageTokens claudeGeminiUsageTokens
+	var finishReason string
 	var responseID string
 	var createdAt int64
 
@@ -366,7 +396,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 
 		switch eventType {
 		case "message_start":
-			// Extract response metadata including ID, model, and creation time
+			// Extract response metadata including ID, model, creation time, and initial usage
 			if message := root.Get("message"); message.Exists() {
 				responseID = message.Get("id").String()
 				newParam.ResponseID = responseID
@@ -375,6 +405,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				// Set creation time to current time if not provided
 				createdAt = time.Now().Unix()
 				newParam.CreatedAt = createdAt
+
+				usageTokens.merge(message.Get("usage"))
 			}
 
 		case "content_block_start":
@@ -488,44 +520,23 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 			}
 
 		case "message_delta":
-			// Extract final usage information using sjson for token counts and metadata
-			if usage := root.Get("usage"); usage.Exists() {
-				usageDoc := ojson.NewDoc([]byte(`{}`))
-
-				// Basic token counts for prompt and completion
-				inputTokens := usage.Get("input_tokens").Int()
-				outputTokens := usage.Get("output_tokens").Int()
-
-				// Set basic usage metadata according to Gemini API specification
-				_ = usageDoc.Set("promptTokenCount", inputTokens)
-				_ = usageDoc.Set("candidatesTokenCount", outputTokens)
-				_ = usageDoc.Set("totalTokenCount", inputTokens+outputTokens)
-
-				// Add cache-related token counts if present (Claude Code API cache fields)
-				if cacheCreationTokens := usage.Get("cache_creation_input_tokens"); cacheCreationTokens.Exists() {
-					_ = usageDoc.Set("cachedContentTokenCount", cacheCreationTokens.Int())
+			if delta := root.Get("delta"); delta.Exists() {
+				if stopReason := delta.Get("stop_reason").String(); stopReason != "" {
+					if stopReason == "max_tokens" {
+						finishReason = "MAX_TOKENS"
+					} else {
+						finishReason = "STOP"
+					}
 				}
-				if cacheReadTokens := usage.Get("cache_read_input_tokens"); cacheReadTokens.Exists() {
-					// Add cache read tokens to cached content count
-					existingCacheTokens := usage.Get("cache_creation_input_tokens").Int()
-					totalCacheTokens := existingCacheTokens + cacheReadTokens.Int()
-					_ = usageDoc.Set("cachedContentTokenCount", totalCacheTokens)
-				}
-
-				// Add thinking tokens if present (for models with reasoning capabilities)
-				if thinkingTokens := usage.Get("thinking_tokens"); thinkingTokens.Exists() {
-					_ = usageDoc.Set("thoughtsTokenCount", thinkingTokens.Int())
-				}
-
-				// Set traffic type (required by Gemini API)
-				_ = usageDoc.Set("trafficType", "PROVISIONED_THROUGHPUT")
-
-				finalUsageJSON = usageDoc.Bytes()
 			}
+			usageTokens.merge(root.Get("usage"))
 		}
 	}
 
 	// Set response metadata
+	if finishReason != "" {
+		_ = templateDoc.Set("candidates.0.finishReason", finishReason)
+	}
 	if responseID != "" {
 		_ = templateDoc.Set("responseId", responseID)
 	}
@@ -542,8 +553,26 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	}
 
 	// Set usage metadata
-	if len(finalUsageJSON) > 0 {
-		_ = templateDoc.SetRawBytes("usageMetadata", finalUsageJSON)
+	if usageTokens.hasUsage {
+		promptTokens := usageTokens.inputTokens + usageTokens.cacheCreationInputTokens + usageTokens.cacheReadInputTokens
+		candidatesTokens := usageTokens.outputTokens
+		totalTokens := promptTokens + usageTokens.outputTokens
+		if usageTokens.hasThinkingTokens {
+			candidatesTokens = usageTokens.outputTokens - usageTokens.thinkingTokens
+			if candidatesTokens < 0 {
+				candidatesTokens = 0
+			}
+		}
+		_ = templateDoc.Set("usageMetadata.promptTokenCount", promptTokens)
+		_ = templateDoc.Set("usageMetadata.candidatesTokenCount", candidatesTokens)
+		_ = templateDoc.Set("usageMetadata.totalTokenCount", totalTokens)
+		if usageTokens.hasCacheReadTokens {
+			_ = templateDoc.Set("usageMetadata.cachedContentTokenCount", usageTokens.cacheReadInputTokens)
+		}
+		if usageTokens.hasThinkingTokens {
+			_ = templateDoc.Set("usageMetadata.thoughtsTokenCount", usageTokens.thinkingTokens)
+		}
+		_ = templateDoc.Set("usageMetadata.trafficType", "PROVISIONED_THROUGHPUT")
 	}
 
 	return templateDoc.Bytes()

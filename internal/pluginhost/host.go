@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -20,15 +21,25 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const defaultSchedulerReloadWaitTimeout = 10 * time.Second
+
+type schedulerReloadState struct {
+	reloading  bool
+	generation uint64
+	done       chan struct{}
+}
+
 type loadedPlugin struct {
 	id               string
 	path             string
 	version          string
 	name             string
+	priority         int
 	configYAML       []byte
 	plugin           pluginapi.Plugin
 	registered       bool
 	needsRecovery    bool
+	homeSuspended    bool // Protected by Host.mu.
 	client           pluginClient
 	callbackInstance *hostCallbackInstance
 }
@@ -97,6 +108,8 @@ type Host struct {
 	modelStreams               *modelStreamBridge
 	callbackContexts           *callbackContextRegistry
 	usageStates                map[string]*pluginUsageState
+	schedulerReloads           map[string]*schedulerReloadState
+	schedulerReloadWaitTimeout time.Duration
 	maxPendingUsageRecords     int
 	snapshot                   atomic.Value
 	// loadCleanupDoneHook, set by tests, runs after a late load cleanup dropped its load token.
@@ -105,6 +118,8 @@ type Host struct {
 	usageDrainWaitHook func(pluginID string)
 	// usageBackpressureWaitHook, set by tests, runs when dispatchPluginUsageRecord blocks on a full pending queue.
 	usageBackpressureWaitHook func(pluginID string)
+	// schedulerReloadWaitHook, set by tests, runs when PickAuth waits for an in-progress plugin reload.
+	schedulerReloadWaitHook func(pluginID string)
 }
 
 func New() *Host {
@@ -140,6 +155,8 @@ func New() *Host {
 		modelStreams:               newModelStreamBridge(),
 		callbackContexts:           newCallbackContextRegistry(),
 		usageStates:                make(map[string]*pluginUsageState),
+		schedulerReloads:           make(map[string]*schedulerReloadState),
+		schedulerReloadWaitTimeout: defaultSchedulerReloadWaitTimeout,
 	}
 	h.snapshot.Store(emptySnapshot())
 	return h
@@ -257,13 +274,6 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	files, errSelect := selectPluginFiles(rc.Dir, desiredVersions)
 	if errSelect != nil {
 		log.Warnf("pluginhost: failed to select plugin files: %v", errSelect)
-		h.mu.Lock()
-		h.managementRoutes = make(map[string]managementRouteRecord)
-		h.resourceRoutes = make(map[string]resourceRouteRecord)
-		h.rebuildActivePluginMapsLocked(nil)
-		h.snapshot.Store(emptySnapshot())
-		h.mu.Unlock()
-		h.refreshThinkingProviders(nil)
 		return
 	}
 	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
@@ -273,7 +283,11 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	loadedFiles := make([]pluginFile, 0, len(files))
 	hotReloadLogs := make([]log.Fields, 0)
 	readyUsagePluginIDs := make([]string, 0)
+	reloadingSchedulerPluginIDs := make([]string, 0)
 	defer func() {
+		for _, id := range reloadingSchedulerPluginIDs {
+			h.finishSchedulerReload(id)
+		}
 		for _, id := range readyUsagePluginIDs {
 			h.finishUsageReplacement(id)
 		}
@@ -321,6 +335,8 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 					}
 					return
 				}
+				h.beginSchedulerReload(file.ID)
+				reloadingSchedulerPluginIDs = append(reloadingSchedulerPluginIDs, file.ID)
 				_, proceedQuiesce := h.callQuiesceWithOutcome(ctx, replaced)
 				if errContext := ctx.Err(); errContext != nil {
 					h.clearLoadingRequest(file.ID, request)
@@ -337,6 +353,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
 						h.finishUsageReplacement(file.ID)
 					}
+					h.finishSchedulerReload(file.ID)
 					continue
 				}
 			}
@@ -365,6 +382,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
 						h.finishUsageReplacement(file.ID)
 					}
+					h.finishSchedulerReload(file.ID)
 				}
 				if loadResult.err != nil {
 					log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
@@ -411,14 +429,34 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
 		}
 
+		recordPriority := item.Priority
 		if !registeredNow {
 			if loadedNow {
 				continue
 			}
 			var okCall bool
-			plugin, okCall = h.callRegister(ctx, lp, item)
+			var lifecycleAccepted bool
+			plugin, okCall, lifecycleAccepted = h.callRegisterWithOutcome(ctx, lp, item)
 			if !okCall {
-				continue
+				var recoveredPlugin pluginapi.Plugin
+				var recoveredPriority int
+				var keepPrev bool
+				if !lifecycleAccepted {
+					recoveredPlugin, recoveredPriority, keepPrev = h.previousRegisteredPlugin(lp)
+					if keepPrev {
+						log.Warnf("pluginhost: plugin %s reconfigure rejected; keeping previous registration", lp.id)
+					}
+				} else {
+					recoveredPlugin, recoveredPriority, keepPrev = h.recoverFailedReconfigure(lp)
+					if keepPrev {
+						log.Warnf("pluginhost: plugin %s reconfigure failed after acceptance; restored previous configuration", lp.id)
+					}
+				}
+				if !keepPrev {
+					continue
+				}
+				plugin = recoveredPlugin
+				recordPriority = recoveredPriority
 			}
 		}
 		plugin.Metadata = clonePluginMetadata(plugin.Metadata)
@@ -440,11 +478,15 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			id:       file.ID,
 			path:     file.Path,
 			version:  file.Version,
-			priority: item.Priority,
+			priority: recordPriority,
 			meta:     plugin.Metadata,
 			plugin:   plugin,
+			loaded:   lp,
 		}
 		h.updateActivePluginRecord(record)
+		if replaced != nil {
+			h.finishSchedulerReload(file.ID)
+		}
 		readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
 		records = append(records, record)
 		loadedFiles = append(loadedFiles, file)
@@ -765,6 +807,7 @@ func (h *Host) detachPlugin(ctx context.Context, id string) bool {
 	h.snapshot.Store(&Snapshot{enabled: enabled, records: records})
 	h.mu.Unlock()
 
+	h.finishSchedulerReload(id)
 	h.clearUsageReplacement(id)
 	h.closeHostHTTPCallbackInstances(id, instances)
 	if len(targets) == 0 {
@@ -915,6 +958,7 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
 
+	h.finishAllSchedulerReloads()
 	h.clearAllUsageReplacements()
 	for id, instances := range loadingInstances {
 		h.closeHostHTTPCallbackInstances(id, instances)
@@ -1005,13 +1049,24 @@ func (h *Host) recordCurrent(record capabilityRecord) bool {
 	return h.pluginIdentityCurrent(record.id, record.path, record.version)
 }
 
+func (h *Host) recordCurrentLocked(record capabilityRecord) bool {
+	return h.pluginIdentityCurrentLocked(record.id, record.path, record.version)
+}
+
 func (h *Host) pluginIdentityCurrent(id string, path string, version string) bool {
 	if h == nil {
 		return false
 	}
-	version = strings.TrimSpace(version)
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.pluginIdentityCurrentLocked(id, path, version)
+}
+
+func (h *Host) pluginIdentityCurrentLocked(id string, path string, version string) bool {
+	if h == nil {
+		return false
+	}
+	version = strings.TrimSpace(version)
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return false
@@ -1153,19 +1208,14 @@ func (h *Host) pluginNeedsUsageRecovery(pluginID string) bool {
 	return unrecovered
 }
 
-func (h *Host) setPluginNeedsRecovery(lp *loadedPlugin, needsRecovery bool) {
-	if h == nil || lp == nil {
-		return
-	}
-	h.mu.Lock()
-	lp.needsRecovery = needsRecovery
-	h.mu.Unlock()
-}
-
 func (h *Host) callQuiesceWithOutcome(ctx context.Context, lp *loadedPlugin) (quiesced bool, proceed bool) {
 	if h == nil || lp == nil || lp.client == nil {
 		return false, false
 	}
+	// The plugin may stop taking new requests before its quiesce RPC returns.
+	h.mu.Lock()
+	lp.homeSuspended = true
+	h.mu.Unlock()
 	callDone := make(chan struct{})
 	callCtx, finishCall := withPluginCallFinish(ctx, func() {
 		close(callDone)
@@ -1180,19 +1230,16 @@ func (h *Host) callQuiesceWithOutcome(ctx context.Context, lp *loadedPlugin) (qu
 	if errQuiesce != nil {
 		logQuiesceError(lp.id, errQuiesce)
 	}
-	if !okCall {
-		h.setPluginNeedsRecovery(lp, true)
-		return false, false
+	unsupported := okCall && quiesceUnsupported(errQuiesce)
+	h.mu.Lock()
+	if unsupported {
+		lp.homeSuspended = lp.needsRecovery
+	} else {
+		lp.needsRecovery = true
 	}
-	if errQuiesce == nil {
-		h.setPluginNeedsRecovery(lp, true)
-		return true, true
-	}
-	if quiesceUnsupported(errQuiesce) {
-		return false, true
-	}
-	h.setPluginNeedsRecovery(lp, true)
-	return false, false
+	h.mu.Unlock()
+	quiesced = okCall && errQuiesce == nil
+	return quiesced, quiesced || unsupported
 }
 
 func logQuiesceError(id string, errQuiesce error) {
@@ -1272,6 +1319,7 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 		priority: item.Priority,
 		meta:     plugin.Metadata,
 		plugin:   plugin,
+		loaded:   lp,
 	}
 	h.updateActivePluginRecord(record)
 	return record, pluginFile{
@@ -1331,6 +1379,10 @@ func (h *Host) updateActivePluginRecord(record capabilityRecord) {
 	h.pluginFileVersions[path] = version
 	h.activePluginVersions[id] = version
 	h.activePluginPaths[id] = path
+	if record.loaded != nil && !record.loaded.needsRecovery {
+		// A recovered instance can take Home requests once its capabilities are published.
+		record.loaded.homeSuspended = false
+	}
 
 	raw := h.snapshot.Load()
 	snap, _ := raw.(*Snapshot)
@@ -1362,8 +1414,13 @@ func (h *Host) updateActivePluginRecord(record capabilityRecord) {
 }
 
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
+	plugin, okCall, _ := h.callRegisterWithOutcome(ctx, lp, item)
+	return plugin, okCall
+}
+
+func (h *Host) callRegisterWithOutcome(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool, bool) {
 	if lp == nil {
-		return pluginapi.Plugin{}, false
+		return pluginapi.Plugin{}, false, false
 	}
 
 	method := pluginabi.MethodPluginRegister
@@ -1384,26 +1441,29 @@ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeI
 	} else {
 		close(callDone)
 	}
+	var errRegister error
+	var lifecycleAccepted bool
 	plugin, okCall := h.safePluginCall(callCtx, lp.id, method, func() pluginapi.Plugin {
 		defer finishCall()
-		plugin, errRegister := registerRPCPlugin(callCtx, h, lp.id, lp.client, method, item.ConfigYAML)
+		var pluginOut pluginapi.Plugin
+		pluginOut, lifecycleAccepted, errRegister = registerRPCPluginWithOutcome(callCtx, h, lp.id, lp.client, method, item.ConfigYAML)
 		if errRegister != nil {
 			log.Warnf("pluginhost: plugin %s %s failed: %v", lp.id, method, errRegister)
 			return pluginapi.Plugin{}
 		}
-		return plugin
+		return pluginOut
 	})
 	finishCall()
 	<-callDone
-	if !okCall {
-		return pluginapi.Plugin{}, false
+	if !okCall || errRegister != nil {
+		return pluginapi.Plugin{}, false, lifecycleAccepted
 	}
 	h.mu.Lock()
 	lp.registered = true
 	h.mu.Unlock()
 	if !validPlugin(plugin) {
 		log.Warnf("pluginhost: plugin %s returned invalid metadata or no capabilities", lp.id)
-		return pluginapi.Plugin{}, false
+		return pluginapi.Plugin{}, false, true
 	}
 	plugin.Metadata = clonePluginMetadata(plugin.Metadata)
 	h.mu.Lock()
@@ -1411,11 +1471,128 @@ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeI
 	if strings.TrimSpace(lp.version) == "" {
 		lp.version = strings.TrimSpace(plugin.Metadata.Version)
 	}
+	lp.priority = item.Priority
 	lp.configYAML = bytes.Clone(item.ConfigYAML)
 	lp.plugin = plugin
 	lp.needsRecovery = false
 	h.mu.Unlock()
-	return plugin, true
+	return plugin, true, true
+}
+
+func (h *Host) previousRegisteredPlugin(lp *loadedPlugin) (pluginapi.Plugin, int, bool) {
+	if h == nil || lp == nil {
+		return pluginapi.Plugin{}, 0, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, fused := h.fused[lp.id]; fused {
+		return pluginapi.Plugin{}, 0, false
+	}
+	if !lp.registered || lp.needsRecovery || !validPlugin(lp.plugin) {
+		return pluginapi.Plugin{}, 0, false
+	}
+	return lp.plugin, lp.priority, true
+}
+
+func (h *Host) recoverFailedReconfigure(lp *loadedPlugin) (pluginapi.Plugin, int, bool) {
+	if h == nil || lp == nil {
+		return pluginapi.Plugin{}, 0, false
+	}
+	h.mu.Lock()
+	_, fused := h.fused[lp.id]
+	registered := lp.registered
+	needsRecovery := lp.needsRecovery
+	prevConfig := bytes.Clone(lp.configYAML)
+	prevPriority := lp.priority
+	prevValid := validPlugin(lp.plugin)
+	h.mu.Unlock()
+	if fused || !registered || needsRecovery || !prevValid || len(prevConfig) == 0 {
+		return pluginapi.Plugin{}, 0, false
+	}
+
+	rollbackItem := runtimeItemConfig{
+		ID:         lp.id,
+		Enabled:    true,
+		Priority:   prevPriority,
+		ConfigYAML: prevConfig,
+	}
+	plugin, okRollback := h.callRegister(context.Background(), lp, rollbackItem)
+	if !okRollback || h.isPluginFused(lp.id) {
+		h.mu.Lock()
+		lp.needsRecovery = true
+		h.mu.Unlock()
+		log.Warnf("pluginhost: plugin %s rollback reconfigure failed after post-accept error; dropping active capabilities", lp.id)
+		return pluginapi.Plugin{}, 0, false
+	}
+	return plugin, prevPriority, true
+}
+
+func (h *Host) beginSchedulerReload(pluginID string) {
+	if h == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.schedulerReloads == nil {
+		h.schedulerReloads = make(map[string]*schedulerReloadState)
+	}
+	state := h.schedulerReloads[pluginID]
+	if state == nil {
+		state = &schedulerReloadState{}
+		h.schedulerReloads[pluginID] = state
+	}
+	if !state.reloading {
+		state.reloading = true
+		state.generation++
+		state.done = make(chan struct{})
+	}
+}
+
+func (h *Host) finishSchedulerReload(pluginID string) {
+	if h == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.schedulerReloads[pluginID]
+	if state == nil || !state.reloading {
+		return
+	}
+	state.reloading = false
+	state.generation++
+	done := state.done
+	state.done = nil
+	if done != nil {
+		close(done)
+	}
+}
+
+func (h *Host) finishAllSchedulerReloads() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, state := range h.schedulerReloads {
+		if state == nil || !state.reloading {
+			continue
+		}
+		state.reloading = false
+		state.generation++
+		done := state.done
+		state.done = nil
+		if done != nil {
+			close(done)
+		}
+	}
 }
 
 func (h *Host) safePluginAction(ctx context.Context, id, method string, fn func() error) (err error, ok bool) {

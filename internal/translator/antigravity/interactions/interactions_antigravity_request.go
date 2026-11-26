@@ -6,6 +6,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
@@ -27,14 +28,20 @@ func convertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	}
 	copyInteractionsSystemToAntigravityDoc(outDoc, root)
 	copyInteractionsGenerationConfigToAntigravityDoc(outDoc, root)
+	isClaude := strings.Contains(strings.ToLower(modelName), "claude")
 	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
-	errInput := appendInteractionsInputToAntigravity(&contentItems, root.Get("input"))
+	errInput := appendInteractionsInputToAntigravity(&contentItems, root.Get("input"), isClaude)
+	contentItems = translatorcommon.MergeAdjacentGeminiUserContents(contentItems)
 	translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", contentItems)
 	copyInteractionsToolsToAntigravityDoc(outDoc, root, functionNameMap)
 	if outDoc.Get("request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
 		_ = outDoc.Delete("request.tools")
 	}
+	if isClaude {
+		antigravitygemini.SanitizeAntigravityClaudeGeminiRequestSignaturesDoc(modelName, outDoc)
+	}
 	attachDefaultAntigravitySafetySettingsDoc(outDoc)
+	antigravitygemini.NormalizeAntigravityRequestDoc(outDoc)
 	out := rewriteInteractionsFunctionNames(outDoc.Bytes(), functionNameMap)
 	return out, errInput
 }
@@ -154,17 +161,55 @@ func rewriteInteractionsFunctionNames(out []byte, functionNameMap map[string]str
 
 func copyInteractionsSystemToAntigravityDoc(outDoc *ojson.Doc, root ojson.Result) {
 	sys := root.Get("system_instruction")
-	if !sys.Exists() {
+	if !sys.Exists() || sys.Type == ojson.Null {
 		return
 	}
 	if sys.Type == ojson.String {
-		instr, _ := ojson.SetBytes([]byte(`{"parts":[{"text":""}]}`), "parts.0.text", sys.String())
-		_ = outDoc.SetRawBytes("request.systemInstruction", instr)
+		instrDoc := ojson.NewDocString(`{"parts":[{"text":""}]}`)
+		_ = instrDoc.Set("parts.0.text", sys.String())
+		_ = outDoc.SetRawBytes("request.systemInstruction", instrDoc.Bytes())
+		return
+	}
+	if sys.IsArray() {
+		var partItems [][]byte
+		sys.ForEach(func(_, item ojson.Result) bool {
+			switch {
+			case item.Type == ojson.String:
+				if item.String() != "" {
+					partItems = append(partItems, antigravityTextPartJSON(item.String(), false))
+				}
+			case item.IsObject():
+				itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+				if itemType != "" && itemType != "text" {
+					return true
+				}
+				if text := item.Get("text"); text.Exists() && text.Type == ojson.String && text.String() != "" {
+					partItems = append(partItems, antigravityTextPartJSON(text.String(), false))
+				}
+			}
+			return true
+		})
+		if len(partItems) == 0 {
+			return
+		}
+		instrDoc := ojson.NewDocString(`{"parts":[]}`)
+		_ = instrDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(partItems))
+		_ = outDoc.SetRawBytes("request.systemInstruction", instrDoc.Bytes())
+		return
+	}
+	if !sys.IsObject() {
 		return
 	}
 	if text := sys.Get("text"); text.Exists() && !sys.Get("parts").Exists() {
-		instr, _ := ojson.SetBytes([]byte(`{"parts":[{"text":""}]}`), "parts.0.text", text.String())
-		_ = outDoc.SetRawBytes("request.systemInstruction", instr)
+		if text.Type != ojson.String {
+			return
+		}
+		instrDoc := ojson.NewDocString(`{"parts":[{"text":""}]}`)
+		_ = instrDoc.Set("parts.0.text", text.String())
+		_ = outDoc.SetRawBytes("request.systemInstruction", instrDoc.Bytes())
+		return
+	}
+	if parts := sys.Get("parts"); !parts.Exists() || !parts.IsArray() || len(parts.Array()) == 0 {
 		return
 	}
 	_ = outDoc.SetRaw("request.systemInstruction", sys.Raw)
@@ -208,20 +253,27 @@ func normalizeInteractionsGenerationConfigForAntigravityDoc(outDoc *ojson.Doc) {
 
 func copyInteractionsReasoningToAntigravityDoc(outDoc *ojson.Doc, root ojson.Result) {
 	reasoning := root.Get("reasoning")
-	if !reasoning.Exists() {
+	if !reasoning.Exists() || !reasoning.IsObject() {
 		return
 	}
-	effort := strings.ToLower(strings.TrimSpace(reasoning.Get("effort").String()))
+	effort := ""
+	if effortRes := reasoning.Get("effort"); effortRes.Exists() && effortRes.Type == ojson.String {
+		effort = strings.ToLower(strings.TrimSpace(effortRes.String()))
+	}
 	if effort == "" {
-		effort = strings.ToLower(strings.TrimSpace(reasoning.Get("thinking_level").String()))
+		if levelRes := reasoning.Get("thinking_level"); levelRes.Exists() && levelRes.Type == ojson.String {
+			effort = strings.ToLower(strings.TrimSpace(levelRes.String()))
+		}
 	}
 	if effort != "" {
 		// Thinking amount and summary visibility are independent. This OpenAI-style
 		// compatibility alias controls only the amount; includeThoughts is written
 		// below only for an explicit Interactions summary selector.
 		if effort == "auto" {
+			_ = outDoc.Delete("request.generationConfig.thinkingConfig.thinkingLevel")
 			_ = outDoc.Set("request.generationConfig.thinkingConfig.thinkingBudget", -1)
 		} else {
+			_ = outDoc.Delete("request.generationConfig.thinkingConfig.thinkingBudget")
 			_ = outDoc.Set("request.generationConfig.thinkingConfig.thinkingLevel", effort)
 		}
 	}
@@ -313,6 +365,7 @@ type antigravityInteractionsInputContext struct {
 	inModelTurn      bool
 	lastStepType     string
 	pendingSignature string
+	isClaude         bool
 	// run follows the consecutive user content so that an attachment Antigravity
 	// cannot carry is refused only when its whole user turn is left with nothing to send.
 	run translatorcommon.UserRun
@@ -340,12 +393,13 @@ func (ctx *antigravityInteractionsInputContext) appendText(role, text string) {
 	}
 }
 
-func appendInteractionsInputToAntigravity(items *[][]byte, input ojson.Result) error {
+func appendInteractionsInputToAntigravity(items *[][]byte, input ojson.Result, isClaude bool) error {
 	if !input.Exists() {
 		return nil
 	}
 	ctx := &antigravityInteractionsInputContext{
-		items: *items,
+		items:    *items,
+		isClaude: isClaude,
 	}
 	if input.Type == ojson.String {
 		appendAntigravityTextContent(&ctx.items, "user", input.String())
@@ -458,24 +512,38 @@ func appendInteractionsStepToAntigravity(ctx *antigravityInteractionsInputContex
 		ctx.lastStepType = "model_output"
 	case "thought":
 		ctx.run.End()
-		if sig := firstNonEmptyString(step.Get("signature").String(), step.Get("thought_signature").String(), step.Get("thoughtSignature").String()); sig != "" {
-			if ctx.pendingSignature != "" && ctx.pendingSignature != sig {
-				carrier := antigravityTextPartJSON("", false)
-				carrier, _ = ojson.SetBytes(carrier, "thoughtSignature", ctx.pendingSignature)
-				if ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
-					ctx.items[len(ctx.items)-1] = appendGeminiContentPart(ctx.items[len(ctx.items)-1], carrier)
-				} else {
-					ctx.items = append(ctx.items, antigravityContent("model", [][]byte{carrier}))
-				}
-			}
-			ctx.pendingSignature = sig
-		}
+		sig := firstNonEmptyString(step.Get("signature").String(), step.Get("thought_signature").String(), step.Get("thoughtSignature").String())
 		partItems := extractInteractionsThoughtPartsToAntigravity(step)
-		if len(partItems) > 0 {
-			if ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
-				ctx.items[len(ctx.items)-1] = appendGeminiContentParts(ctx.items[len(ctx.items)-1], partItems)
-			} else {
-				ctx.items = append(ctx.items, antigravityContent("model", partItems))
+		if ctx.isClaude {
+			if len(partItems) > 0 {
+				partItems = normalizeAntigravityClaudeThoughtParts(partItems, sig)
+				if ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
+					ctx.items[len(ctx.items)-1] = appendGeminiContentParts(ctx.items[len(ctx.items)-1], partItems)
+				} else {
+					ctx.items = append(ctx.items, antigravityContent("model", partItems))
+				}
+			} else if sig != "" && ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
+				ctx.items[len(ctx.items)-1] = attachAntigravityClaudeThoughtSignatureToLastPart(ctx.items[len(ctx.items)-1], sig)
+			}
+		} else {
+			if sig != "" {
+				if ctx.pendingSignature != "" && ctx.pendingSignature != sig {
+					carrier := antigravityTextPartJSON("", false)
+					carrier, _ = ojson.SetBytes(carrier, "thoughtSignature", ctx.pendingSignature)
+					if ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
+						ctx.items[len(ctx.items)-1] = appendGeminiContentPart(ctx.items[len(ctx.items)-1], carrier)
+					} else {
+						ctx.items = append(ctx.items, antigravityContent("model", [][]byte{carrier}))
+					}
+				}
+				ctx.pendingSignature = sig
+			}
+			if len(partItems) > 0 {
+				if ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
+					ctx.items[len(ctx.items)-1] = appendGeminiContentParts(ctx.items[len(ctx.items)-1], partItems)
+				} else {
+					ctx.items = append(ctx.items, antigravityContent("model", partItems))
+				}
 			}
 		}
 		ctx.inModelTurn = true
@@ -501,7 +569,7 @@ func appendInteractionsStepToAntigravity(ctx *antigravityInteractionsInputContex
 				}
 			}
 		}
-		if sig != "" {
+		if sig != "" && !ctx.isClaude {
 			part, _ = ojson.SetBytes(part, "thoughtSignature", sig)
 		}
 		if ctx.inModelTurn && len(ctx.items) > 0 && ojson.GetBytesNoCopy(ctx.items[len(ctx.items)-1], "role").String() == "model" {
@@ -550,6 +618,74 @@ func appendInteractionsStepToAntigravity(ctx *antigravityInteractionsInputContex
 		}
 		ctx.lastStepType = "default"
 	}
+}
+
+// normalizeAntigravityClaudeThoughtParts merges multi-item text thought parts
+// from a single Interactions thought step into one thought part and attaches
+// sig inline when present. Merging unconditionally ensures a subsequent
+// signature-only thought step binds to the full thinking text rather than only
+// its last fragment.
+func normalizeAntigravityClaudeThoughtParts(partItems [][]byte, sig string) [][]byte {
+	if len(partItems) == 0 {
+		return partItems
+	}
+	allTextThoughts := true
+	var combined strings.Builder
+	for _, item := range partItems {
+		parsed := util.ParseGJSONBytesNoCopy(item)
+		if !parsed.Get("thought").Bool() || parsed.Get("text").Type != ojson.String {
+			allTextThoughts = false
+			break
+		}
+		combined.WriteString(parsed.Get("text").String())
+	}
+	if allTextThoughts {
+		if len(partItems) == 1 && sig == "" {
+			return partItems
+		}
+		partDoc := ojson.NewDoc([]byte(`{"text":"","thought":true}`))
+		_ = partDoc.Set("text", combined.String())
+		if sig != "" {
+			_ = partDoc.Set("thoughtSignature", sig)
+		}
+		return [][]byte{partDoc.Bytes()}
+	}
+	if sig == "" {
+		return partItems
+	}
+	attached := make([][]byte, 0, len(partItems))
+	for _, item := range partItems {
+		parsed := util.ParseGJSONBytesNoCopy(item)
+		if parsed.Get("thought").Bool() {
+			partDoc := ojson.NewDoc(item)
+			_ = partDoc.Set("thoughtSignature", sig)
+			attached = append(attached, partDoc.Bytes())
+			continue
+		}
+		attached = append(attached, item)
+	}
+	return attached
+}
+
+// attachAntigravityClaudeThoughtSignatureToLastPart attaches a signature-only
+// thought step's signature to an immediately preceding unsigned thought part
+// within the same model turn, avoiding detached empty-text carriers.
+func attachAntigravityClaudeThoughtSignatureToLastPart(content []byte, sig string) []byte {
+	if sig == "" {
+		return content
+	}
+	parts := ojson.GetBytesNoCopy(content, "parts").Array()
+	if len(parts) == 0 {
+		return content
+	}
+	lastIdx := len(parts) - 1
+	last := parts[lastIdx]
+	if !last.Get("thought").Bool() || firstNonEmptyString(last.Get("thoughtSignature").String(), last.Get("thought_signature").String()) != "" {
+		return content
+	}
+	contentDoc := ojson.NewDoc(content)
+	_ = contentDoc.Set(fmt.Sprintf("parts.%d.thoughtSignature", lastIdx), sig)
+	return contentDoc.Bytes()
 }
 
 func flushPendingAntigravitySignature(ctx *antigravityInteractionsInputContext) {
@@ -684,9 +820,7 @@ func buildAntigravityFunctionCallPart(step ojson.Result) []byte {
 	} else if id := step.Get("id"); id.Exists() {
 		_ = partDoc.Set("functionCall.id", id.String())
 	}
-	if args := step.Get("arguments"); args.Exists() {
-		_ = partDoc.SetRaw("functionCall.args", args.Raw)
-	}
+	translatorcommon.SetGeminiFunctionCallArgsDoc(partDoc, "functionCall.args", step.Get("arguments"))
 	return partDoc.Bytes()
 }
 
@@ -990,6 +1124,8 @@ func antigravityFunctionDeclarationJSON(decl ojson.Result, functionNameMap map[s
 
 func interactionsNativeAntigravityPart(part ojson.Result) []byte {
 	switch {
+	case part.Get("functionCall").IsObject():
+		return translatorcommon.NormalizeGeminiFunctionCallPart(part)
 	case part.Get("text").Exists(), part.Get("functionCall").Exists(), part.Get("functionResponse").Exists():
 		return []byte(part.Raw)
 	case part.Get("inlineData").Exists():
@@ -1119,35 +1255,7 @@ func convertSnakeCaseKeysToCamelCaseForAntigravity(raw []byte) []byte {
 	if !root.Exists() {
 		return raw
 	}
-	outDoc := ojson.NewDoc([]byte(`{}`))
-	copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc, "", root)
-	return outDoc.Bytes()
-}
-
-func copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc *ojson.Doc, path string, node ojson.Result) {
-	if node.IsObject() {
-		node.ForEach(func(key, value ojson.Result) bool {
-			childPath := joinAntigravityJSONPath(path, toAntigravityCamelCase(key.String()))
-			copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc, childPath, value)
-			return true
-		})
-		return
-	}
-	if node.IsArray() {
-		node.ForEach(func(_, value ojson.Result) bool {
-			copySnakeCaseValueToCamelCaseForAntigravityDoc(outDoc, path+".-1", value)
-			return true
-		})
-		return
-	}
-	_ = outDoc.SetRaw(path, node.Raw)
-}
-
-func joinAntigravityJSONPath(path, key string) string {
-	if path == "" {
-		return key
-	}
-	return path + "." + key
+	return translatorcommon.ConvertJSONNodeKeys(root, toAntigravityCamelCase)
 }
 
 func toAntigravityCamelCase(s string) string {
