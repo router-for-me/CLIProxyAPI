@@ -201,7 +201,20 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 	root := util.ParseGJSONBytesNoCopy(rawJSON)
 
 	// Extract prompt from completions request
-	prompt := root.Get("prompt").String()
+	promptNode := root.Get("prompt")
+	prompt := ""
+	if promptNode.Type == ojson.String {
+		prompt = promptNode.String()
+	} else if promptNode.IsArray() {
+		var parts []string
+		promptNode.ForEach(func(_, item ojson.Result) bool {
+			if item.Type == ojson.String && item.String() != "" {
+				parts = append(parts, item.String())
+			}
+			return true
+		})
+		prompt = strings.Join(parts, "\n")
+	}
 	if prompt == "" {
 		prompt = "Complete this:"
 	}
@@ -210,7 +223,7 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 	outDoc := ojson.NewDoc([]byte(`{"model":"","messages":[{"role":"user","content":""}]}`))
 
 	// Set model
-	if model := root.Get("model"); model.Exists() {
+	if model := root.Get("model"); model.Type == ojson.String {
 		_ = outDoc.Set("model", model.String())
 	}
 
@@ -218,43 +231,50 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 	_ = outDoc.Set("messages.0.content", prompt)
 
 	// Copy other parameters from completions to chat completions
-	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
+	if maxTokens := root.Get("max_tokens"); maxTokens.Type == ojson.Number {
 		_ = outDoc.Set("max_tokens", maxTokens.Int())
 	}
 
-	if temperature := root.Get("temperature"); temperature.Exists() {
+	if temperature := root.Get("temperature"); temperature.Type == ojson.Number {
 		_ = outDoc.Set("temperature", temperature.Float())
 	}
 
-	if topP := root.Get("top_p"); topP.Exists() {
+	if topP := root.Get("top_p"); topP.Type == ojson.Number {
 		_ = outDoc.Set("top_p", topP.Float())
 	}
 
-	if frequencyPenalty := root.Get("frequency_penalty"); frequencyPenalty.Exists() {
+	if frequencyPenalty := root.Get("frequency_penalty"); frequencyPenalty.Type == ojson.Number {
 		_ = outDoc.Set("frequency_penalty", frequencyPenalty.Float())
 	}
 
-	if presencePenalty := root.Get("presence_penalty"); presencePenalty.Exists() {
+	if presencePenalty := root.Get("presence_penalty"); presencePenalty.Type == ojson.Number {
 		_ = outDoc.Set("presence_penalty", presencePenalty.Float())
 	}
 
-	if stop := root.Get("stop"); stop.Exists() {
+	if stop := root.Get("stop"); stop.Exists() && stop.Type != ojson.Null {
 		_ = outDoc.SetRawBytes("stop", []byte(stop.Raw))
 	}
 
-	if stream := root.Get("stream"); stream.Exists() {
+	if stream := root.Get("stream"); stream.IsBool() {
 		_ = outDoc.Set("stream", stream.Bool())
 	}
 
-	if logprobs := root.Get("logprobs"); logprobs.Exists() {
+	if logprobs := root.Get("logprobs"); logprobs.IsBool() {
 		_ = outDoc.Set("logprobs", logprobs.Bool())
+	} else if logprobs.Type == ojson.Number {
+		if n := logprobs.Int(); n > 0 {
+			_ = outDoc.Set("logprobs", true)
+			_ = outDoc.Set("top_logprobs", n)
+		} else {
+			_ = outDoc.Set("logprobs", false)
+		}
 	}
 
-	if topLogprobs := root.Get("top_logprobs"); topLogprobs.Exists() {
+	if topLogprobs := root.Get("top_logprobs"); topLogprobs.Type == ojson.Number {
 		_ = outDoc.Set("top_logprobs", topLogprobs.Int())
 	}
 
-	if echo := root.Get("echo"); echo.Exists() {
+	if echo := root.Get("echo"); echo.IsBool() {
 		_ = outDoc.Set("echo", echo.Bool())
 	}
 
@@ -288,7 +308,7 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 		_ = outDoc.Set("model", model.String())
 	}
 
-	if usage := root.Get("usage"); usage.Exists() {
+	if usage := root.Get("usage"); usage.IsObject() {
 		_ = outDoc.SetRawBytes("usage", []byte(usage.Raw))
 	}
 
@@ -313,8 +333,10 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 			}
 
 			// Copy finish_reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				completionsChoice["finish_reason"] = finishReason.String()
+			} else {
+				completionsChoice["finish_reason"] = nil
 			}
 
 			// Copy logprobs if present
@@ -348,7 +370,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	// Check if this chunk has any meaningful content
 	hasContent := false
-	hasUsage := root.Get("usage").Exists()
+	hasUsage := root.Get("usage").IsObject()
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice ojson.Result) bool {
 			// Check if delta has content or finish_reason
@@ -359,7 +381,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 				}
 			}
 			// Also check for finish_reason to ensure we don't skip final chunks
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" && finishReason.String() != "null" {
+			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				hasContent = true
 				return false // Break out of forEach
 			}
@@ -408,8 +430,10 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 			}
 
 			// Copy finish_reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "null" {
+			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				completionsChoice["finish_reason"] = finishReason.String()
+			} else {
+				completionsChoice["finish_reason"] = nil
 			}
 
 			// Copy logprobs if present
@@ -428,7 +452,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	}
 
 	// Copy usage if present
-	if usage := root.Get("usage"); usage.Exists() {
+	if usage := root.Get("usage"); usage.IsObject() {
 		_ = outDoc.SetRawBytes("usage", []byte(usage.Raw))
 	}
 

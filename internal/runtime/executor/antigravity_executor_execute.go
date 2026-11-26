@@ -448,6 +448,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return cliproxyexecutor.Response{}, err
 	}
 	if replayAccumulator != nil {
+		if ctx.Err() == nil && !sseJSON.HasPending() {
+			replayAccumulator.MarkCleanEOF()
+		}
 		replayAccumulator.Commit(ctx)
 	}
 	if useCredits {
@@ -668,24 +671,19 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 			pendingFromCurrentChunk = false
 			partsResult.ForEach(func(_, part ojson.Result) bool {
 				var (
-					hasFunctionCall bool
-					hasInlineData   bool
-					hasSnakeInline  bool
-					hasSnakeSig     bool
-					hasText         bool
-					sig             string
-					inlineRaw       string
-					text            string
-					thought         bool
+					hasOtherField  bool
+					hasSnakeInline bool
+					hasSnakeSig    bool
+					hasText        bool
+					sig            string
+					inlineRaw      string
+					text           string
+					thought        bool
 				)
 				part.ForEach(func(pk, pv ojson.Result) bool {
 					switch pk.String() {
-					case "functionCall":
-						hasFunctionCall = true
-					case "inlineData":
-						hasInlineData = true
 					case "inline_data":
-						hasInlineData = true
+						hasOtherField = true
 						hasSnakeInline = true
 						inlineRaw = pv.Raw
 					case "thoughtSignature":
@@ -700,11 +698,13 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 						text = pv.String()
 					case "thought":
 						thought = pv.Bool()
+					default:
+						hasOtherField = true
 					}
 					return true
 				})
 
-				if hasFunctionCall || hasInlineData {
+				if hasOtherField {
 					flushPending()
 					parts = append(parts, normalizeRawPart(part, hasSnakeSig, hasSnakeInline, sig, inlineRaw))
 					return true

@@ -245,7 +245,7 @@ func isHierarchyParent(primary, fallback string) bool {
 	idx1 := strings.Index(primary, ":")
 	idx2 := strings.Index(fallback, ":")
 	if idx1 > 0 && idx2 > 0 && primary[:idx1] == fallback[:idx2] {
-		return true
+		return primary[:idx1] != "msg"
 	}
 	if idx1 == -1 && idx2 == -1 {
 		return true
