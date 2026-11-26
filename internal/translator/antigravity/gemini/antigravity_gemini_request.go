@@ -283,7 +283,7 @@ func normalizeGeminiGenerationConfigResponseSchemaDocAt(doc *ojson.Doc, prefix s
 			oldPath := container + "." + schemaKey
 			if schema := doc.Get(oldPath); schema.Exists() {
 				targetPath := container + ".responseSchema"
-				if !doc.Get(targetPath).Exists() {
+				if !doc.Get(targetPath).Exists() && !doc.Get(container+".response_schema").Exists() {
 					_ = doc.SetRaw(targetPath, schema.Raw)
 				}
 				_ = doc.Delete(oldPath)

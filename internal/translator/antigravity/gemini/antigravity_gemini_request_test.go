@@ -1477,6 +1477,118 @@ func TestConvertGeminiRequestToAntigravity_PreservesExistingResponseSchema(t *te
 	}
 }
 
+func TestConvertGeminiRequestToAntigravity_PreservesExistingSnakeCaseResponseSchema(t *testing.T) {
+	tests := []struct {
+		name      string
+		container string
+		inputJSON string
+	}{
+		{
+			name:      "generationConfig with response_schema and response_json_schema",
+			container: "generationConfig",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"response_mime_type": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"stale": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+		{
+			name:      "generationConfig with response_schema and responseJsonSchema",
+			container: "generationConfig",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"responseMimeType": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"responseJsonSchema": {
+						"type": "OBJECT",
+						"properties": {"stale": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+		{
+			name:      "generation_config with response_schema and response_json_schema",
+			container: "generation_config",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generation_config": {
+					"response_mime_type": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"stale": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+		{
+			name:      "generation_config with response_schema and both responseJsonSchema variants",
+			container: "generation_config",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generation_config": {
+					"response_mime_type": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"responseJsonSchema": {
+						"type": "OBJECT",
+						"properties": {"staleCamel": {"type": "STRING"}}
+					},
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"staleSnake": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(tt.inputJSON), false)
+			if err != nil {
+				t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+			}
+
+			basePath := "request." + tt.container
+			snakeSchema := ojson.GetBytesNoCopy(out, basePath+".response_schema")
+			if !snakeSchema.Exists() {
+				t.Fatalf("%s.response_schema missing. Output: %s", basePath, out)
+			}
+			if got := snakeSchema.Get("properties.name.type").String(); got != "STRING" {
+				t.Fatalf("%s.response_schema.properties.name.type = %q, want STRING. Output: %s", basePath, got, out)
+			}
+			if ojson.GetBytesNoCopy(out, basePath+".responseSchema").Exists() {
+				t.Fatalf("duplicate %s.responseSchema should not be emitted alongside response_schema. Output: %s", basePath, out)
+			}
+			if ojson.GetBytesNoCopy(out, basePath+".responseJsonSchema").Exists() {
+				t.Fatalf("%s.responseJsonSchema should have been removed. Output: %s", basePath, out)
+			}
+			if ojson.GetBytesNoCopy(out, basePath+".response_json_schema").Exists() {
+				t.Fatalf("%s.response_json_schema should have been removed. Output: %s", basePath, out)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiRequestToAntigravity_RemovesEmptySystemInstructionParts(t *testing.T) {
 	tests := []struct {
 		name      string
