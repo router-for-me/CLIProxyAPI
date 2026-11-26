@@ -65,6 +65,80 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 	}
 }
 
+func TestManagementV8ClaudeRelaxedSystemPrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "config-version: 8\nserver: {port: 8317}\nmanagement: {secret-key: test-password}\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := management.NewHandler(cfg, path, nil)
+	h.SetLocalPassword("test-password")
+	s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementV8Routes()
+
+	request := func(t *testing.T, method, url, body string, want int) string {
+		t.Helper()
+		req := httptest.NewRequest(method, url, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		recorder := httptest.NewRecorder()
+		s.engine.ServeHTTP(recorder, req)
+		if recorder.Code != want {
+			t.Fatalf("%s %s status %d, want %d. Response %s", method, url, recorder.Code, want, recorder.Body.String())
+		}
+		return recorder.Body.String()
+	}
+
+	const route = "/v8/management/config/api-keys/claude"
+	const group = `[{"name":"primary","keys":[{"api-key":"test-key","cloak":{"mode":"auto"%s}}]}]`
+	for _, tc := range []struct{ name, property, want string }{
+		{"enabled", `,"relaxed-system-prompt":true`, "true"},
+		{"disabled", `,"relaxed-system-prompt":false`, "false"},
+		{"omitted", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request(t, http.MethodPut, route, fmt.Sprintf(group, tc.property), http.StatusOK)
+			request(t, http.MethodPatch, "/v8/management/config", `{"observability":{"logs":{"debug":true}}}`, http.StatusOK)
+			body := request(t, http.MethodGet, route, "", http.StatusOK)
+			entries := ojson.Parse(body).Array()
+			if len(entries) != 1 {
+				t.Fatalf("expected one Claude group, got %s", body)
+			}
+			keys := entries[0].Get("keys").Array()
+			if len(keys) != 1 {
+				t.Fatalf("expected one Claude key, got %s", body)
+			}
+			if got := keys[0].Get("cloak.relaxed-system-prompt").Raw; got != tc.want {
+				t.Fatalf("relaxed-system-prompt = %q, want %q", got, tc.want)
+			}
+			reloaded, errLoad := config.LoadConfig(path)
+			if errLoad != nil {
+				t.Fatal(errLoad)
+			}
+			if len(reloaded.ClaudeKey) != 1 || reloaded.ClaudeKey[0].Cloak == nil {
+				t.Fatal("v8 write lost the Claude key or cloak settings")
+			}
+			var got string
+			if value := reloaded.ClaudeKey[0].Cloak.RelaxedSystemPrompt; value != nil {
+				got = fmt.Sprint(*value)
+			}
+			if got != tc.want {
+				t.Fatalf("persisted relaxed-system-prompt = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	invalid := fmt.Sprintf(group, `,"relaxed-system-prompt":"false"`)
+	body := request(t, http.MethodPut, route, invalid, http.StatusUnprocessableEntity)
+	if !strings.Contains(body, "api-keys.claude[0].keys[0].cloak.relaxed-system-prompt") {
+		t.Fatalf("missing v8 field path in validation error %s", body)
+	}
+}
+
 func TestManagementV8IndependentContract(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	raw := "port: 8317\nrequest-retry: 3\ndebug: false\napi-keys: [client]\nremote-management: {secret-key: test-password}\n"

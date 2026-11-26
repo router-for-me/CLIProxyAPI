@@ -443,6 +443,8 @@ func isPreservedPointerBoolPath(path []string) bool {
 	switch path[len(path)-1] {
 	case "cache-user-id", "disable-cooling", "oauth-include-create-api-key":
 		return true
+	case "relaxed-system-prompt":
+		return len(path) == 3 && path[0] == "claude-api-key" && path[1] == "cloak"
 	case "openapi":
 		switch len(path) {
 		case 2:

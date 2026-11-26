@@ -436,12 +436,18 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 				return nil, fmt.Errorf("api-keys.%s: unsupported group field %s", provider, field)
 			}
 		}
-		for _, key := range keys.Content {
+		for keyIndex, key := range keys.Content {
 			if key.Kind != yaml.MappingNode {
 				return nil, fmt.Errorf("api-keys.%s key must be a mapping", provider)
 			}
 			if yamlPath(key, "base-url") != nil {
 				return nil, fmt.Errorf("api-keys.%s: base-url belongs to the group", provider)
+			}
+			if provider == "claude" {
+				value := yamlPath(key, "cloak.relaxed-system-prompt")
+				if value != nil && value.Tag != "!!bool" && value.Tag != "!!null" {
+					return nil, fmt.Errorf("api-keys.claude[%d].keys[%d].cloak.relaxed-system-prompt must be a boolean", index, keyIndex)
+				}
 			}
 			item := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			for i := 0; i < len(group.Content); i += 2 {

@@ -652,7 +652,7 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 // resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
 func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
 	if cfg != nil && cfg.Home.Enabled && auth != nil {
-		if mode, strictMode, words, replacements, cacheUserID, ok := claudeauth.ReadMetadataHomeCloak(&auth.Metadata); ok {
+		if mode, strictMode, relaxedSystemPrompt, words, replacements, cacheUserID, ok := claudeauth.ReadMetadataHomeCloak(&auth.Metadata); ok {
 			rawPatterns := claudeauth.ReadMetadataHomeCloakPatterns(&auth.Metadata)
 			var patterns []config.SensitivePatternRule
 			if len(rawPatterns) > 0 {
@@ -676,6 +676,7 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 			return &config.CloakConfig{
 				Mode:                     strings.TrimSpace(mode),
 				StrictMode:               strictMode,
+				RelaxedSystemPrompt:      relaxedSystemPrompt,
 				SensitiveWords:           normalizedWords,
 				SensitiveWordsReplace:    config.NormalizeSensitiveWordsReplace(replacements),
 				SensitivePatternsReplace: patterns,
