@@ -586,10 +586,12 @@ func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 		t.Fatalf("x-extra should be preserved outside schema cleanup path, got=%v", nonSchema["x-extra"])
 	}
 
-	if generationConfig, ok := request["generationConfig"].(map[string]any); ok {
-		if _, ok := generationConfig["maxOutputTokens"]; ok {
-			t.Fatalf("maxOutputTokens should still be removed for non-Claude requests")
-		}
+	generationConfig, ok := request["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig missing or invalid type")
+	}
+	if got, ok := generationConfig["maxOutputTokens"].(float64); !ok || got != 128 {
+		t.Fatalf("maxOutputTokens should be preserved for non-Claude requests, got=%v", generationConfig["maxOutputTokens"])
 	}
 }
 
@@ -1403,7 +1405,7 @@ func TestAntigravityBuildRequest_CaseInsensitiveClaudeModel(t *testing.T) {
 	}
 }
 
-func TestAntigravityBuildRequest_CaseInsensitiveClaudeCapsMaxOutputTokens(t *testing.T) {
+func TestAntigravityBuildRequest_CaseInsensitiveCapsMaxOutputTokens(t *testing.T) {
 	t.Parallel()
 
 	payload := []byte(`{
@@ -1415,15 +1417,24 @@ func TestAntigravityBuildRequest_CaseInsensitiveClaudeCapsMaxOutputTokens(t *tes
 
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
-	for _, modelName := range []string{"claude-sonnet-4-6", "Claude-Sonnet-4-6"} {
-		t.Run(modelName, func(t *testing.T) {
+	for _, tc := range []struct {
+		modelName string
+		want      int64
+	}{
+		{"claude-sonnet-4-6", 64000},
+		{"Claude-Sonnet-4-6", 64000},
+		{"gemini-3-flash", 65536},
+		{"Gemini-3-Flash", 65536},
+		{"gpt-oss-120b-medium", 32768},
+	} {
+		t.Run(tc.modelName, func(t *testing.T) {
 			doc := ojson.NewDoc(payload)
-			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", tc.modelName, doc, false, "", "https://example.com")
 			if errBuild != nil {
-				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+				t.Fatalf("buildRequestDoc(%q) error: %v", tc.modelName, errBuild)
 			}
-			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
-				t.Fatalf("model %q: maxOutputTokens = %d, want capped 64000", modelName, got)
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != tc.want {
+				t.Fatalf("model %q: maxOutputTokens = %d, want capped %d", tc.modelName, got, tc.want)
 			}
 		})
 	}
@@ -1640,23 +1651,21 @@ func TestAntigravityBuildRequest_ClaudeCanonicalizesToolConfigBeforeValidated(t 
 	})
 }
 
-func TestAntigravityBuildRequest_NonClaudeStripsAllMaxOutputTokenAliases(t *testing.T) {
+func TestAntigravityBuildRequest_NonClaudeCanonicalizesAndPreservesMaxOutputTokenAliases(t *testing.T) {
 	t.Parallel()
 
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
 
 	cases := []struct {
-		name              string
-		payload           string
-		wantGenConfigGone bool
-		wantTemperature   float64
-		checkTemperature  bool
+		name             string
+		payload          string
+		wantTemperature  float64
+		checkTemperature bool
 	}{
 		{
-			name:              "snake_container_snake_key_only",
-			payload:           `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"max_output_tokens":4096}}}`,
-			wantGenConfigGone: true,
+			name:    "snake_container_snake_key_only",
+			payload: `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"max_output_tokens":4096}}}`,
 		},
 		{
 			name:             "snake_container_snake_key_preserves_siblings",
@@ -1665,9 +1674,8 @@ func TestAntigravityBuildRequest_NonClaudeStripsAllMaxOutputTokenAliases(t *test
 			checkTemperature: true,
 		},
 		{
-			name:              "snake_container_camel_key_only",
-			payload:           `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"maxOutputTokens":4096}}}`,
-			wantGenConfigGone: true,
+			name:    "snake_container_camel_key_only",
+			payload: `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"maxOutputTokens":4096}}}`,
 		},
 		{
 			name:             "camel_container_snake_key",
@@ -1690,24 +1698,18 @@ func TestAntigravityBuildRequest_NonClaudeStripsAllMaxOutputTokenAliases(t *test
 			if errBuild != nil {
 				t.Fatalf("buildRequestDoc() error: %v", errBuild)
 			}
-			for _, path := range []string{
-				"request.generationConfig.maxOutputTokens",
-				"request.generationConfig.max_output_tokens",
-				"request.generation_config.maxOutputTokens",
-				"request.generation_config.max_output_tokens",
-			} {
-				if ojson.GetBytes(finalPayload, path).Exists() {
-					t.Fatalf("%s was not stripped on non-Claude model: %s", path, finalPayload)
-				}
+			if ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
+				t.Fatalf("request.generation_config should be canonicalized into request.generationConfig: %s", finalPayload)
 			}
-			if tc.wantGenConfigGone && ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
-				t.Fatalf("empty request.generation_config should be pruned: %s", finalPayload)
+			if ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens").Exists() {
+				t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 4096 {
+				t.Fatalf("maxOutputTokens = %d, want 4096; body=%s", got, finalPayload)
 			}
 			if tc.checkTemperature {
-				tempCamel := ojson.GetBytes(finalPayload, "request.generationConfig.temperature")
-				tempSnake := ojson.GetBytes(finalPayload, "request.generation_config.temperature")
-				if (!tempCamel.Exists() || tempCamel.Float() != tc.wantTemperature) && (!tempSnake.Exists() || tempSnake.Float() != tc.wantTemperature) {
-					t.Fatalf("temperature sibling lost (want %v): %s", tc.wantTemperature, finalPayload)
+				if got := ojson.GetBytes(finalPayload, "request.generationConfig.temperature").Float(); got != tc.wantTemperature {
+					t.Fatalf("temperature = %v, want %v; body=%s", got, tc.wantTemperature, finalPayload)
 				}
 			}
 		})
@@ -1723,13 +1725,11 @@ func TestAntigravityBuildRequest_NonClaudeStripsAllMaxOutputTokenAliases(t *test
 		if ojson.GetBytes(finalPayload, "request.generation_config").Exists() {
 			t.Fatalf("emitted duplicate request.generation_config alongside request.generationConfig: %s", finalPayload)
 		}
-		for _, path := range []string{
-			"request.generationConfig.maxOutputTokens",
-			"request.generationConfig.max_output_tokens",
-		} {
-			if ojson.GetBytes(finalPayload, path).Exists() {
-				t.Fatalf("%s was not stripped on non-Claude model: %s", path, finalPayload)
-			}
+		if ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens").Exists() {
+			t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+		}
+		if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 4096 {
+			t.Fatalf("maxOutputTokens = %d, want 4096; body=%s", got, finalPayload)
 		}
 		if got := ojson.GetBytes(finalPayload, "request.generationConfig.temperature").Float(); got != 0.7 {
 			t.Fatalf("temperature = %v, want 0.7; body=%s", got, finalPayload)
@@ -1841,8 +1841,8 @@ func TestAntigravityBuildRequest_CaseInsensitiveGeminiProAndImageModels(t *testi
 			if ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").Exists() {
 				t.Fatalf("model %q: unexpected VALIDATED mode on Gemini model", modelName)
 			}
-			if ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Exists() {
-				t.Fatalf("model %q: maxOutputTokens should be removed for non-Claude model", modelName)
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 2048 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want 2048", modelName, got)
 			}
 			firstParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.0.parameters")
 			if got := len(firstParams.Get("properties.item.anyOf").Array()); got != 3 {

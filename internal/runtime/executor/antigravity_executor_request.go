@@ -192,24 +192,30 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	if selection.MaxOutputTokens > 0 {
 		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
 	} else if maxOut, ok := antigravityRequestedMaxOutputTokensDoc(doc); ok {
-		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
-		if modelInfo == nil && lowerModel != modelName {
-			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
-		}
-		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 && maxOut > modelInfo.MaxCompletionTokens {
-			helps.CapAntigravityMaxOutputTokensDoc(doc, modelInfo.MaxCompletionTokens, isClaudeModel)
+		if maxOut > 0 {
+			limit := maxOut
+			modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+			if modelInfo == nil && lowerModel != modelName {
+				modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
+			}
+			if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+				limit = modelInfo.MaxCompletionTokens
+			}
+			helps.CapAntigravityMaxOutputTokensDoc(doc, limit, isClaudeModel)
+		} else if doc.Get("request.generation_config").Exists() || doc.Get("request.generationConfig.max_output_tokens").Exists() {
+			helps.CanonicalizeAntigravityGenerationConfigDoc(doc)
+			_ = doc.Delete("request.generationConfig.max_output_tokens")
+			if !doc.Get("request.generationConfig.maxOutputTokens").Exists() {
+				_ = doc.Set("request.generationConfig.maxOutputTokens", maxOut)
+			}
 		}
 	}
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
-	if isClaudeModel {
-		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
-			canonicalizeAntigravityToolConfigForValidatedDoc(doc)
-			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		}
-	} else if selection.MaxOutputTokens == 0 {
-		stripAntigravityMaxOutputTokensDoc(doc)
+	if isClaudeModel && !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
+		canonicalizeAntigravityToolConfigForValidatedDoc(doc)
+		_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
@@ -332,35 +338,6 @@ func canonicalizeAntigravityFunctionCallingConfigDoc(doc *ojson.Doc) {
 		helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", snakeFCC)
 	}
 	_ = doc.Delete("request.toolConfig.function_calling_config")
-}
-
-// stripAntigravityMaxOutputTokensDoc removes maxOutputTokens and its snake_case
-// aliases under both generationConfig and generation_config containers, pruning
-// an emptied generation_config container and merging mixed containers when both
-// generationConfig and generation_config remain present.
-func stripAntigravityMaxOutputTokensDoc(doc *ojson.Doc) {
-	if doc == nil {
-		return
-	}
-	_ = doc.Delete("request.generationConfig.maxOutputTokens")
-	_ = doc.Delete("request.generationConfig.max_output_tokens")
-	deletedSnakeGenConfig := false
-	for _, path := range []string{
-		"request.generation_config.maxOutputTokens",
-		"request.generation_config.max_output_tokens",
-	} {
-		if doc.Get(path).Exists() && doc.Delete(path) == nil {
-			deletedSnakeGenConfig = true
-		}
-	}
-	if deletedSnakeGenConfig {
-		if gc := doc.Get("request.generation_config"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
-			_ = doc.Delete("request.generation_config")
-		}
-	}
-	if doc.Get("request.generation_config").Exists() && doc.Get("request.generationConfig").Exists() {
-		helps.CanonicalizeAntigravityGenerationConfigDoc(doc)
-	}
 }
 
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
