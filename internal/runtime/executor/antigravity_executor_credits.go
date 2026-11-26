@@ -130,8 +130,12 @@ func nextAntigravityCreditsBalanceWriteVersion() string {
 }
 
 type antigravityCreditsRefreshRegistry struct {
-	mu           sync.Mutex
-	currentEpoch uint64
+	mu               sync.Mutex
+	currentEpoch     uint64
+	currentCreatedAt time.Time
+	currentUpdatedAt time.Time
+	currentScope     string
+	states           map[string]*antigravityCreditsHintRefreshState
 }
 
 type antigravityCreditsHintRefreshState struct {
@@ -140,8 +144,15 @@ type antigravityCreditsHintRefreshState struct {
 	createdAt         time.Time
 	updatedAt         time.Time
 	scope             string
+	superseded        bool
 	lastAttempt       time.Time
 	task              *antigravityCreditsRefreshTask
+}
+
+func antigravityCreditsScopeIsOlder(epoch uint64, createdAt, updatedAt time.Time, refEpoch uint64, refCreatedAt, refUpdatedAt time.Time) bool {
+	return epoch < refEpoch ||
+		(epoch == refEpoch && createdAt.Before(refCreatedAt)) ||
+		(epoch == refEpoch && createdAt.Equal(refCreatedAt) && updatedAt.Before(refUpdatedAt))
 }
 
 type antigravityCreditsRefreshTask struct {
@@ -816,6 +827,9 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 	if authID == "" {
 		return
 	}
+	if _, current := advanceAntigravityCreditsRefreshRegistry(auth, false); !current {
+		return
+	}
 	if hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth); ok && cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
 		return
 	}
@@ -846,13 +860,13 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 	e.queueAntigravityCreditsRefresh(ctx, auth, accessToken, antigravityCreditsHintRefreshTimeout)
 }
 
-func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, timeout time.Duration) {
-	if e == nil || isAntigravityAuthDisabled(auth) || !antigravityCreditsRetryEnabled(e.cfg) || (ctx != nil && ctx.Err() != nil) {
-		return
+func advanceAntigravityCreditsRefreshRegistry(auth *cliproxyauth.Auth, ensureState bool) (*antigravityCreditsHintRefreshState, bool) {
+	if auth == nil {
+		return nil, false
 	}
 	authID := strings.TrimSpace(auth.ID)
-	if authID == "" || strings.TrimSpace(accessToken) == "" {
-		return
+	if authID == "" {
+		return nil, false
 	}
 	refreshScope := cliproxyauth.AntigravityCreditsScope(auth)
 	refreshKey := antigravityCreditsRefreshKeyForScope(authID, refreshScope)
@@ -860,40 +874,60 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 	registry, okRegistry := registryValue.(*antigravityCreditsRefreshRegistry)
 	if !okRegistry || registry == nil {
 		antigravityCreditsRefreshRegistries.Delete(authID)
-		return
+		return nil, false
 	}
 	registry.mu.Lock()
-	if auth.RegistrationEpoch < registry.currentEpoch {
-		registry.mu.Unlock()
-		return
+	defer registry.mu.Unlock()
+	if auth.RegistrationEpoch < registry.currentEpoch ||
+		(registry.currentScope != "" && registry.currentScope != refreshScope &&
+			antigravityCreditsScopeIsOlder(auth.RegistrationEpoch, auth.CreatedAt, auth.UpdatedAt, registry.currentEpoch, registry.currentCreatedAt, registry.currentUpdatedAt)) {
+		return nil, false
 	}
-	registry.currentEpoch = auth.RegistrationEpoch
+	if registry.currentScope != refreshScope {
+		registry.currentEpoch = auth.RegistrationEpoch
+		registry.currentCreatedAt = auth.CreatedAt
+		registry.currentUpdatedAt = auth.UpdatedAt
+		registry.currentScope = refreshScope
+	} else {
+		if auth.RegistrationEpoch > registry.currentEpoch {
+			registry.currentEpoch = auth.RegistrationEpoch
+		}
+		if auth.CreatedAt.After(registry.currentCreatedAt) {
+			registry.currentCreatedAt = auth.CreatedAt
+		}
+		if auth.UpdatedAt.After(registry.currentUpdatedAt) {
+			registry.currentUpdatedAt = auth.UpdatedAt
+		}
+	}
+	for key, oldState := range registry.states {
+		if key == refreshKey {
+			continue
+		}
+		if oldState == nil {
+			delete(registry.states, key)
+			continue
+		}
+		oldState.mu.Lock()
+		if !antigravityCreditsScopeIsOlder(auth.RegistrationEpoch, auth.CreatedAt, auth.UpdatedAt, oldState.registrationEpoch, oldState.createdAt, oldState.updatedAt) {
+			oldState.superseded = true
+			if oldState.task != nil {
+				oldState.task.cancel()
+			}
+			antigravityCreditsHintRefreshByID.CompareAndDelete(key, oldState)
+			delete(registry.states, key)
+			oldState.registrationEpoch = auth.RegistrationEpoch
+		}
+		oldState.mu.Unlock()
+	}
+	if !ensureState {
+		return nil, true
+	}
 	state := &antigravityCreditsHintRefreshState{
 		registrationEpoch: auth.RegistrationEpoch,
 		createdAt:         auth.CreatedAt,
 		updatedAt:         auth.UpdatedAt,
 		scope:             refreshScope,
 	}
-	antigravityCreditsHintRefreshByID.Range(func(key, value any) bool {
-		text, okKey := key.(string)
-		if !okKey || (text != authID && !strings.HasPrefix(text, authID+"|")) || text == refreshKey {
-			return true
-		}
-		oldState, okState := value.(*antigravityCreditsHintRefreshState)
-		if !okState || oldState == nil {
-			return true
-		}
-		oldState.mu.Lock()
-		if auth.RegistrationEpoch > oldState.registrationEpoch {
-			if oldState.task != nil {
-				oldState.task.cancel()
-			}
-			antigravityCreditsHintRefreshByID.CompareAndDelete(key, value)
-			oldState.registrationEpoch = auth.RegistrationEpoch
-		}
-		oldState.mu.Unlock()
-		return true
-	})
 	if existing, loaded := antigravityCreditsHintRefreshByID.LoadOrStore(refreshKey, state); loaded {
 		if cast, ok := existing.(*antigravityCreditsHintRefreshState); ok && cast != nil {
 			state = cast
@@ -902,7 +936,25 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 			antigravityCreditsHintRefreshByID.Store(refreshKey, state)
 		}
 	}
-	registry.mu.Unlock()
+	if registry.states == nil {
+		registry.states = make(map[string]*antigravityCreditsHintRefreshState)
+	}
+	registry.states[refreshKey] = state
+	return state, true
+}
+
+func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, timeout time.Duration) {
+	if e == nil || isAntigravityAuthDisabled(auth) || !antigravityCreditsRetryEnabled(e.cfg) || (ctx != nil && ctx.Err() != nil) {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" || strings.TrimSpace(accessToken) == "" {
+		return
+	}
+	state, current := advanceAntigravityCreditsRefreshRegistry(auth, true)
+	if !current || state == nil {
+		return
+	}
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -910,7 +962,7 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 	now := time.Now()
 	state.mu.Lock()
 	scope := cliproxyauth.AntigravityCreditsScope(auth)
-	if ctx.Err() != nil {
+	if state.superseded || ctx.Err() != nil {
 		state.mu.Unlock()
 		return
 	}
@@ -923,15 +975,23 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 	} else if state.scope != scope {
 		state.mu.Unlock()
 		return
-	} else if oldTask != nil {
-		if oldTask.ctx.Err() == nil {
-			state.mu.Unlock()
-			return
+	} else {
+		if auth.CreatedAt.After(state.createdAt) {
+			state.createdAt = auth.CreatedAt
 		}
-		if oldTask.lifecycle.Err() != nil {
-			state.lastAttempt = time.Time{}
+		if auth.UpdatedAt.After(state.updatedAt) {
+			state.updatedAt = auth.UpdatedAt
 		}
-		state.task = nil
+		if oldTask != nil {
+			if oldTask.ctx.Err() == nil {
+				state.mu.Unlock()
+				return
+			}
+			if oldTask.lifecycle.Err() != nil {
+				state.lastAttempt = time.Time{}
+			}
+			state.task = nil
+		}
 	}
 	if !state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < antigravityCreditsHintRefreshInterval {
 		state.mu.Unlock()
@@ -1056,7 +1116,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 			defer state.mu.Unlock()
 			refreshKey := antigravityCreditsRefreshKeyForScope(authID, state.scope)
 			current, _ := antigravityCreditsHintRefreshByID.Load(refreshKey)
-			if current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch || state.scope != cliproxyauth.AntigravityCreditsScope(auth) {
+			if state.superseded || current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch || state.scope != cliproxyauth.AntigravityCreditsScope(auth) {
 				return
 			}
 		}

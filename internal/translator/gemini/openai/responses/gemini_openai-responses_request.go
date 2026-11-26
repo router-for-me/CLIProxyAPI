@@ -38,7 +38,7 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	root := util.ParseGJSONBytesNoCopy(rawJSON)
 
 	// Extract tools and forward map early so request contents and toolDeclarations use the exact same forward map
-	functionDeclarations, forwardMap, _ := util.BuildGeminiFunctionDeclarations(root)
+	functionDeclarations, forwardMap, reverseMap := util.BuildGeminiFunctionDeclarations(root)
 	var toolBlocks [][]byte
 	hasGoogleSearch := false
 	if HasResponsesWebSearchTool(root) && ModelSupportsWebSearch(modelName) && AllowsResponsesWebSearchToolChoice(root) {
@@ -51,6 +51,19 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		toolBlocks = append(toolBlocks, googleSearchBlock)
 		hasGoogleSearch = true
 	}
+
+	toolChoice := root.Get("tool_choice")
+	var allowedToolsConfig []byte
+	handledAllowedTools := false
+	if len(functionDeclarations) > 0 && toolChoice.Exists() {
+		functionDeclarations, allowedToolsConfig, handledAllowedTools = util.FilterGeminiFunctionDeclarationsByResponsesToolChoice(
+			toolChoice,
+			functionDeclarations,
+			forwardMap,
+			reverseMap,
+		)
+	}
+
 	if len(functionDeclarations) > 0 {
 		fnBlock := []byte(`{"functionDeclarations":[]}`)
 		fnBlock, _ = ojson.SetRawBytes(fnBlock, "functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
@@ -60,12 +73,15 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		_ = outDoc.SetRawBytes("tools", translatorcommon.JoinRawArray(toolBlocks))
 	}
 
-	// Handle tool_choice if present (only configure function calling when function declarations exist)
-	if len(functionDeclarations) > 0 {
-		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-			if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
-				_ = outDoc.SetRawBytes("toolConfig.functionCallingConfig", toolConfig)
-			}
+	// Handle tool_choice if present (only configure function calling when function declarations exist,
+	// or when allowed_tools filtered out all functions without leaving a built-in search tool).
+	if handledAllowedTools {
+		if len(functionDeclarations) > 0 || !hasGoogleSearch {
+			_ = outDoc.SetRawBytes("toolConfig.functionCallingConfig", allowedToolsConfig)
+		}
+	} else if len(functionDeclarations) > 0 && toolChoice.Exists() {
+		if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
+			_ = outDoc.SetRawBytes("toolConfig.functionCallingConfig", toolConfig)
 		}
 	}
 	// Gemini rejects built-in googleSearch combined with functionDeclarations

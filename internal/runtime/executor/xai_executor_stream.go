@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -86,14 +88,23 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		scanner.Buffer(nil, 52_428_800)
 		claudeInputTokens := helps.NewClaudeInputTokenState(prepared.from, prepared.to, prepared.responseFormat, prepared.originalPayload)
 		var streamUsage helps.StreamUsageBuffer
-		defer streamUsage.Publish(ctx, reporter)
+		var terminalDelivered bool
+		defer func() {
+			if errCtx := ctx.Err(); errCtx != nil && !terminalDelivered {
+				if !streamUsage.PublishFailure(ctx, reporter, errCtx) {
+					reporter.PublishFailure(ctx, errCtx)
+				}
+				return
+			}
+			streamUsage.Publish(ctx, reporter)
+		}()
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 		namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
 		var pendingEventLine []byte
-		emitTranslatedLine := func(translatedLine []byte) bool {
+		emitTranslatedLine := func(translatedLine []byte) (int, bool) {
 			lines, errBridge := prepared.applyPatch.Stream(translatedLine)
 			if errBridge != nil {
 				streamUsage.PublishFailure(ctx, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -124,11 +135,11 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
-					return false
+					return 0, false
 				}
 			}
 			if helps.StopApplyPatchStreamWithUsage(ctx, param, reporter, &streamUsage, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
-				return false
+				return 0, false
 			}
 			if errBridge != nil {
 				errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
@@ -137,17 +148,19 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				case out <- cliproxyexecutor.StreamChunk{Err: errBridge}:
 				case <-ctx.Done():
 				}
-				return false
+				return 0, false
 			}
-			return true
+			return len(chunks), true
 		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			if bytes.HasPrefix(line, xaiEventTag) {
-				if pendingEventLine != nil && !emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")) {
-					return
+				if pendingEventLine != nil {
+					if _, okEmit := emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")); !okEmit {
+						return
+					}
 				}
 				pendingEventLine = bytes.Clone(line)
 				continue
@@ -156,9 +169,24 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			if bytes.HasPrefix(line, xaiDataTag) {
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
+				var pendingEventName string
+				if hasPendingEventLine && bytes.HasPrefix(pendingEventLine, xaiEventTag) {
+					pendingEventName = strings.TrimSpace(string(pendingEventLine[len(xaiEventTag):]))
+				}
 				for i, eventData := range eventDataList {
 					if rawEventType := ojson.GetBytesNoCopy(eventData, "type").String(); rawEventType == "response.output_item.done" || rawEventType == "response.completed" || rawEventType == "response.incomplete" || rawEventType == "response.done" {
 						streamUsage.ObserveResponsesStream(eventData)
+					}
+					if errTerminal, okFail := xaiTerminalFailureErr(pendingEventName, eventData); okFail {
+						helps.RecordAPIResponseError(ctx, e.cfg, errTerminal)
+						if !streamUsage.PublishFailure(ctx, reporter, errTerminal) {
+							reporter.PublishFailure(ctx, errTerminal)
+						}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: errTerminal}:
+						case <-ctx.Done():
+						}
+						return
 					}
 					prepared.applyPatch.RememberDispatcherEvent(eventData)
 					eventData = namespaceRestorer.restore(eventData)
@@ -174,6 +202,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					}
 					reporter.ObserveResponseModel(eventData)
 					normalizedEventName := ojson.GetBytesNoCopy(eventData, "type").String()
+					if normalizedEventName == "response.done" && prepared.responseFormat != sdktranslator.FormatOpenAIResponse {
+						normalizedEventName, eventData = normalizeMetaTerminalEventForTranslation(eventData, normalizedEventName)
+					}
 
 					if hasPendingEventLine {
 						eventLine := []byte("event: " + normalizedEventName)
@@ -181,29 +212,35 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 							eventLine = xaiNormalizeReasoningSummaryEventLine(pendingEventLine, normalizedEventName)
 							pendingEventLine = nil
 						}
-						if !emitTranslatedLine(eventLine) {
+						if _, okEmit := emitTranslatedLine(eventLine); !okEmit {
 							return
 						}
 					}
-					if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
+					emitted, okEmit := emitTranslatedLine(append([]byte("data: "), eventData...))
+					if !okEmit {
 						return
+					}
+					if emitted > 0 && (normalizedEventName == "response.completed" || normalizedEventName == "response.incomplete" || normalizedEventName == "response.done") {
+						terminalDelivered = true
 					}
 				}
 				continue
 			}
 
 			if pendingEventLine != nil {
-				if !emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")) {
+				if _, okEmit := emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")); !okEmit {
 					return
 				}
 				pendingEventLine = nil
 			}
-			if !emitTranslatedLine(bytes.Clone(line)) {
+			if _, okEmit := emitTranslatedLine(bytes.Clone(line)); !okEmit {
 				return
 			}
 		}
 		if pendingEventLine != nil {
-			emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, ""))
+			if _, okEmit := emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")); !okEmit {
+				return
+			}
 		}
 		finishEvents, errFinish := prepared.applyPatch.FinishStream()
 		if errFinish != nil {
@@ -228,12 +265,30 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			if terminalDelivered && errors.Is(errScan, context.Canceled) {
+				return
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
+			return
+		}
+		if ctx.Err() != nil || terminalDelivered {
+			return
+		}
+		truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before terminal event", streamTruncated: true}
+		helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+		if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+			reporter.PublishFailure(ctx, truncErr)
+		}
+		select {
+		case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+		case <-ctx.Done():
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil

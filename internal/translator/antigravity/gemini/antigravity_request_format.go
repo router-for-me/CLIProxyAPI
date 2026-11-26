@@ -26,6 +26,12 @@ func normalizeAntigravitySystemInstructionDoc(doc *ojson.Doc, prefix string) {
 	if !instruction.Exists() {
 		return
 	}
+	if !instruction.IsObject() {
+		if instruction.Type == ojson.Null {
+			_ = doc.Delete(instructionPath)
+		}
+		return
+	}
 	_ = doc.Set(instructionPath+".role", "user")
 	parts := instruction.Get("parts").Array()
 	if len(parts) == 0 {

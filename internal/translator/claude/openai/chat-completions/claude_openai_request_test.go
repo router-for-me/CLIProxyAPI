@@ -1691,3 +1691,93 @@ func TestConvertOpenAIRequestToClaude_DropsEmptyAndWhitespaceTextBlocks(t *testi
 		t.Fatalf("messages.0.content.2 must not receive cache_control from middle empty part")
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_IgnoresNullAndInvalidOptionalFields(t *testing.T) {
+	t.Run("null top_p stop and max_tokens with max_completion_tokens", func(t *testing.T) {
+		input := `{"model":"claude-sonnet-4-6","max_tokens":null,"max_completion_tokens":1024,"top_p":null,"stop":null,"messages":[{"role":"user","content":"hi"}]}`
+		out, errConvert := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(input), false)
+		if errConvert != nil {
+			t.Fatalf("unexpected error: %v", errConvert)
+		}
+		root := util.ParseGJSONBytesNoCopy(out)
+		if got := root.Get("max_tokens").Int(); got != 1024 {
+			t.Fatalf("max_tokens = %d, want 1024; output=%s", got, out)
+		}
+		if root.Get("top_p").Exists() {
+			t.Fatalf("top_p must be omitted when null; output=%s", out)
+		}
+		if root.Get("stop_sequences").Exists() {
+			t.Fatalf("stop_sequences must be omitted when stop is null; output=%s", out)
+		}
+	})
+
+	t.Run("non-positive or non-numeric max_tokens falls back", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			input     string
+			wantLimit int64
+		}{
+			{
+				name:      "zero max_tokens falls back to max_completion_tokens",
+				input:     `{"model":"claude-sonnet-4-6","max_tokens":0,"max_completion_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`,
+				wantLimit: 1024,
+			},
+			{
+				name:      "negative max_tokens keeps default",
+				input:     `{"model":"claude-test","max_tokens":-5,"messages":[{"role":"user","content":"hi"}]}`,
+				wantLimit: 32000,
+			},
+			{
+				name:      "string max_tokens keeps default",
+				input:     `{"model":"claude-test","max_tokens":"","messages":[{"role":"user","content":"hi"}]}`,
+				wantLimit: 32000,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				out, errConvert := ConvertOpenAIRequestToClaude("claude-test", []byte(tc.input), false)
+				if errConvert != nil {
+					t.Fatalf("unexpected error: %v", errConvert)
+				}
+				if got := ojson.GetBytesNoCopy(out, "max_tokens").Int(); got != tc.wantLimit {
+					t.Fatalf("max_tokens = %d, want %d; output=%s", got, tc.wantLimit, out)
+				}
+			})
+		}
+	})
+
+	t.Run("top_p numeric zero preserved and non-number omitted", func(t *testing.T) {
+		numOut, _ := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"top_p":0,"messages":[{"role":"user","content":"hi"}]}`), false)
+		if got := ojson.GetBytesNoCopy(numOut, "top_p"); !got.Exists() || got.Float() != 0 {
+			t.Fatalf("numeric top_p=0 should be preserved; output=%s", numOut)
+		}
+		strOut, _ := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"top_p":"0.5","messages":[{"role":"user","content":"hi"}]}`), false)
+		if ojson.GetBytesNoCopy(strOut, "top_p").Exists() {
+			t.Fatalf("non-numeric top_p should be omitted; output=%s", strOut)
+		}
+	})
+
+	t.Run("stop empty string and array with null or empty items", func(t *testing.T) {
+		emptyStrOut, _ := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"stop":"","messages":[{"role":"user","content":"hi"}]}`), false)
+		if ojson.GetBytesNoCopy(emptyStrOut, "stop_sequences").Exists() {
+			t.Fatalf("stop_sequences must be omitted for empty stop string; output=%s", emptyStrOut)
+		}
+
+		emptyArrOut, _ := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"stop":[null,""],"messages":[{"role":"user","content":"hi"}]}`), false)
+		if ojson.GetBytesNoCopy(emptyArrOut, "stop_sequences").Exists() {
+			t.Fatalf("stop_sequences must be omitted when array only has null/empty; output=%s", emptyArrOut)
+		}
+
+		mixedArrOut, _ := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"stop":["END",null,"","\n",123],"messages":[{"role":"user","content":"hi"}]}`), false)
+		seqs := ojson.GetBytesNoCopy(mixedArrOut, "stop_sequences").Array()
+		if len(seqs) != 2 || seqs[0].String() != "END" || seqs[1].String() != "\n" {
+			t.Fatalf("stop_sequences = %s, want [\"END\",\"\\n\"]; output=%s", ojson.GetBytesNoCopy(mixedArrOut, "stop_sequences").Raw, mixedArrOut)
+		}
+
+		newlineOut, _ := ConvertOpenAIRequestToClaude("claude-test", []byte(`{"stop":"\n","messages":[{"role":"user","content":"hi"}]}`), false)
+		newlineSeqs := ojson.GetBytesNoCopy(newlineOut, "stop_sequences").Array()
+		if len(newlineSeqs) != 1 || newlineSeqs[0].String() != "\n" {
+			t.Fatalf("stop_sequences = %s, want [\"\\n\"]; output=%s", ojson.GetBytesNoCopy(newlineOut, "stop_sequences").Raw, newlineOut)
+		}
+	})
+}

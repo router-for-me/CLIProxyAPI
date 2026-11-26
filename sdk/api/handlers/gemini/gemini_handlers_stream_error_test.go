@@ -168,8 +168,11 @@ func TestGeminiStreamGenerateContentSendKeepAliveBeforeFTWritesSSEErrorOnFailure
 		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, ": keep-alive\n\n") {
-		t.Fatalf("missing keep-alive comment: %q", body)
+	if strings.Contains(body, ": keep-alive") {
+		t.Fatalf("unexpected SSE keep-alive comment: %q", body)
+	}
+	if !strings.HasPrefix(body, "\n\n") {
+		t.Fatalf("missing empty SSE keep-alive frame: %q", body)
 	}
 	if !strings.Contains(body, "event: error\ndata: ") || !strings.Contains(body, "gemini upstream failed after keepalive") {
 		t.Fatalf("missing Gemini SSE JSON error event after keepalive: %q", body)

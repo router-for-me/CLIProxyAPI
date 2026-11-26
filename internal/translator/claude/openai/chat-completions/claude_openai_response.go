@@ -33,6 +33,8 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	NextToolCallIndex    int
+	ToolNameMap          map[string]string
+	ToolNameMapResolved  bool
 }
 
 type claudeUsageTokens struct {
@@ -100,6 +102,53 @@ func effectiveChatResponseModel(servedModel, requestedModel string) string {
 		return servedModel
 	}
 	return requestedModel
+}
+
+func buildClaudeOpenAIToolNameRestoreMap(originalRequestRawJSON []byte) map[string]string {
+	if len(originalRequestRawJSON) == 0 {
+		return nil
+	}
+	tools := util.ParseGJSONBytesNoCopy(originalRequestRawJSON).Get("tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	var restore map[string]string
+	tools.ForEach(func(_, tool ojson.Result) bool {
+		if tool.Get("type").String() != "function" {
+			return true
+		}
+		orig := tool.Get("function.name").String()
+		if orig == "" {
+			return true
+		}
+		sanitized := util.SanitizeClaudeFunctionName(orig)
+		if restore == nil {
+			restore = make(map[string]string)
+		}
+		if _, exists := restore[sanitized]; !exists {
+			restore[strings.Clone(sanitized)] = strings.Clone(orig)
+		}
+		return true
+	})
+	return restore
+}
+
+func restoreClaudeOpenAIToolName(name string, restoreMap map[string]string) string {
+	if orig, ok := restoreMap[name]; ok && orig != "" {
+		return orig
+	}
+	return name
+}
+
+func formatClaudeErrorToOpenAI(root ojson.Result) ([]byte, bool) {
+	errorData := root.Get("error")
+	if !errorData.Exists() {
+		return nil, false
+	}
+	errorDoc := ojson.NewDoc([]byte(`{"error":{"message":"","type":""}}`))
+	_ = errorDoc.Set("error.message", errorData.Get("message").String())
+	_ = errorDoc.Set("error.type", errorData.Get("type").String())
+	return errorDoc.Bytes(), true
 }
 
 // ConvertClaudeResponseToOpenAI converts Claude Code streaming response format to OpenAI Chat Completions format.
@@ -219,8 +268,12 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 			if blockType == "tool_use" {
 				// Start of tool call - initialize accumulator to track arguments
+				if !p.ToolNameMapResolved {
+					p.ToolNameMap = buildClaudeOpenAIToolNameRestoreMap(originalRequestRawJSON)
+					p.ToolNameMapResolved = true
+				}
 				toolCallID := strings.Clone(contentBlock.Get("id").String())
-				toolName := strings.Clone(contentBlock.Get("name").String())
+				toolName := strings.Clone(restoreClaudeOpenAIToolName(contentBlock.Get("name").String(), p.ToolNameMap))
 				index := int(root.Get("index").Int())
 
 				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
@@ -370,11 +423,8 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 	case "error":
 		// Error event - format and return error response
-		if errorData := root.Get("error"); errorData.Exists() {
-			errorDoc := ojson.NewDoc([]byte(`{"error":{"message":"","type":""}}`))
-			_ = errorDoc.Set("error.message", errorData.Get("message").String())
-			_ = errorDoc.Set("error.type", errorData.Get("type").String())
-			return [][]byte{errorDoc.Bytes()}
+		if errBytes, ok := formatClaudeErrorToOpenAI(root); ok {
+			return [][]byte{errBytes}
 		}
 		return [][]byte{}
 
@@ -425,6 +475,15 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 			continue
 		}
 		chunks = append(chunks, bytes.TrimSpace(line[5:]))
+	}
+
+	if len(chunks) == 0 && ojson.ValidBytes(rawJSON) {
+		root := util.ParseGJSONBytesNoCopy(rawJSON)
+		if root.Get("type").String() == "error" {
+			if errBytes, ok := formatClaudeErrorToOpenAI(root); ok {
+				return errBytes
+			}
+		}
 	}
 
 	// Base OpenAI non-streaming response template
@@ -543,6 +602,11 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 				}
 				usageTokens.Merge(usage)
 			}
+
+		case "error":
+			if errBytes, ok := formatClaudeErrorToOpenAI(root); ok {
+				return errBytes
+			}
 		}
 	}
 
@@ -579,6 +643,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 
 	// Set tool calls if any were accumulated during processing
 	if len(toolCallsAccumulator) > 0 {
+		toolNameMap := buildClaudeOpenAIToolNameRestoreMap(originalRequestRawJSON)
 		toolCallsCount := 0
 		maxIndex := -1
 		for index := range toolCallsAccumulator {
@@ -602,7 +667,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 
 			_ = outDoc.Set(idPath, accumulator.ID)
 			_ = outDoc.Set(typePath, "function")
-			_ = outDoc.Set(namePath, accumulator.Name)
+			_ = outDoc.Set(namePath, restoreClaudeOpenAIToolName(accumulator.Name, toolNameMap))
 			_ = outDoc.Set(argumentsPath, arguments)
 			toolCallsCount++
 		}

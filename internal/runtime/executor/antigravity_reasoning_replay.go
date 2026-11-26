@@ -1206,9 +1206,7 @@ func (b *antigravityReplayBatch) removeThoughtSignatureFromOtherParts(contentInd
 			continue
 		}
 		partDoc := ojson.NewDoc([]byte(part.Raw))
-		for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-			_ = partDoc.Delete(field)
-		}
+		partDoc = deleteAntigravityPartThoughtSignatureFieldsPartDoc(partDoc)
 		changed = b.setPart(key, partDoc.Bytes()) || changed
 	}
 	return changed
@@ -1302,9 +1300,7 @@ func (b *antigravityReplayBatch) applyFunctionCallSignature(itemResult ojson.Res
 	if errSet := partDoc.SetRawBytes("functionCall", nativeCall); errSet != nil {
 		return false
 	}
-	for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		_ = partDoc.Delete(field)
-	}
+	partDoc = deleteAntigravityPartThoughtSignatureFieldsPartDoc(partDoc)
 	if signature != "" {
 		if errSet := partDoc.Set("thoughtSignature", signature); errSet != nil {
 			return false
@@ -1327,9 +1323,7 @@ func (b *antigravityReplayBatch) applyFunctionCallSignature(itemResult ojson.Res
 				continue
 			}
 			otherDoc := ojson.NewDoc([]byte(otherPart.Raw))
-			for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-				_ = otherDoc.Delete(field)
-			}
+			otherDoc = deleteAntigravityPartThoughtSignatureFieldsPartDoc(otherDoc)
 			pending[otherKey] = otherDoc.Bytes()
 		}
 	}
@@ -1960,10 +1954,8 @@ func antigravityRemoveThoughtSignatureFromOtherParts(payload []byte, contentInde
 		if doc == nil {
 			doc = ojson.NewDoc(payload)
 		}
-		for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-			if doc.Delete(partPath+"."+field) == nil {
-				changed = true
-			}
+		if deleteAntigravityPartThoughtSignatureFieldsDoc(doc, partPath) {
+			changed = true
 		}
 	}
 	if !changed || doc == nil {
@@ -2860,9 +2852,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 	if errSet := doc.SetRawBytes(partPath+".functionCall", nativeCall); errSet != nil {
 		return payload, false
 	}
-	for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		_ = doc.Delete(partPath + "." + field)
-	}
+	deleteAntigravityPartThoughtSignatureFieldsDoc(doc, partPath)
 	if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); allowSignature && signature != "" {
 		partsPath := fmt.Sprintf("request.contents.%d.parts", contentIndex)
 		if parts := doc.Get(partsPath); parts.IsArray() {
@@ -2871,9 +2861,7 @@ func restoreAntigravityNativeFunctionCallReplay(payload []byte, contentIndex, pa
 				if otherPath == partPath || antigravityNativePartThoughtSignature(part) != signature {
 					continue
 				}
-				for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-					_ = doc.Delete(otherPath + "." + field)
-				}
+				deleteAntigravityPartThoughtSignatureFieldsDoc(doc, otherPath)
 			}
 		}
 		_ = doc.Set(partPath+".thoughtSignature", signature)
@@ -2996,9 +2984,7 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(index *antigravityReplayR
 				if otherPath == partPath || antigravityNativePartThoughtSignature(part) != sig {
 					continue
 				}
-				for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-					_ = doc.Delete(otherPath + "." + field)
-				}
+				deleteAntigravityPartThoughtSignatureFieldsDoc(doc, otherPath)
 			}
 		}
 		if errSet := doc.Set(pathSig, sig); errSet == nil {
@@ -3058,6 +3044,7 @@ type antigravityReasoningReplayAccumulator struct {
 	pendingSignatures       []antigravityPendingThoughtSignature
 	activeStreamingFC       *antigravityStreamingReplayToolCall
 	hasIncompleteFC         bool
+	observedOutput          bool
 	itemBytes               int
 	overflow                bool
 	terminal                bool
@@ -3311,6 +3298,7 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 			return true
 		}
 		if hasSemanticText {
+			a.observedOutput = true
 			if targetKind != "thought" {
 				targetKind = "text"
 			}
@@ -3352,6 +3340,8 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 				a.visibleText.WriteString(text.String())
 			}
 			a.lastResponseKind = targetKind
+		} else if antigravityReplayPartHasNonTextOutput(part) {
+			a.observedOutput = true
 		}
 		acceptedSignature := false
 		if signature != "" && !a.seenSignatures[signature] {
@@ -3545,6 +3535,7 @@ func (a *antigravityReasoningReplayAccumulator) recordCompletedFunctionCall(pi i
 			a.seenSignatures[signature] = true
 		}
 	}
+	a.observedOutput = true
 	a.lastResponseKind = "function_call"
 }
 
@@ -3640,6 +3631,44 @@ func (a *antigravityReasoningReplayAccumulator) observeFunctionCallPart(pi int, 
 	a.recordCompletedFunctionCall(pi, fc, resolvedSig)
 }
 
+func antigravityReplayPartHasNonTextOutput(part ojson.Result) bool {
+	for _, key := range []string{"inlineData", "inline_data"} {
+		if d := part.Get(key); d.IsObject() && strings.TrimSpace(d.Get("data").String()) != "" {
+			return true
+		}
+	}
+	for _, key := range []string{"fileData", "file_data"} {
+		if fd := part.Get(key); fd.IsObject() && (strings.TrimSpace(fd.Get("fileUri").String()) != "" || strings.TrimSpace(fd.Get("file_uri").String()) != "") {
+			return true
+		}
+	}
+	for _, key := range []string{"executableCode", "executable_code"} {
+		if ec := part.Get(key); ec.IsObject() && strings.TrimSpace(ec.Get("code").String()) != "" {
+			return true
+		}
+	}
+	for _, key := range []string{"codeExecutionResult", "code_execution_result"} {
+		if cer := part.Get(key); cer.IsObject() && (strings.TrimSpace(cer.Get("output").String()) != "" || strings.TrimSpace(cer.Get("outcome").String()) != "") {
+			return true
+		}
+	}
+	for _, key := range []string{"audioTranscription", "audio_transcription"} {
+		if at := part.Get(key); at.IsObject() && at.Get("text").Type == ojson.String && strings.TrimSpace(at.Get("text").String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkCleanEOF marks an accumulator as terminal when an upstream stream ends
+// cleanly without a finishReason after delivering candidate output.
+func (a *antigravityReasoningReplayAccumulator) MarkCleanEOF() {
+	if a == nil || a.terminal || !a.observedOutput || a.activeStreamingFC != nil || a.hasIncompleteFC {
+		return
+	}
+	a.terminal = true
+}
+
 func (a *antigravityReasoningReplayAccumulator) Commit(ctx context.Context) {
 	if a == nil || !a.scope.valid() {
 		return
@@ -3715,10 +3744,55 @@ func antigravityUsesReasoningReplayCache(modelName string) bool {
 }
 
 func antigravityNativePartThoughtSignature(part ojson.Result) string {
-	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
+	for _, path := range []string{"thoughtSignature", "thought_signature"} {
 		if signature := strings.TrimSpace(part.Get(path).String()); signature != "" {
 			return strings.Clone(signature)
 		}
 	}
+	if signature, exists := internalsignature.ExtraContentGoogleThoughtSignature(part); exists {
+		if trimmed := strings.TrimSpace(signature); trimmed != "" {
+			return strings.Clone(trimmed)
+		}
+	}
 	return ""
+}
+
+func deleteAntigravityPartThoughtSignatureFieldsDoc(doc *ojson.Doc, partPath string) bool {
+	if doc == nil || partPath == "" {
+		return false
+	}
+	prefix := partPath + "."
+	changed := false
+	for _, field := range []string{"thoughtSignature", "thought_signature"} {
+		path := prefix + field
+		for doc.Get(path).Exists() {
+			beforeLen := doc.Len()
+			if errDelete := doc.Delete(path); errDelete != nil || doc.Len() >= beforeLen {
+				break
+			}
+			changed = true
+		}
+	}
+	if internalsignature.StripExtraContentGoogleThoughtSignatureDoc(doc, partPath) {
+		changed = true
+	}
+	return changed
+}
+
+func deleteAntigravityPartThoughtSignatureFieldsPartDoc(doc *ojson.Doc) *ojson.Doc {
+	if doc == nil {
+		return nil
+	}
+	for _, field := range []string{"thoughtSignature", "thought_signature"} {
+		for doc.Get(field).Exists() {
+			beforeLen := doc.Len()
+			if errDelete := doc.Delete(field); errDelete != nil || doc.Len() >= beforeLen {
+				break
+			}
+		}
+	}
+	if updated, changed := internalsignature.StripExtraContentGoogleThoughtSignaturePartDoc(doc); changed {
+		return updated
+	}
+	return doc
 }
