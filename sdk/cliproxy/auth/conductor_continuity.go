@@ -719,7 +719,7 @@ func (m *Manager) buildCodexContinuityCandidates(
 	if _, ok := m.executorLocked("codex"); !ok {
 		return nil
 	}
-	weightedSelection := UnwrapWeightedRoundRobinSelector(m.selector) != nil
+	weightedSelection := selectorExcludesZeroWeight(m.selector)
 
 	out := make([]pluginapi.SchedulerContinuityCandidate, 0, len(m.auths))
 	for _, candidate := range m.auths {
