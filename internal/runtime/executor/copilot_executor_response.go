@@ -141,7 +141,17 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 	if prepared.responsesCapture != nil && to == sdktranslator.FormatClaude {
 		visibleClaude = newKimiThinkingReplayStreamAccumulator()
 	}
-	var terminal, chatFinished bool
+	var terminal, terminalDelivered, chatFinished bool
+	defer func() {
+		if errCtx := ctx.Err(); errCtx != nil && !terminalDelivered {
+			if model := usage.ResponseModel(); model != "" {
+				reporter.SetUpstreamModel(model)
+			}
+			if !usage.PublishFailure(ctx, reporter, errCtx) {
+				reporter.PublishFailure(ctx, errCtx)
+			}
+		}
+	}()
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		data, dataLine := bytes.CutPrefix(line, []byte("data:"))
@@ -238,6 +248,7 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 			}
 		}
 		if terminal {
+			terminalDelivered = true
 			break
 		}
 	}
@@ -245,8 +256,7 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 		fail(errScan)
 		return
 	}
-	if !terminal && from == sdktranslator.FormatOpenAI && chatFinished {
-		terminal = true
+	if !terminal && ctx.Err() == nil && from == sdktranslator.FormatOpenAI && chatFinished {
 		if to != from {
 			for _, chunk := range prepared.responseTranslators.TranslateStream(ctx, from, to, req.Model, translationOriginal, prepared.body, []byte("data: [DONE]"), &state) {
 				if len(chunk) != 0 && !emit(cliproxyexecutor.StreamChunk{Payload: chunk}) {
@@ -254,6 +264,8 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 				}
 			}
 		}
+		terminal = true
+		terminalDelivered = true
 	}
 	if !terminal {
 		if ctx.Err() == nil {

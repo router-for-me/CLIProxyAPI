@@ -1190,8 +1190,10 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 					}
 					if shadowHasForce && !shadow.quotaForceCooldownUntil.Equal(shadow.forceCooldownUntil) {
 						shadow.nonQuotaCooldownUntil = shadow.forceCooldownUntil
+						shadow.nonCapacityCooldownUntil = shadow.forceCooldownUntil
 					} else {
 						shadow.nonQuotaCooldownUntil = time.Time{}
+						shadow.nonCapacityCooldownUntil = time.Time{}
 					}
 					shadow.NextRetryAfter = shadowNext
 					shadow.UpdatedAt = now
@@ -1214,8 +1216,10 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 					effectiveNext = auth.credQuotaForceUntil
 				}
 				nonQuota := time.Time{}
+				nonCapacity := time.Time{}
 				if state.forceCooldownUntil.After(now) && !state.quotaForceCooldownUntil.Equal(state.forceCooldownUntil) {
 					nonQuota = state.forceCooldownUntil
+					nonCapacity = state.forceCooldownUntil
 				}
 				if state.credentialQuotaShadow != nil && isModelStateActiveCooldown(state.credentialQuotaShadow, now) {
 					if state.credentialQuotaShadow.NextRetryAfter.After(effectiveNext) {
@@ -1224,8 +1228,12 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 					if state.credentialQuotaShadow.nonQuotaCooldownUntil.After(nonQuota) {
 						nonQuota = state.credentialQuotaShadow.nonQuotaCooldownUntil
 					}
+					if state.credentialQuotaShadow.nonCapacityCooldownUntil.After(nonCapacity) {
+						nonCapacity = state.credentialQuotaShadow.nonCapacityCooldownUntil
+					}
 				}
 				state.nonQuotaCooldownUntil = nonQuota
+				state.nonCapacityCooldownUntil = nonCapacity
 				state.NextRetryAfter = effectiveNext
 			}
 			state.UpdatedAt = now
@@ -1239,8 +1247,10 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 			state.NextRetryAfter = state.forceCooldownUntil
 			if !state.quotaForceCooldownUntil.Equal(state.forceCooldownUntil) {
 				state.nonQuotaCooldownUntil = state.forceCooldownUntil
+				state.nonCapacityCooldownUntil = state.forceCooldownUntil
 			} else {
 				state.nonQuotaCooldownUntil = time.Time{}
+				state.nonCapacityCooldownUntil = time.Time{}
 			}
 			state.UpdatedAt = now
 			continue

@@ -3,12 +3,15 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testing.T) {
@@ -1566,4 +1569,654 @@ func TestConvertInteractionsRequestToAntigravityReasoningClearsConflictingThinki
 			}
 		})
 	}
+}
+
+func testAntigravityInteractionsClaudeNativeSignature(t *testing.T) string {
+	t.Helper()
+	channelBlock := []byte{}
+	channelBlock = protowire.AppendTag(channelBlock, 1, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 12)
+	channelBlock = protowire.AppendTag(channelBlock, 2, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 2)
+	channelBlock = protowire.AppendTag(channelBlock, 6, protowire.BytesType)
+	channelBlock = protowire.AppendString(channelBlock, "claude-sonnet-4-6")
+
+	container := []byte{}
+	container = protowire.AppendTag(container, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channelBlock)
+
+	payload := []byte{}
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func TestConvertInteractionsRequestToAntigravity_ClaudeThoughtSignatureInlineAndSanitized(t *testing.T) {
+	nativeSig := testAntigravityInteractionsClaudeNativeSignature(t)
+	expectedSig, ok := signature.CompatibleAntigravityClaudeThinkingSignature(nativeSig)
+	if !ok {
+		t.Fatal("test Claude signature should be compatible with Antigravity Claude")
+	}
+
+	t.Run("attaches_claude_thought_signature_inline_without_detached_carrier", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "thinking"}], "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]},
+				{"type": "user_input", "content": [{"type": "text", "text": "next"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (signed thought + answer, no detached empty carrier), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "thinking" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to carry inline thoughtSignature=%q, got: %s", expectedSig, parts[0].Raw)
+		}
+		if parts[1].Get("thought").Bool() || parts[1].Get("text").String() != "answer" || parts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected parts[1] to be plain answer text without signature, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("normalizes_native_claude_signature_inline", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-4-6-thinking",
+			"input": [
+				{"type": "thought", "content": [{"type": "text", "text": "internal reasoning"}], "signature": "` + nativeSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "visible answer"}]},
+				{"type": "user_input", "content": [{"type": "text", "text": "continue"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts, got %d: %s", len(parts), string(out))
+		}
+		if gotSig := parts[0].Get("thoughtSignature").String(); gotSig != expectedSig {
+			t.Fatalf("expected normalized inline thoughtSignature %q, got %q (part=%s)", expectedSig, gotSig, parts[0].Raw)
+		}
+	})
+
+	t.Run("strips_foreign_gemini_signature_and_drops_incompatible_thought_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "gemini thinking"}], "signature": "EggKBgEMOdbHNA=="},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]},
+				{"type": "user_input", "content": [{"type": "text", "text": "next"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		if bytes.Contains(out, []byte("thoughtSignature")) || bytes.Contains(out, []byte("EggKBgEMOdbHNA==")) {
+			t.Fatalf("foreign Gemini thoughtSignature leaked into Claude request: %s", string(out))
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 1 || parts[0].Get("text").String() != "answer" || parts[0].Get("thought").Bool() {
+			t.Fatalf("expected only plain answer part after dropping incompatible thought, got: %s", string(out))
+		}
+	})
+
+	t.Run("signature_only_thought_never_emits_empty_carrier_or_function_call_signature_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-sonnet-5-5-thinking",
+			"input": [
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]},
+				{"type": "thought", "signature": "EggKBgEMOdbHNA=="},
+				{"type": "function_call", "name": "lookup", "call_id": "call_1", "arguments": {"q": "x"}, "signature": "EggKBgEMOdbHNA=="},
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "function_result", "name": "lookup", "call_id": "call_1", "result": {"ok": true}}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-sonnet-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		if bytes.Contains(out, []byte("thoughtSignature")) {
+			t.Fatalf("unexpected thoughtSignature in Claude request: %s", string(out))
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected exactly 2 model parts (answer + functionCall, no empty carrier), got %d: %s", len(parts), string(out))
+		}
+		if parts[0].Get("text").String() != "answer" {
+			t.Fatalf("expected parts[0] to be answer, got: %s", parts[0].Raw)
+		}
+		if parts[1].Get("functionCall.name").String() != "lookup" {
+			t.Fatalf("expected parts[1] to be functionCall lookup, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("adjacent_text_thought_and_signature_only_thought_attach_inline_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "content": [{"type": "text", "text": "step reasoning"}]},
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "done"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (signed thought + done), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "step reasoning" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to attach signature inline, got: %s", parts[0].Raw)
+		}
+		if parts[1].Get("text").String() != "done" || parts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected parts[1] to be plain text done, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("adjacent_multi_text_thought_and_signature_only_thought_merge_and_attach_inline_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "part 1 "}, {"type": "text", "text": "part 2"}]},
+				{"type": "thought", "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "done"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (merged signed thought + done), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "part 1 part 2" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to merge multi-part thought text and attach delayed signature inline, got: %s", parts[0].Raw)
+		}
+		if parts[1].Get("text").String() != "done" || parts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected parts[1] to be plain text done, got: %s", parts[1].Raw)
+		}
+	})
+
+	t.Run("multi_text_thought_summary_merges_with_inline_signature_for_claude", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "claude-opus-5-5-thinking",
+			"input": [
+				{"type": "thought", "summary": [{"type": "text", "text": "part 1 "}, {"type": "text", "text": "part 2"}], "signature": "` + expectedSig + `"},
+				{"type": "model_output", "content": [{"type": "text", "text": "answer"}]}
+			]
+		}`)
+		out, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", inputJSON, true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.0.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 model parts (merged signed thought + answer), got %d: %s", len(parts), string(out))
+		}
+		if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "part 1 part 2" || parts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected parts[0] to merge thought text with inline signature, got: %s", parts[0].Raw)
+		}
+	})
+
+	t.Run("claude_response_to_request_round_trip_preserves_inline_thought_signature", func(t *testing.T) {
+		upstreamResponse := []byte(`{
+			"response": {
+				"candidates": [{
+					"content": {
+						"role": "model",
+						"parts": [
+							{"text": "thinking", "thought": true, "thoughtSignature": "` + expectedSig + `"},
+							{"text": "answer"}
+						]
+					}
+				}]
+			}
+		}`)
+		respOut := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "claude-opus-5-5-thinking", nil, nil, upstreamResponse, nil)
+		steps := ojson.GetBytesNoCopy(respOut, "steps").Raw
+
+		turn2Input := `{"model":"claude-opus-5-5-thinking","input":[{"type":"user_input","content":[{"type":"text","text":"hello"}]}`
+		for _, s := range ojson.Get(steps, "@this").Array() {
+			turn2Input += "," + s.Raw
+		}
+		turn2Input += `,{"type":"user_input","content":[{"type":"text","text":"next"}]}]}`
+
+		reqOut, errConvert := ConvertInteractionsRequestToAntigravity("claude-opus-5-5-thinking", []byte(turn2Input), true)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		modelParts := ojson.GetBytesNoCopy(reqOut, "request.contents.1.parts").Array()
+		if len(modelParts) != 2 {
+			t.Fatalf("expected 2 model parts after round-trip, got %d: %s", len(modelParts), string(reqOut))
+		}
+		if !modelParts[0].Get("thought").Bool() || modelParts[0].Get("text").String() != "thinking" || modelParts[0].Get("thoughtSignature").String() != expectedSig {
+			t.Fatalf("expected round-tripped thought part with inline signature, got: %s", modelParts[0].Raw)
+		}
+		if modelParts[1].Get("text").String() != "answer" || modelParts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected round-tripped answer part without signature, got: %s", modelParts[1].Raw)
+		}
+	})
+}
+
+func TestConvertAntigravityResponseToInteractionsStream_VertexPartialArgs(t *testing.T) {
+	t.Run("multi_chunk_partial_args", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"write_file","partialArgs":[{"jsonPath":"$.path","stringValue":"main.go"}],"willContinue":true}}]}}]}}`)
+		chunk2 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.content","stringValue":"package main"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}}`)
+
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk1, &param)
+		if got := countAntigravityInteractionsEvents(events1, "step.start"); got != 1 {
+			t.Fatalf("chunk1 step.start count = %d, want 1. Events: %q", got, events1)
+		}
+		if got := countAntigravityInteractionsEvents(events1, "step.stop"); got != 0 {
+			t.Fatalf("chunk1 step.stop count = %d, want 0 while willContinue=true. Events: %q", got, events1)
+		}
+		startPayload := findAntigravityInteractionsEventPayload(events1, "step.start")
+		if got := ojson.GetBytesNoCopy(startPayload, "step.name").String(); got != "write_file" {
+			t.Fatalf("step.name = %q, want write_file. Payload: %s", got, string(startPayload))
+		}
+
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk2, &param)
+		if got := countAntigravityInteractionsEvents(events2, "step.start"); got != 0 {
+			t.Fatalf("chunk2 step.start count = %d, want 0. Events: %q", got, events2)
+		}
+		if got := countAntigravityInteractionsEvents(events2, "step.stop"); got != 1 {
+			t.Fatalf("chunk2 step.stop count = %d, want 1. Events: %q", got, events2)
+		}
+
+		var allEvents [][]byte
+		allEvents = append(allEvents, events1...)
+		allEvents = append(allEvents, events2...)
+		var argsBuilder strings.Builder
+		for _, deltaPayload := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(deltaPayload, "delta.type").String() != "arguments_delta" {
+				continue
+			}
+			if idx := ojson.GetBytesNoCopy(deltaPayload, "index").Int(); idx != 0 {
+				t.Fatalf("arguments_delta index = %d, want 0. Payload: %s", idx, string(deltaPayload))
+			}
+			argsBuilder.WriteString(ojson.GetBytesNoCopy(deltaPayload, "delta.arguments").String())
+		}
+		gotArgs := argsBuilder.String()
+		if !ojson.Valid(gotArgs) {
+			t.Fatalf("assembled arguments is not valid JSON: %q", gotArgs)
+		}
+		if ojson.Get(gotArgs, "path").String() != "main.go" || ojson.Get(gotArgs, "content").String() != "package main" {
+			t.Fatalf("assembled arguments = %s, want path=main.go and content=package main", gotArgs)
+		}
+	})
+
+	t.Run("single_chunk_parameterless_will_continue_false", func(t *testing.T) {
+		var param any
+		chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"ping","willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`)
+		events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk, &param)
+		if got := countAntigravityInteractionsEvents(events, "step.start"); got != 1 {
+			t.Fatalf("step.start count = %d, want 1. Events: %q", got, events)
+		}
+		if got := countAntigravityInteractionsEvents(events, "step.stop"); got != 1 {
+			t.Fatalf("step.stop count = %d, want 1. Events: %q", got, events)
+		}
+		delta := findAntigravityInteractionsEventPayload(events, "step.delta")
+		if got := ojson.GetBytesNoCopy(delta, "delta.arguments").String(); got != "{}" {
+			t.Fatalf("delta.arguments = %q, want {}", got)
+		}
+	})
+
+	t.Run("args_with_will_continue_preserves_all_fields", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"write_file","args":{"path":"a.txt"},"willContinue":true}}]}}]}}`)
+		chunk2 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","args":{"content":"hello"},"willContinue":false}}]}}]}}`)
+		chunk3 := []byte(`data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk1, &param)
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk2, &param)
+		events3 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk3, &param)
+		allEvents := append(append(events1, events2...), events3...)
+
+		if got := countAntigravityInteractionsEvents(allEvents, "step.start"); got != 1 {
+			t.Fatalf("step.start count = %d, want 1. Events: %q", got, allEvents)
+		}
+		if got := countAntigravityInteractionsEvents(allEvents, "step.stop"); got != 1 {
+			t.Fatalf("step.stop count = %d, want 1. Events: %q", got, allEvents)
+		}
+		startPayload := findAntigravityInteractionsEventPayload(allEvents, "step.start")
+		if got := ojson.GetBytesNoCopy(startPayload, "step.name").String(); got != "write_file" {
+			t.Fatalf("step.name = %q, want write_file", got)
+		}
+		if got := ojson.GetBytesNoCopy(startPayload, "step.call_id").String(); got != "call_1" {
+			t.Fatalf("step.call_id = %q, want call_1", got)
+		}
+		var argsBuilder strings.Builder
+		for _, delta := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(delta, "delta.type").String() == "arguments_delta" {
+				argsBuilder.WriteString(ojson.GetBytesNoCopy(delta, "delta.arguments").String())
+			}
+		}
+		if got := argsBuilder.String(); got != `{"path":"a.txt","content":"hello"}` {
+			t.Fatalf("assembled arguments = %q, want %q", got, `{"path":"a.txt","content":"hello"}`)
+		}
+	})
+
+	t.Run("args_will_continue_start_without_continuation_closes_to_empty_object", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"get_value","willContinue":true}}]}}]}}`)
+		chunk2 := []byte(`data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`)
+
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk1, &param)
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk2, &param)
+		allEvents := append(events1, events2...)
+
+		if got := countAntigravityInteractionsEvents(allEvents, "step.start"); got != 1 {
+			t.Fatalf("step.start count = %d, want 1. Events: %q", got, allEvents)
+		}
+		if got := countAntigravityInteractionsEvents(allEvents, "step.stop"); got != 1 {
+			t.Fatalf("step.stop count = %d, want 1. Events: %q", got, allEvents)
+		}
+		var argsBuilder strings.Builder
+		for _, delta := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(delta, "delta.type").String() == "arguments_delta" {
+				argsBuilder.WriteString(ojson.GetBytesNoCopy(delta, "delta.arguments").String())
+			}
+		}
+		if got := argsBuilder.String(); got != "{}" {
+			t.Fatalf("assembled arguments = %q, want {}", got)
+		}
+	})
+
+	t.Run("continuation_thought_signature_attaches_to_call_A_not_call_B_on_round_trip", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"call_A","partialArgs":[{"jsonPath":"$.a","stringValue":"1"}],"willContinue":true}}]}}]}}`)
+		chunk2 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","partialArgs":[{"jsonPath":"$.b","stringValue":"2"}],"willContinue":false},"thoughtSignature":"sig_call_A"}]}}]}}`)
+		chunk3 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_2","name":"call_B","args":{"c":"3"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}}`)
+
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "gemini-3.8-flash-high", nil, nil, chunk1, &param)
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "gemini-3.8-flash-high", nil, nil, chunk2, &param)
+		events3 := ConvertAntigravityResponseToInteractions(context.Background(), "gemini-3.8-flash-high", nil, nil, chunk3, &param)
+		allEvents := append(append(events1, events2...), events3...)
+
+		starts := findAntigravityInteractionsEventPayloads(allEvents, "step.start")
+		if len(starts) != 2 {
+			t.Fatalf("step.start count = %d, want 2 (call_A and call_B, no detached thought step). Events: %q", len(starts), allEvents)
+		}
+		type stepAgg struct {
+			stepType string
+			id       string
+			callID   string
+			name     string
+			sig      string
+			args     strings.Builder
+		}
+		byIndex := make(map[int]*stepAgg)
+		var order []int
+		for _, rawEv := range allEvents {
+			idxLine := bytes.Index(rawEv, []byte("data: "))
+			if idxLine < 0 {
+				continue
+			}
+			payload := bytes.TrimSpace(rawEv[idxLine+6:])
+			if bytes.Equal(payload, []byte("[DONE]")) {
+				continue
+			}
+			root := ojson.ParseBytes(payload)
+			switch root.Get("event_type").String() {
+			case "step.start":
+				stepIdx := int(root.Get("index").Int())
+				agg := &stepAgg{
+					stepType: root.Get("step.type").String(),
+					id:       root.Get("step.id").String(),
+					callID:   root.Get("step.call_id").String(),
+					name:     root.Get("step.name").String(),
+				}
+				byIndex[stepIdx] = agg
+				order = append(order, stepIdx)
+			case "step.delta":
+				stepIdx := int(root.Get("index").Int())
+				agg := byIndex[stepIdx]
+				if agg == nil {
+					t.Fatalf("step.delta for unknown index %d: %s", stepIdx, string(payload))
+				}
+				switch root.Get("delta.type").String() {
+				case "arguments_delta":
+					agg.args.WriteString(root.Get("delta.arguments").String())
+				case "thought_signature":
+					agg.sig = root.Get("delta.signature").String()
+				}
+			}
+		}
+		if byIndex[0] == nil || byIndex[0].sig != "sig_call_A" {
+			t.Fatalf("call_A step signature = %+v, want sig_call_A", byIndex[0])
+		}
+		if byIndex[1] == nil || byIndex[1].sig != "" {
+			t.Fatalf("call_B step signature = %+v, want empty", byIndex[1])
+		}
+
+		// Round-trip reconstructed steps back through ConvertInteractionsRequestToAntigravity.
+		turn2Doc := ojson.NewDocString(`{"model":"gemini-3.8-flash-high","input":[{"type":"user_input","content":[{"type":"text","text":"go"}]}]}`)
+		for _, stepIdx := range order {
+			agg := byIndex[stepIdx]
+			stepDoc := ojson.NewDocString(`{"type":"function_call","id":"","call_id":"","name":"","arguments":{}}`)
+			_ = stepDoc.Set("type", agg.stepType)
+			_ = stepDoc.Set("id", agg.id)
+			_ = stepDoc.Set("call_id", agg.callID)
+			_ = stepDoc.Set("name", agg.name)
+			_ = stepDoc.SetRaw("arguments", agg.args.String())
+			if agg.sig != "" {
+				_ = stepDoc.Set("signature", agg.sig)
+			}
+			_ = turn2Doc.SetRawBytes("input.-1", stepDoc.Bytes())
+		}
+		_ = turn2Doc.SetRaw("input.-1", `{"type":"function_result","name":"call_A","call_id":"call_1","result":{"ok":true}}`)
+		_ = turn2Doc.SetRaw("input.-1", `{"type":"function_result","name":"call_B","call_id":"call_2","result":{"ok":true}}`)
+
+		reqOut, errConvert := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", turn2Doc.Bytes(), false)
+		if errConvert != nil {
+			t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+		}
+		modelParts := ojson.GetBytesNoCopy(reqOut, "request.contents.1.parts").Array()
+		if len(modelParts) != 2 {
+			t.Fatalf("expected 2 model parts after round-trip, got %d: %s", len(modelParts), string(reqOut))
+		}
+		if modelParts[0].Get("functionCall.name").String() != "call_A" || modelParts[0].Get("thoughtSignature").String() != "sig_call_A" {
+			t.Fatalf("expected call_A to carry sig_call_A, got parts[0]=%s", modelParts[0].Raw)
+		}
+		if modelParts[1].Get("functionCall.name").String() != "call_B" || modelParts[1].Get("thoughtSignature").Exists() {
+			t.Fatalf("expected call_B to have no thoughtSignature, got parts[1]=%s", modelParts[1].Raw)
+		}
+	})
+
+	t.Run("reused_input_buffer_does_not_corrupt_partial_args", func(t *testing.T) {
+		var param any
+		frame1 := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"write_file","partialArgs":[{"jsonPath":"$.meta.count","numberValue":42},{"jsonPath":"$.path","stringValue":"main.go"}],"willContinue":true}}]}}]}}`
+		frame2 := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.content","stringValue":"package main"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}}`
+
+		buf := make([]byte, max(len(frame1), len(frame2)))
+		copy(buf, frame1)
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, buf[:len(frame1)], &param)
+		// Mutate the caller-owned buffer in place before sending the next chunk.
+		for i := range buf {
+			buf[i] = 'X'
+		}
+		copy(buf, frame2)
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, buf[:len(frame2)], &param)
+		allEvents := append(events1, events2...)
+
+		var argsBuilder strings.Builder
+		for _, delta := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(delta, "delta.type").String() == "arguments_delta" {
+				argsBuilder.WriteString(ojson.GetBytesNoCopy(delta, "delta.arguments").String())
+			}
+		}
+		gotArgs := argsBuilder.String()
+		if !ojson.Valid(gotArgs) {
+			t.Fatalf("assembled arguments is not valid JSON: %q", gotArgs)
+		}
+		if ojson.Get(gotArgs, "meta.count").Int() != 42 || ojson.Get(gotArgs, "path").String() != "main.go" || ojson.Get(gotArgs, "content").String() != "package main" {
+			t.Fatalf("assembled arguments corrupted by buffer reuse: %s", gotArgs)
+		}
+	})
+
+	t.Run("repeated_continuation_thought_signatures_stay_bounded", func(t *testing.T) {
+		var param any
+		openChunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"write_file","partialArgs":[{"jsonPath":"$.path","stringValue":"main.go"}],"willContinue":true}}]}}]}}`)
+		allEvents := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, openChunk, &param)
+
+		for i := 0; i < 200; i++ {
+			chunk := []byte(fmt.Sprintf(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","willContinue":true},"thoughtSignature":"sig_%03d"}]}}]}}`, i))
+			allEvents = append(allEvents, ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk, &param)...)
+		}
+		oversizedSig := strings.Repeat("Z", maxAntigravityToolThoughtSignatureBytes+1)
+		oversizedChunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","willContinue":true},"thoughtSignature":"` + oversizedSig + `"}]}}]}}`)
+		allEvents = append(allEvents, ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, oversizedChunk, &param)...)
+
+		closeChunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","partialArgs":[{"jsonPath":"$.done","boolValue":true}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}}`)
+		allEvents = append(allEvents, ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, closeChunk, &param)...)
+
+		var sigDeltas []string
+		for _, delta := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(delta, "delta.type").String() == "thought_signature" {
+				if idx := ojson.GetBytesNoCopy(delta, "index").Int(); idx != 0 {
+					t.Fatalf("thought_signature delta index = %d, want 0", idx)
+				}
+				sigDeltas = append(sigDeltas, ojson.GetBytesNoCopy(delta, "delta.signature").String())
+			}
+		}
+		if len(sigDeltas) != 1 || sigDeltas[0] != "sig_199" {
+			t.Fatalf("retained thought_signature deltas = %v, want [sig_199]", sigDeltas)
+		}
+	})
+
+	t.Run("incomplete_stream_flushed_on_finish_and_done", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"write_file","partialArgs":[{"jsonPath":"$.path","stringValue":"main.go"}],"willContinue":true}}]}}]}}`)
+		chunk2 := []byte(`data: {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}}`)
+
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk1, &param)
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk2, &param)
+		allEvents := append(events1, events2...)
+
+		if got := countAntigravityInteractionsEvents(allEvents, "step.stop"); got != 1 {
+			t.Fatalf("step.stop count = %d, want 1. Events: %q", got, allEvents)
+		}
+		var argsBuilder strings.Builder
+		for _, delta := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(delta, "delta.type").String() == "arguments_delta" {
+				argsBuilder.WriteString(ojson.GetBytesNoCopy(delta, "delta.arguments").String())
+			}
+		}
+		gotArgs := argsBuilder.String()
+		if !ojson.Valid(gotArgs) || ojson.Get(gotArgs, "path").String() != "main.go" {
+			t.Fatalf("flushed arguments = %q, want valid JSON with path=main.go", gotArgs)
+		}
+		completed := findAntigravityInteractionsEventPayload(allEvents, "interaction.completed")
+		if got := ojson.GetBytesNoCopy(completed, "interaction.status").String(); got != "incomplete" {
+			t.Fatalf("interaction.status = %q, want incomplete. Payload: %s", got, string(completed))
+		}
+	})
+
+	t.Run("opening_without_id_continuation_with_id_continues", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"write_file","partialArgs":[{"jsonPath":"$.path","stringValue":"main.go"}],"willContinue":true}}]}}]}}`)
+		chunk2 := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_late","partialArgs":[{"jsonPath":"$.content","stringValue":"ok"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}}`)
+
+		events1 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk1, &param)
+		events2 := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk2, &param)
+		allEvents := append(events1, events2...)
+
+		if got := countAntigravityInteractionsEvents(allEvents, "step.start"); got != 1 {
+			t.Fatalf("step.start count = %d, want 1. Events: %q", got, allEvents)
+		}
+		var argsBuilder strings.Builder
+		for _, delta := range findAntigravityInteractionsEventPayloads(allEvents, "step.delta") {
+			if ojson.GetBytesNoCopy(delta, "delta.type").String() == "arguments_delta" {
+				argsBuilder.WriteString(ojson.GetBytesNoCopy(delta, "delta.arguments").String())
+			}
+		}
+		gotArgs := argsBuilder.String()
+		if !ojson.Valid(gotArgs) || ojson.Get(gotArgs, "path").String() != "main.go" || ojson.Get(gotArgs, "content").String() != "ok" {
+			t.Fatalf("assembled arguments = %q, want valid JSON with path=main.go and content=ok", gotArgs)
+		}
+	})
+
+	t.Run("orphan_nameless_partial_args_chunk_ignored", func(t *testing.T) {
+		var param any
+		chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.x","stringValue":"1"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`)
+		events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk, &param)
+		if got := countAntigravityInteractionsEvents(events, "step.start"); got != 0 {
+			t.Fatalf("step.start count = %d, want 0 for orphan nameless partialArgs chunk. Events: %q", got, events)
+		}
+	})
+}
+
+func TestConvertAntigravityResponseToInteractions_FinishReasonStatusMapping(t *testing.T) {
+	tests := []struct {
+		finishReason string
+		wantStatus   string
+	}{
+		{finishReason: "STOP", wantStatus: "completed"},
+		{finishReason: "", wantStatus: "completed"},
+		{finishReason: "MAX_TOKENS", wantStatus: "incomplete"},
+		{finishReason: "SAFETY", wantStatus: "failed"},
+		{finishReason: "RECITATION", wantStatus: "failed"},
+		{finishReason: "BLOCKLIST", wantStatus: "failed"},
+		{finishReason: "PROHIBITED_CONTENT", wantStatus: "failed"},
+		{finishReason: "SPII", wantStatus: "failed"},
+		{finishReason: "IMAGE_SAFETY", wantStatus: "failed"},
+		{finishReason: "MALFORMED_FUNCTION_CALL", wantStatus: "failed"},
+		{finishReason: "MALFORMED_RESPONSE", wantStatus: "failed"},
+		{finishReason: "UNEXPECTED_TOOL_CALL", wantStatus: "failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run("non_stream/"+tt.finishReason, func(t *testing.T) {
+			raw := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"` + tt.finishReason + `"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`)
+			out := ConvertAntigravityResponseToInteractionsNonStream(context.Background(), "antigravity-test", nil, nil, raw, nil)
+			if got := ojson.GetBytesNoCopy(out, "status").String(); got != tt.wantStatus {
+				t.Fatalf("non-stream status for finishReason %q = %q, want %q. Output: %s", tt.finishReason, got, tt.wantStatus, string(out))
+			}
+		})
+
+		t.Run("stream/"+tt.finishReason, func(t *testing.T) {
+			var param any
+			chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"` + tt.finishReason + `"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`)
+			events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, chunk, &param)
+			if tt.finishReason == "" {
+				events = append(events, ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, []byte("data: [DONE]"), &param)...)
+			}
+			completed := findAntigravityInteractionsEventPayload(events, "interaction.completed")
+			if len(completed) == 0 {
+				t.Fatalf("interaction.completed not found for finishReason %q. Events: %q", tt.finishReason, events)
+			}
+			if got := ojson.GetBytesNoCopy(completed, "interaction.status").String(); got != tt.wantStatus {
+				t.Fatalf("stream interaction.status for finishReason %q = %q, want %q. Payload: %s", tt.finishReason, got, tt.wantStatus, string(completed))
+			}
+		})
+	}
+
+	t.Run("stream/split_finish_and_usage_frames_preserves_status", func(t *testing.T) {
+		var param any
+		finishFrame := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"cut"}]},"finishReason":"MAX_TOKENS"}]}}`)
+		usageFrame := []byte(`data: {"response":{"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}}`)
+		events := ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, finishFrame, &param)
+		events = append(events, ConvertAntigravityResponseToInteractions(context.Background(), "antigravity-test", nil, nil, usageFrame, &param)...)
+		completed := findAntigravityInteractionsEventPayload(events, "interaction.completed")
+		if len(completed) == 0 {
+			t.Fatalf("interaction.completed not found. Events: %q", events)
+		}
+		if got := ojson.GetBytesNoCopy(completed, "interaction.status").String(); got != "incomplete" {
+			t.Fatalf("split-frame interaction.status = %q, want incomplete. Payload: %s", got, string(completed))
+		}
+	})
 }

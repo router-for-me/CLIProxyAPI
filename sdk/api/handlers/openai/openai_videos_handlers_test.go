@@ -1,10 +1,14 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1226,4 +1230,252 @@ func videosCreateRequestFromFormContext(body string) ([]byte, error) {
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 	return rawJSON, err
+}
+
+type formFieldPair struct {
+	key   string
+	value string
+}
+
+func videosCreateRequestFromMultipartContext(t *testing.T, fields []formFieldPair) ([]byte, error) {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, field := range fields {
+		if errWrite := writer.WriteField(field.key, field.value); errWrite != nil {
+			t.Fatalf("WriteField(%q) error = %v", field.key, errWrite)
+		}
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("multipart writer Close() error = %v", errClose)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	var rawJSON []byte
+	var err error
+	router.POST(videosPath, func(c *gin.Context) {
+		rawJSON, err = videosCreateRequestFromForm(c)
+	})
+	req := httptest.NewRequest(http.MethodPost, videosPath, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	return rawJSON, err
+}
+
+func TestVideosCreateFormRequestReferenceImageURLs(t *testing.T) {
+	const (
+		dataURLPNG  = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+		dataURLJPEG = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/"
+		dataURLSVG  = "data:image/svg+xml,<svg>a,b</svg>"
+		httpsURLA   = "https://example.com/a.png"
+		httpsURLB   = "https://example.com/b.png"
+	)
+
+	tests := []struct {
+		name      string
+		multipart bool
+		fields    []formFieldPair
+		want      []string
+	}{
+		{
+			name:      "multipart single base64 data URL",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: dataURLPNG},
+			},
+			want: []string{dataURLPNG},
+		},
+		{
+			name:      "multipart repeated reference_image_urls fields",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: httpsURLA},
+				{key: "reference_image_urls", value: httpsURLB},
+			},
+			want: []string{httpsURLA, httpsURLB},
+		},
+		{
+			name:      "multipart bracketed reference_image_urls[] fields with data URL",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls[]", value: httpsURLA},
+				{key: "reference_image_urls[]", value: dataURLPNG},
+			},
+			want: []string{httpsURLA, dataURLPNG},
+		},
+		{
+			name:      "urlencoded repeated and bracketed fields",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: httpsURLA},
+				{key: "reference_image_urls", value: dataURLPNG},
+				{key: "reference_image_urls[]", value: httpsURLB},
+			},
+			want: []string{httpsURLA, dataURLPNG, httpsURLB},
+		},
+		{
+			name:      "multipart JSON array containing https and data URL",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: `["` + httpsURLA + `","` + dataURLPNG + `"]`},
+			},
+			want: []string{httpsURLA, dataURLPNG},
+		},
+		{
+			name:      "urlencoded comma-separated https URLs",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: httpsURLA + ", " + httpsURLB},
+			},
+			want: []string{httpsURLA, httpsURLB},
+		},
+		{
+			name:      "urlencoded comma-separated data URL followed by https URL",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: dataURLPNG + "," + httpsURLB},
+			},
+			want: []string{dataURLPNG, httpsURLB},
+		},
+		{
+			name:      "urlencoded comma-separated https URL followed by data URL",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: httpsURLA + "," + dataURLPNG},
+			},
+			want: []string{httpsURLA, dataURLPNG},
+		},
+		{
+			name:      "urlencoded comma-separated multiple data URLs",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: dataURLPNG + "," + dataURLJPEG},
+			},
+			want: []string{dataURLPNG, dataURLJPEG},
+		},
+		{
+			name:      "multipart single data URL with comma in payload",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: dataURLSVG},
+			},
+			want: []string{dataURLSVG},
+		},
+		{
+			name:      "multipart JSON array ignores non-string entries and extracts object URLs",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: `["https://example.com/a.png", null, 123, {"url":"` + dataURLPNG + `"}, {"image_url":{"url":"https://example.com/b.png"}}]`},
+			},
+			want: []string{httpsURLA, dataURLPNG, httpsURLB},
+		},
+		{
+			name:      "urlencoded comma-separated CDN URL with embedded comma",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: "https://cdn.example.com/cdn-cgi/image/w=800,q=80/a.png," + httpsURLB},
+			},
+			want: []string{"https://cdn.example.com/cdn-cgi/image/w=800,q=80/a.png", httpsURLB},
+		},
+		{
+			name:      "multipart single URL containing consecutive commas stays intact",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: "https://cdn.example/a,,b.png"},
+			},
+			want: []string{"https://cdn.example/a,,b.png"},
+		},
+		{
+			name:      "multipart data URL containing consecutive commas stays intact",
+			multipart: true,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: "data:image/svg+xml,<svg>a,,b</svg>"},
+			},
+			want: []string{"data:image/svg+xml,<svg>a,,b</svg>"},
+		},
+		{
+			name:      "urlencoded consecutive commas between two URLs split at next URL boundary",
+			multipart: false,
+			fields: []formFieldPair{
+				{key: "model", value: "grok-imagine-video"},
+				{key: "prompt", value: "Animate this scene"},
+				{key: "reference_image_urls", value: httpsURLA + ",," + httpsURLB + ","},
+			},
+			want: []string{httpsURLA, httpsURLB},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				rawJSON []byte
+				err     error
+			)
+			if tc.multipart {
+				rawJSON, err = videosCreateRequestFromMultipartContext(t, tc.fields)
+			} else {
+				form := url.Values{}
+				for _, field := range tc.fields {
+					form.Add(field.key, field.value)
+				}
+				rawJSON, err = videosCreateRequestFromFormContext(form.Encode())
+			}
+			if err != nil {
+				t.Fatalf("videosCreateRequestFromForm() error = %v", err)
+			}
+
+			var got []string
+			ojson.GetBytesNoCopy(rawJSON, "reference_image_urls").ForEach(func(_, item ojson.Result) bool {
+				got = append(got, item.String())
+				return true
+			})
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("reference_image_urls = %#v, want %#v (raw=%s)", got, tc.want, string(rawJSON))
+			}
+
+			xaiPayload, _, errBuild := buildXAIVideosCreateRequest(rawJSON, "grok-imagine-video")
+			if errBuild != nil {
+				t.Fatalf("buildXAIVideosCreateRequest() error = %v", errBuild)
+			}
+			var gotUpstream []string
+			ojson.GetBytesNoCopy(xaiPayload, "reference_images").ForEach(func(_, item ojson.Result) bool {
+				gotUpstream = append(gotUpstream, item.Get("url").String())
+				return true
+			})
+			if !reflect.DeepEqual(gotUpstream, tc.want) {
+				t.Fatalf("upstream reference_images = %#v, want %#v", gotUpstream, tc.want)
+			}
+		})
+	}
 }

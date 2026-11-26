@@ -1477,6 +1477,118 @@ func TestConvertGeminiRequestToAntigravity_PreservesExistingResponseSchema(t *te
 	}
 }
 
+func TestConvertGeminiRequestToAntigravity_PreservesExistingSnakeCaseResponseSchema(t *testing.T) {
+	tests := []struct {
+		name      string
+		container string
+		inputJSON string
+	}{
+		{
+			name:      "generationConfig with response_schema and response_json_schema",
+			container: "generationConfig",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"response_mime_type": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"stale": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+		{
+			name:      "generationConfig with response_schema and responseJsonSchema",
+			container: "generationConfig",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"responseMimeType": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"responseJsonSchema": {
+						"type": "OBJECT",
+						"properties": {"stale": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+		{
+			name:      "generation_config with response_schema and response_json_schema",
+			container: "generation_config",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generation_config": {
+					"response_mime_type": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"stale": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+		{
+			name:      "generation_config with response_schema and both responseJsonSchema variants",
+			container: "generation_config",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generation_config": {
+					"response_mime_type": "application/json",
+					"response_schema": {
+						"type": "OBJECT",
+						"properties": {"name": {"type": "STRING"}}
+					},
+					"responseJsonSchema": {
+						"type": "OBJECT",
+						"properties": {"staleCamel": {"type": "STRING"}}
+					},
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"staleSnake": {"type": "STRING"}}
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(tt.inputJSON), false)
+			if err != nil {
+				t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+			}
+
+			basePath := "request." + tt.container
+			snakeSchema := ojson.GetBytesNoCopy(out, basePath+".response_schema")
+			if !snakeSchema.Exists() {
+				t.Fatalf("%s.response_schema missing. Output: %s", basePath, out)
+			}
+			if got := snakeSchema.Get("properties.name.type").String(); got != "STRING" {
+				t.Fatalf("%s.response_schema.properties.name.type = %q, want STRING. Output: %s", basePath, got, out)
+			}
+			if ojson.GetBytesNoCopy(out, basePath+".responseSchema").Exists() {
+				t.Fatalf("duplicate %s.responseSchema should not be emitted alongside response_schema. Output: %s", basePath, out)
+			}
+			if ojson.GetBytesNoCopy(out, basePath+".responseJsonSchema").Exists() {
+				t.Fatalf("%s.responseJsonSchema should have been removed. Output: %s", basePath, out)
+			}
+			if ojson.GetBytesNoCopy(out, basePath+".response_json_schema").Exists() {
+				t.Fatalf("%s.response_json_schema should have been removed. Output: %s", basePath, out)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiRequestToAntigravity_RemovesEmptySystemInstructionParts(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1708,6 +1820,59 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_CanonicalizesUnchanged
 	}
 }
 
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PrunesEmptyExtraContentShell(t *testing.T) {
+	nativeSig := testAntigravityGeminiClaudeSignature(t)
+	canonicalSig, ok := signature.CompatibleAntigravityClaudeThinkingSignature(nativeSig)
+	if !ok {
+		t.Fatal("test Claude signature should be compatible with Antigravity Claude")
+	}
+
+	t.Run("thinking_part_prunes_empty_extra_content_shell", func(t *testing.T) {
+		inputJSON := []byte(`{"project":"","model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"model","parts":[{"text":"reasoning","thought":true,"extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]}]}}`)
+		output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-opus-4-6-thinking", inputJSON)
+		part := ojson.GetBytesNoCopy(output, "request.contents.0.parts.0")
+
+		if got := part.Get("thoughtSignature").String(); got != canonicalSig {
+			t.Fatalf("thoughtSignature = %q, want %q; part=%s", got, canonicalSig, part.Raw)
+		}
+		if part.Get("extra_content").Exists() {
+			t.Fatalf("empty extra_content shell should be pruned; part=%s", part.Raw)
+		}
+	})
+
+	t.Run("dropped_signature_prunes_empty_extra_content_across_part_kinds", func(t *testing.T) {
+		inputJSON := []byte(`{"project":"","model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"user","parts":[{"text":"hi","extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]},{"role":"model","parts":[{"text":"answer","extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}},"extra_content":{"google":{"thought_signature":"` + canonicalSig + `"}}}]}]}}`)
+		output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-opus-4-6-thinking", inputJSON)
+		for contentIdx := 0; contentIdx < 3; contentIdx++ {
+			part := ojson.GetBytesNoCopy(output, fmt.Sprintf("request.contents.%d.parts.0", contentIdx))
+			if part.Get("extra_content").Exists() {
+				t.Fatalf("content %d part 0 left empty extra_content shell: %s", contentIdx, part.Raw)
+			}
+		}
+	})
+
+	t.Run("preserves_non_empty_sibling_fields", func(t *testing.T) {
+		inputJSON := []byte(`{"project":"","model":"claude-opus-4-6-thinking","request":{"contents":[{"role":"model","parts":[{"text":"r1","thought":true,"extra_content":{"google":{"thought_signature":"` + canonicalSig + `","other":"keep"}}},{"text":"r2","thought":true,"extra_content":{"google":{"thought_signature":"` + canonicalSig + `"},"sibling":"keep"}}]}]}}`)
+		output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-opus-4-6-thinking", inputJSON)
+
+		p0 := ojson.GetBytesNoCopy(output, "request.contents.0.parts.0")
+		if p0.Get("extra_content.google.thought_signature").Exists() {
+			t.Fatalf("p0 thought_signature should be removed; part=%s", p0.Raw)
+		}
+		if got := p0.Get("extra_content.google.other").String(); got != "keep" {
+			t.Fatalf("p0 extra_content.google.other = %q, want keep; part=%s", got, p0.Raw)
+		}
+
+		p1 := ojson.GetBytesNoCopy(output, "request.contents.0.parts.1")
+		if p1.Get("extra_content.google").Exists() {
+			t.Fatalf("p1 empty extra_content.google should be pruned; part=%s", p1.Raw)
+		}
+		if got := p1.Get("extra_content.sibling").String(); got != "keep" {
+			t.Fatalf("p1 extra_content.sibling = %q, want keep; part=%s", got, p1.Raw)
+		}
+	})
+}
+
 func TestSanitizeAntigravityClaudeGeminiRequestSignatures_IgnoresNestedToolArgsAndResponseSignatureKeys(t *testing.T) {
 	inputJSON := []byte(`{
 		"project": "",
@@ -1904,4 +2069,284 @@ func TestConvertGeminiRequestToAntigravity_NormalizesSnakeCaseFunctionResponsePa
 	if parts[1].Get("file_data").Exists() {
 		t.Errorf("parts[1].file_data should be removed; part=%s", parts[1].Raw)
 	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesMixedSnakeCaseFunctionCallAndCamelCaseResponse(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "read file"}]},
+			{"role": "model", "parts": [{"function_call": {"id": "call_1", "name": "read", "args": {}}}]},
+			{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "read", "response": {"content": "ok"}}}]}
+		]
+	}`)
+
+	out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+	}
+
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 content turns, got %d; out=%s", len(contents), out)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Errorf("contents[2].role = %q, want user; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.functionResponse.id").String(); got != "call_1" {
+		t.Errorf("contents[2].parts[0].functionResponse.id = %q, want call_1; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read" {
+		t.Errorf("contents[2].parts[0].functionResponse.name = %q, want read; out=%s", got, out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesOmittedRoleFunctionCallWithSnakeCaseResponse(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "read file"}]},
+			{"parts": [{"functionCall": {"id": "call_1", "name": "read", "args": {}}}]},
+			{"role": "user", "parts": [{"function_response": {"id": "call_1", "name": "read", "response": {"content": "ok"}}}]}
+		]
+	}`)
+
+	out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+	}
+
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 content turns, got %d; out=%s", len(contents), out)
+	}
+	if got := contents[1].Get("role").String(); got != "model" {
+		t.Errorf("contents[1].role = %q, want model; out=%s", got, out)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Errorf("contents[2].role = %q, want user; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.function_response.id").String(); got != "call_1" {
+		t.Errorf("contents[2].parts[0].function_response.id = %q, want call_1; out=%s", got, out)
+	}
+	if got := contents[2].Get("parts.0.function_response.name").String(); got != "read" {
+		t.Errorf("contents[2].parts[0].function_response.name = %q, want read; out=%s", got, out)
+	}
+}
+
+func TestFixCLIToolResponse_SnakeCaseAndMixedCasing(t *testing.T) {
+	t.Run("mixed_function_call_and_functionResponse", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "user", "parts": [{"text": "read file"}]},
+					{"role": "model", "parts": [{"function_call": {"id": "call_1", "name": "read", "args": {}}}]},
+					{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "read", "response": {"content": "ok"}}}]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 3 {
+			t.Fatalf("expected 3 contents, got %d; out=%s", len(contents), out)
+		}
+		if got := contents[2].Get("role").String(); got != "function" {
+			t.Errorf("contents[2].role = %q, want function; out=%s", got, out)
+		}
+		if got := contents[2].Get("parts.0.functionResponse.name").String(); got != "read" {
+			t.Errorf("contents[2].parts[0].functionResponse.name = %q, want read; out=%s", got, out)
+		}
+	})
+
+	t.Run("mixed_functionCall_and_function_response_with_sibling_inline_data_and_empty_name", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [{"functionCall": {"id": "c1", "name": "screenshot", "args": {}}}]},
+					{"role": "user", "parts": [
+						{"function_response": {"id": "c1", "name": "", "response": {"ok": true}}},
+						{"inline_data": {"mime_type": "image/png", "data": "QUJD"}}
+					]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 2 {
+			t.Fatalf("expected 2 contents, got %d; out=%s", len(contents), out)
+		}
+		if got := contents[1].Get("role").String(); got != "function" {
+			t.Errorf("contents[1].role = %q, want function; out=%s", got, out)
+		}
+		part := contents[1].Get("parts.0")
+		if part.Get("functionResponse").Exists() {
+			t.Errorf("unexpected sibling camelCase functionResponse injected into snake_case part: %s", part.Raw)
+		}
+		if got := part.Get("function_response.name").String(); got != "screenshot" {
+			t.Errorf("function_response.name = %q, want screenshot; part=%s", got, part.Raw)
+		}
+		if got := part.Get("function_response.parts.0.inlineData.data").String(); got != "QUJD" {
+			t.Errorf("function_response.parts[0].inlineData.data = %q, want QUJD; part=%s", got, part.Raw)
+		}
+	})
+
+	t.Run("snake_case_parallel_calls_select_by_id_and_drop_excess", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [
+						{"function_call": {"id": "c1", "name": "a", "args": {}}},
+						{"function_call": {"id": "c2", "name": "b", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"function_response": {"id": "c3", "name": "extra", "response": {"v": 3}}},
+						{"function_response": {"id": "c2", "name": "b", "response": {"v": 2}}},
+						{"function_response": {"id": "c1", "name": "a", "response": {"v": 1}}}
+					]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.1.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 matched function_response parts, got %d; out=%s", len(parts), out)
+		}
+		if parts[0].Get("functionResponse").Exists() || parts[1].Get("functionResponse").Exists() {
+			t.Errorf("unexpected sibling camelCase functionResponse injected; out=%s", out)
+		}
+		if got := parts[0].Get("function_response.id").String(); got != "c1" {
+			t.Errorf("parts[0].function_response.id = %q, want c1; out=%s", got, out)
+		}
+		if got := parts[1].Get("function_response.id").String(); got != "c2" {
+			t.Errorf("parts[1].function_response.id = %q, want c2; out=%s", got, out)
+		}
+	})
+
+	t.Run("snake_case_consecutive_function_response_turns_grouped", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [
+						{"function_call": {"id": "c1", "name": "a", "args": {}}},
+						{"function_call": {"id": "c2", "name": "b", "args": {}}}
+					]},
+					{"role": "user", "parts": [{"function_response": {"id": "c1", "name": "a", "response": {"v": 1}}}]},
+					{"role": "user", "parts": [{"function_response": {"id": "c2", "name": "b", "response": {"v": 2}}}]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 2 {
+			t.Fatalf("expected 2 contents after grouping, got %d; out=%s", len(contents), out)
+		}
+		parts := contents[1].Get("parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 grouped parts, got %d; out=%s", len(parts), out)
+		}
+		if got := parts[0].Get("function_response.id").String(); got != "c1" {
+			t.Errorf("parts[0].function_response.id = %q, want c1; out=%s", got, out)
+		}
+		if got := parts[1].Get("function_response.id").String(); got != "c2" {
+			t.Errorf("parts[1].function_response.id = %q, want c2; out=%s", got, out)
+		}
+	})
+
+	t.Run("snake_case_equal_count_out_of_order_backfills_name_by_id", func(t *testing.T) {
+		input := []byte(`{
+			"request": {
+				"contents": [
+					{"role": "model", "parts": [
+						{"function_call": {"id": "c1", "name": "read", "args": {}}},
+						{"function_call": {"id": "c2", "name": "write", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"function_response": {"id": "c2", "name": "", "response": {"v": 2}}},
+						{"function_response": {"id": "c1", "name": "", "response": {"v": 1}}}
+					]}
+				]
+			}
+		}`)
+
+		out, err := fixCLIToolResponse(input)
+		if err != nil {
+			t.Fatalf("fixCLIToolResponse failed: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(out, "request.contents.1.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 function_response parts, got %d; out=%s", len(parts), out)
+		}
+		if parts[0].Get("functionResponse").Exists() || parts[1].Get("functionResponse").Exists() {
+			t.Errorf("unexpected sibling camelCase functionResponse injected; out=%s", out)
+		}
+		if gotID, gotName := parts[0].Get("function_response.id").String(), parts[0].Get("function_response.name").String(); gotID != "c2" || gotName != "write" {
+			t.Errorf("parts[0] = (%q, %q), want (c2, write); out=%s", gotID, gotName, out)
+		}
+		if gotID, gotName := parts[1].Get("function_response.id").String(), parts[1].Get("function_response.name").String(); gotID != "c1" || gotName != "read" {
+			t.Errorf("parts[1] = (%q, %q), want (c1, read); out=%s", gotID, gotName, out)
+		}
+	})
+}
+
+func TestNormalizeAntigravitySystemInstruction_NullAndNonObject(t *testing.T) {
+	t.Run("camelCase null systemInstruction is removed", func(t *testing.T) {
+		input := []byte(`{"systemInstruction":null,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+		out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+		}
+		if sys := ojson.GetBytesNoCopy(out, "request.systemInstruction"); sys.Exists() {
+			t.Fatalf("expected null systemInstruction to be removed, got: %s", sys.Raw)
+		}
+	})
+
+	t.Run("snake_case null system_instruction is removed", func(t *testing.T) {
+		input := []byte(`{"system_instruction":null,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+		out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+		}
+		if sys := ojson.GetBytesNoCopy(out, "request.system_instruction"); sys.Exists() {
+			t.Fatalf("expected system_instruction to be removed, got: %s", sys.Raw)
+		}
+		if sys := ojson.GetBytesNoCopy(out, "request.systemInstruction"); sys.Exists() {
+			t.Fatalf("expected null system_instruction not to produce systemInstruction, got: %s", sys.Raw)
+		}
+	})
+
+	t.Run("non-object systemInstruction is not mutated into role user", func(t *testing.T) {
+		for _, rawVal := range []string{`123`, `true`, `[]`, `"be brief"`} {
+			doc := ojson.NewDocString(`{"request":{"systemInstruction":` + rawVal + `,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+			NormalizeAntigravityRequestDoc(doc)
+			sys := doc.Get("request.systemInstruction")
+			if sys.IsObject() {
+				t.Fatalf("non-object systemInstruction (%s) mutated into object: %s", rawVal, sys.Raw)
+			}
+			if sys.Raw != rawVal {
+				t.Fatalf("non-object systemInstruction = %s, want %s", sys.Raw, rawVal)
+			}
+		}
+	})
+
+	t.Run("direct NormalizeAntigravityRequestDoc removes null systemInstruction", func(t *testing.T) {
+		doc := ojson.NewDocString(`{"request":{"systemInstruction":null,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+		NormalizeAntigravityRequestDoc(doc)
+		if sys := doc.Get("request.systemInstruction"); sys.Exists() {
+			t.Fatalf("expected null request.systemInstruction to be removed, got: %s", sys.Raw)
+		}
+	})
 }
