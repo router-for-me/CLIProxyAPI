@@ -778,13 +778,97 @@ func TestListAuthFiles_StaleUnavailableWithoutRecoveryReportsReason(t *testing.T
 		t.Errorf("expected cooldowns=[], got %s", file.Cooldowns)
 	}
 
-	// The v0 response shape stays frozen; the reason key is v8-only
-	// (status/status_message still reflect the error).
-	if v0 := requestAuthFilesCooldowns(t, h, "?name=stale-unavailable.json"); len(v0.Files) != 1 || v0.Files[0].UnavailableReason != "" {
-		t.Fatalf("v0 response shape changed: %+v", v0.Files)
+	// The deprecated v0 response shape stays frozen: the stale rewrite is
+	// v8-only, so v0 keeps status=active, an empty status_message, and no
+	// unavailable_reason key at all (not even an empty one).
+	recV0 := httptest.NewRecorder()
+	ctxV0, _ := gin.CreateTestContext(recV0)
+	ctxV0.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?name=stale-unavailable.json", nil)
+	h.ListAuthFiles(ctxV0)
+	if recV0.Code != http.StatusOK {
+		t.Fatalf("v0 status = %d: %s", recV0.Code, recV0.Body.String())
+	}
+	v0 := decodeAuthFilesCooldowns(t, recV0)
+	if len(v0.Files) != 1 {
+		t.Fatalf("v0 files = %+v", v0.Files)
+	}
+	v0File := v0.Files[0]
+	if v0File.Status != string(coreauth.StatusActive) {
+		t.Errorf("v0 status = %q, want %q", v0File.Status, coreauth.StatusActive)
+	}
+	if v0File.StatusMessage != "" {
+		t.Errorf("v0 status_message = %q, want empty", v0File.StatusMessage)
+	}
+	if !v0File.Unavailable {
+		t.Error("v0 unavailable = false, want true")
+	}
+	if string(v0File.Cooldowns) != "[]" {
+		t.Errorf("v0 cooldowns = %s, want []", v0File.Cooldowns)
+	}
+	var rawV0 struct {
+		Files []map[string]json.RawMessage `json:"files"`
+	}
+	if errDecode := json.Unmarshal(recV0.Body.Bytes(), &rawV0); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if len(rawV0.Files) != 1 {
+		t.Fatalf("raw v0 files = %+v", rawV0.Files)
+	}
+	if _, exists := rawV0.Files[0]["unavailable_reason"]; exists {
+		t.Fatalf("v0 response must not include unavailable_reason: %s", recV0.Body.String())
 	}
 
 	after, _ := manager.GetByID("stale-unavailable")
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("GET mutated auth state")
+	}
+}
+
+func TestListAuthFiles_StaleUnavailablePreservesExistingStatusMessage(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID:            "stale-legacy-note",
+		Index:         "idx-stale-legacy-note",
+		FileName:      "stale-legacy-note.json",
+		Provider:      "codex",
+		Status:        coreauth.StatusActive,
+		StatusMessage: "legacy note",
+		Unavailable:   true,
+		Attributes:    map[string]string{"runtime_only": "true"},
+	})
+	before, _ := manager.GetByID("stale-legacy-note")
+
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+
+	// v0 keeps the original active status and note; the stale rewrite is v8-only.
+	v0 := requestAuthFilesCooldowns(t, h, "?name=stale-legacy-note.json")
+	if len(v0.Files) != 1 {
+		t.Fatalf("v0 files = %+v", v0.Files)
+	}
+	if v0.Files[0].Status != string(coreauth.StatusActive) || v0.Files[0].StatusMessage != "legacy note" {
+		t.Errorf("v0 status/status_message = %q/%q, want %q/%q", v0.Files[0].Status, v0.Files[0].StatusMessage, coreauth.StatusActive, "legacy note")
+	}
+
+	// v8 reports the stale error with a reason but preserves the operator's note.
+	v8 := requestAuthFilesCooldownsV8(t, h, "?name=stale-legacy-note.json")
+	if len(v8.Files) != 1 {
+		t.Fatalf("v8 files = %+v", v8.Files)
+	}
+	file := v8.Files[0]
+	if file.Status != string(coreauth.StatusError) {
+		t.Errorf("v8 status = %q, want %q", file.Status, coreauth.StatusError)
+	}
+	if file.StatusMessage != "legacy note" {
+		t.Errorf("v8 status_message = %q, want %q", file.StatusMessage, "legacy note")
+	}
+	if file.UnavailableReason != "no_recovery_deadline" {
+		t.Errorf("v8 unavailable_reason = %q, want %q", file.UnavailableReason, "no_recovery_deadline")
+	}
+
+	after, _ := manager.GetByID("stale-legacy-note")
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("GET mutated auth state")
 	}
@@ -834,22 +918,29 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 	later := now.Add(45 * time.Minute)
 
 	tests := []struct {
-		name            string
-		auth            *coreauth.Auth
-		listable        bool
-		wantReason      string
-		wantStatus      coreauth.Status
-		wantUnavailable bool
-		wantNextRetry   time.Time
+		name                string
+		auth                *coreauth.Auth
+		listable            bool
+		wantReason          string
+		wantStatus          coreauth.Status
+		wantStatusMessage   string
+		wantUnavailable     bool
+		wantNextRetry       time.Time
+		wantV0Status        coreauth.Status
+		wantV0StatusMessage string
+		wantV0Reason        string
 	}{
 		{
 			name: "disabled",
 			auth: &coreauth.Auth{
 				ID: "disabled", Status: coreauth.StatusDisabled, Disabled: true, Unavailable: true,
 			},
-			wantReason:      "",
-			wantStatus:      coreauth.StatusDisabled,
-			wantUnavailable: true,
+			wantReason:          "",
+			wantStatus:          coreauth.StatusDisabled,
+			wantUnavailable:     true,
+			wantV0Status:        coreauth.StatusDisabled,
+			wantV0StatusMessage: "",
+			wantV0Reason:        "",
 		},
 		{
 			name: "auth failure",
@@ -859,7 +950,8 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 				LastError:  &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized"},
 				Attributes: map[string]string{"runtime_only": "true"},
 			},
-			listable: true, wantReason: "auth_failure", wantStatus: coreauth.StatusError, wantUnavailable: true,
+			listable: true, wantReason: "auth_failure", wantStatus: coreauth.StatusError, wantStatusMessage: "unauthorized", wantUnavailable: true,
+			wantV0Status: coreauth.StatusError, wantV0StatusMessage: "unauthorized", wantV0Reason: "auth_failure",
 		},
 		{
 			name: "live credential cooldown",
@@ -872,6 +964,7 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 			},
 			listable: true, wantReason: "cooldown", wantStatus: coreauth.StatusError,
 			wantUnavailable: true, wantNextRetry: later,
+			wantV0Status: coreauth.StatusError, wantV0StatusMessage: "", wantV0Reason: "cooldown",
 		},
 		{
 			name: "all models blocked",
@@ -885,6 +978,7 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 				Attributes: map[string]string{"runtime_only": "true"},
 			},
 			listable: true, wantReason: "model_blocked", wantStatus: coreauth.StatusError, wantUnavailable: true,
+			wantV0Status: coreauth.StatusError, wantV0StatusMessage: "", wantV0Reason: "model_blocked",
 		},
 		{
 			name: "quota exceeded without deadline",
@@ -895,6 +989,7 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 				Attributes: map[string]string{"runtime_only": "true"},
 			},
 			listable: true, wantReason: "", wantStatus: coreauth.StatusActive, wantUnavailable: true,
+			wantV0Status: coreauth.StatusActive, wantV0StatusMessage: "", wantV0Reason: "",
 		},
 		{
 			name: "scheduled refresh",
@@ -904,6 +999,7 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 				Attributes: map[string]string{"runtime_only": "true"},
 			},
 			listable: true, wantReason: "", wantStatus: coreauth.StatusActive, wantUnavailable: true,
+			wantV0Status: coreauth.StatusActive, wantV0StatusMessage: "", wantV0Reason: "",
 		},
 		{
 			name: "requires sign in",
@@ -913,6 +1009,7 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 				Attributes: map[string]string{"runtime_only": "true"},
 			},
 			listable: true, wantReason: "", wantStatus: coreauth.StatusActive, wantUnavailable: true,
+			wantV0Status: coreauth.StatusActive, wantV0StatusMessage: "", wantV0Reason: "",
 		},
 		{
 			name: "stale unavailable",
@@ -921,18 +1018,22 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 				Status: coreauth.StatusActive, Unavailable: true,
 				Attributes: map[string]string{"runtime_only": "true"},
 			},
-			listable: true, wantReason: "no_recovery_deadline", wantStatus: coreauth.StatusError, wantUnavailable: true,
+			listable: true, wantReason: "no_recovery_deadline", wantStatus: coreauth.StatusError, wantStatusMessage: "unavailable (no recovery deadline)", wantUnavailable: true,
+			wantV0Status: coreauth.StatusActive, wantV0StatusMessage: "", wantV0Reason: "",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			unavailable, status, statusMessage, nextRetry, reason := reconcileAuthFileCooldownState(tc.auth, now)
+			unavailable, status, statusMessage, nextRetry, reason := reconcileAuthFileCooldownState(tc.auth, now, true)
 			if reason != tc.wantReason {
 				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
 			}
 			if status != tc.wantStatus {
 				t.Errorf("status = %q, want %q", status, tc.wantStatus)
+			}
+			if statusMessage != tc.wantStatusMessage {
+				t.Errorf("statusMessage = %q, want %q", statusMessage, tc.wantStatusMessage)
 			}
 			if unavailable != tc.wantUnavailable {
 				t.Errorf("unavailable = %v, want %v", unavailable, tc.wantUnavailable)
@@ -940,8 +1041,24 @@ func TestAuthFileCooldownReasons(t *testing.T) {
 			if !nextRetry.Equal(tc.wantNextRetry) {
 				t.Errorf("nextRetry = %v, want %v", nextRetry, tc.wantNextRetry)
 			}
-			if tc.wantReason == "no_recovery_deadline" && strings.TrimSpace(statusMessage) == "" {
-				t.Error("expected non-empty status_message for no_recovery_deadline")
+
+			// The deprecated v0 surface must keep its pre-existing reconciliation:
+			// only the stale no-deadline rewrite is gated out.
+			v0Unavailable, v0Status, v0StatusMessage, v0NextRetry, v0Reason := reconcileAuthFileCooldownState(tc.auth, now, false)
+			if v0Status != tc.wantV0Status {
+				t.Errorf("v0 status = %q, want %q", v0Status, tc.wantV0Status)
+			}
+			if v0StatusMessage != tc.wantV0StatusMessage {
+				t.Errorf("v0 statusMessage = %q, want %q", v0StatusMessage, tc.wantV0StatusMessage)
+			}
+			if v0Reason != tc.wantV0Reason {
+				t.Errorf("v0 reason = %q, want %q", v0Reason, tc.wantV0Reason)
+			}
+			if v0Unavailable != tc.wantUnavailable {
+				t.Errorf("v0 unavailable = %v, want %v", v0Unavailable, tc.wantUnavailable)
+			}
+			if !v0NextRetry.Equal(tc.wantNextRetry) {
+				t.Errorf("v0 nextRetry = %v, want %v", v0NextRetry, tc.wantNextRetry)
 			}
 
 			if !tc.listable {

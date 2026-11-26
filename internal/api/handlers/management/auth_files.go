@@ -540,7 +540,7 @@ func isModelStateBlocked(state *coreauth.ModelState, now time.Time) bool {
 	return true
 }
 
-func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavailable bool, status coreauth.Status, statusMessage string, nextRetry time.Time, reason string) {
+func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time, reconcileStaleUnavailable bool) (unavailable bool, status coreauth.Status, statusMessage string, nextRetry time.Time, reason string) {
 	if auth == nil {
 		return false, coreauth.StatusActive, "", time.Time{}, ""
 	}
@@ -653,9 +653,10 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 	}
 
 	// A credential blocked without any recovery deadline can never be scheduled again.
-	// Surface it as an error instead of leaving a contradictory active/unavailable entry.
+	// Surface it as an error on the maintained v8 surface instead of leaving a
+	// contradictory active/unavailable entry; the deprecated v0 shape stays frozen.
 	// Real blocks (quota, refresh, sign-in, forced cooldown) must keep their own reason.
-	if unavailable && nextRetry.IsZero() && coreauth.IsStaleUnavailable(auth, now) {
+	if reconcileStaleUnavailable && unavailable && nextRetry.IsZero() && coreauth.IsStaleUnavailable(auth, now) {
 		status = coreauth.StatusError
 		if strings.TrimSpace(statusMessage) == "" {
 			statusMessage = "unavailable (no recovery deadline)"
@@ -683,7 +684,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if name == "" {
 		name = auth.ID
 	}
-	unavailable, status, statusMessage, nextRetryAfter, unavailableReason := reconcileAuthFileCooldownState(auth, time.Now().UTC())
+	unavailable, status, statusMessage, nextRetryAfter, unavailableReason := reconcileAuthFileCooldownState(auth, time.Now().UTC(), quota.v8)
 	entry := gin.H{
 		"id":             auth.ID,
 		"auth_index":     auth.Index,
