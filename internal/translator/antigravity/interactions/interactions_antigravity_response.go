@@ -12,21 +12,37 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
+// Keep at most one retained thought signature per active streaming tool call,
+// bounded to prevent unbounded memory growth on pathological continuation streams.
+const maxAntigravityToolThoughtSignatureBytes = 4 * 1024 * 1024
+
+type antigravityInteractionsToolCall struct {
+	StreamingCall     *translatorcommon.VertexStreamingToolCall
+	RawName           string
+	UpstreamID        string
+	StepIndex         int
+	ArgumentsStarted  bool
+	ArgumentsHasItems bool
+	ThoughtSignature  string
+}
+
 type antigravityToInteractionsStreamState struct {
-	Started         bool
-	Finished        bool
-	Completed       bool
-	Done            bool
-	ActiveStepOpen  bool
-	PendingUsage    ojson.Result
-	HasPendingUsage bool
-	UsageAfterSeen  bool
-	ID              string
-	StepID          string
-	ActiveStepType  string
-	ActiveStepIndex int
-	StepIndex       int
-	ToolNameMap     map[string]string
+	Started          bool
+	Finished         bool
+	Completed        bool
+	Done             bool
+	ActiveStepOpen   bool
+	PendingUsage     ojson.Result
+	HasPendingUsage  bool
+	UsageAfterSeen   bool
+	ID               string
+	StepID           string
+	ActiveStepType   string
+	ActiveStepIndex  int
+	StepIndex        int
+	ToolNameMap      map[string]string
+	ActiveToolCall   *antigravityInteractionsToolCall
+	LastFinishReason string
 }
 
 func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -73,8 +89,11 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 			out = appendAntigravityPartToInteractionsStream(out, st, part)
 			return true
 		})
-		finishReason := root.Get("candidates.0.finishReason")
-		hasFinish := finishReason.Exists() && strings.TrimSpace(finishReason.String()) != ""
+		finishReason := antigravityFinishReason(root)
+		hasFinish := finishReason != ""
+		if hasFinish {
+			st.LastFinishReason = strings.Clone(finishReason)
+		}
 		frameHasUsage := hasAntigravityStreamUsage(root)
 		if frameHasUsage {
 			st.PendingUsage = ojson.Parse(strings.Clone(root.Raw))
@@ -114,6 +133,7 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 		id = fmt.Sprintf("interaction_%d", time.Now().UnixNano())
 	}
 	_ = outDoc.Set("id", id)
+	_ = outDoc.Set("status", interactionsStatusFromAntigravityFinishReason(antigravityFinishReason(root)))
 	_ = outDoc.Set("model", modelName)
 	var steps [][]byte
 	root.Get("candidates.0.content.parts").ForEach(func(_, part ojson.Result) bool {
@@ -228,6 +248,7 @@ func appendAntigravityInteractionsCompleted(out [][]byte, st *antigravityToInter
 	now := time.Now().UTC().Format(time.RFC3339)
 	completedDoc := ojson.NewDoc([]byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`))
 	_ = completedDoc.Set("interaction.id", st.ID)
+	_ = completedDoc.Set("interaction.status", interactionsStatusFromAntigravityFinishReason(st.LastFinishReason))
 	_ = completedDoc.Set("interaction.created", now)
 	_ = completedDoc.Set("interaction.updated", now)
 	_ = completedDoc.Set("interaction.model", modelName)
@@ -271,6 +292,26 @@ func appendAntigravityInteractionsStepStart(out [][]byte, st *antigravityToInter
 }
 
 func appendAntigravityInteractionsStepStop(out [][]byte, st *antigravityToInteractionsStreamState) [][]byte {
+	if st.ActiveToolCall != nil {
+		active := st.ActiveToolCall
+		st.ActiveToolCall = nil
+		if st.ActiveStepOpen && st.ActiveStepType == "function_call" {
+			if active.ThoughtSignature != "" {
+				out = appendAntigravityActiveStepThoughtSignature(out, st, active.ThoughtSignature)
+			}
+			if active.StreamingCall != nil {
+				if active.StreamingCall.Assembler != nil && active.StreamingCall.Assembler.Err() == nil {
+					if delta, _ := active.StreamingCall.Assembler.PushFunctionCall(ojson.Parse(`{}`)); active.StreamingCall.Assembler.Err() == nil && delta != "" {
+						out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+					}
+				}
+			} else if active.ArgumentsStarted {
+				out = appendAntigravityInteractionsArgumentsDelta(out, st, "}")
+			} else {
+				out = appendAntigravityInteractionsArgumentsDelta(out, st, "{}")
+			}
+		}
+	}
 	if !st.ActiveStepOpen {
 		return out
 	}
@@ -280,6 +321,159 @@ func appendAntigravityInteractionsStepStop(out [][]byte, st *antigravityToIntera
 	st.ActiveStepOpen = false
 	st.ActiveStepType = ""
 	return out
+}
+
+func appendAntigravityActiveStepThoughtSignature(out [][]byte, st *antigravityToInteractionsStreamState, signature string) [][]byte {
+	if signature == "" {
+		return out
+	}
+	signatureDeltaDoc := ojson.NewDoc([]byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`))
+	_ = signatureDeltaDoc.Set("index", st.ActiveStepIndex)
+	_ = signatureDeltaDoc.Set("delta.signature", signature)
+	return append(out, translatorcommon.SSEEventData("step.delta", signatureDeltaDoc.Bytes()))
+}
+
+func recordAntigravityToolThoughtSignature(call *antigravityInteractionsToolCall, signature string) {
+	if call == nil || signature == "" || len(signature) > maxAntigravityToolThoughtSignatureBytes {
+		return
+	}
+	call.ThoughtSignature = strings.Clone(signature)
+}
+
+func antigravityHasPartialArgs(fc ojson.Result) bool {
+	if !fc.Exists() || !fc.IsObject() {
+		return false
+	}
+	partialArgs := fc.Get("partialArgs")
+	if !partialArgs.Exists() {
+		partialArgs = fc.Get("partial_args")
+	}
+	if !partialArgs.Exists() {
+		return false
+	}
+	if partialArgs.IsArray() && len(partialArgs.Array()) == 0 && fc.Get("args").Exists() && !translatorcommon.VertexFunctionCallWillContinue(fc) {
+		return false
+	}
+	return true
+}
+
+func antigravityWillContinueState(fc ojson.Result) (bool, bool) {
+	if !fc.Exists() || !fc.IsObject() {
+		return false, false
+	}
+	if wc := fc.Get("willContinue"); wc.Exists() {
+		return wc.Bool(), true
+	}
+	if wc := fc.Get("will_continue"); wc.Exists() {
+		return wc.Bool(), true
+	}
+	return false, false
+}
+
+func (c *antigravityInteractionsToolCall) canContinueWith(fc ojson.Result) bool {
+	if c == nil || !fc.Exists() || !fc.IsObject() {
+		return false
+	}
+	if c.StreamingCall != nil {
+		return c.StreamingCall.CanContinueWith(fc)
+	}
+	fcID := strings.TrimSpace(fc.Get("id").String())
+	if fcID != "" && c.UpstreamID != "" && fcID != c.UpstreamID {
+		return false
+	}
+	rawName := strings.TrimSpace(fc.Get("name").String())
+	if rawName != "" && rawName != c.RawName {
+		return false
+	}
+	if rawName == "" {
+		return true
+	}
+	return fcID != "" && c.UpstreamID != "" && fcID == c.UpstreamID
+}
+
+func antigravityInteractionsArgsObjectRaw(args ojson.Result) string {
+	if !args.Exists() {
+		return ""
+	}
+	if args.IsObject() {
+		raw := strings.TrimSpace(args.Raw)
+		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && ojson.Valid(raw) {
+			return raw
+		}
+		return ""
+	}
+	if args.Type == ojson.String {
+		raw := strings.TrimSpace(args.String())
+		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && ojson.Valid(raw) && ojson.Parse(raw).IsObject() {
+			return raw
+		}
+	}
+	return ""
+}
+
+func antigravityInteractionsStartArgs(call *antigravityInteractionsToolCall, args ojson.Result) string {
+	raw := antigravityInteractionsArgsObjectRaw(args)
+	if call == nil || raw == "" {
+		return ""
+	}
+	call.ArgumentsStarted = true
+	members := strings.TrimSpace(raw[1 : len(raw)-1])
+	if members == "" {
+		call.ArgumentsHasItems = false
+		return "{"
+	}
+	call.ArgumentsHasItems = true
+	return "{" + members
+}
+
+func antigravityInteractionsContinuationArgs(call *antigravityInteractionsToolCall, args ojson.Result) string {
+	raw := antigravityInteractionsArgsObjectRaw(args)
+	if call == nil || raw == "" {
+		return ""
+	}
+	members := strings.TrimSpace(raw[1 : len(raw)-1])
+	if !call.ArgumentsStarted {
+		call.ArgumentsStarted = true
+		if members == "" {
+			return "{"
+		}
+		call.ArgumentsHasItems = true
+		return "{" + members
+	}
+	if members == "" {
+		return ""
+	}
+	prefix := ""
+	if call.ArgumentsHasItems {
+		prefix = ","
+	}
+	call.ArgumentsHasItems = true
+	return prefix + members
+}
+
+func appendAntigravityInteractionsArgumentsDelta(out [][]byte, st *antigravityToInteractionsStreamState, arguments string) [][]byte {
+	deltaDoc := ojson.NewDoc([]byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`))
+	_ = deltaDoc.Set("index", st.ActiveStepIndex)
+	_ = deltaDoc.Set("delta.arguments", arguments)
+	return append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
+}
+
+func antigravityFinishReason(root ojson.Result) string {
+	if fr := strings.TrimSpace(root.Get("candidates.0.finishReason").String()); fr != "" {
+		return fr
+	}
+	return strings.TrimSpace(root.Get("candidates.0.finish_reason").String())
+}
+
+func interactionsStatusFromAntigravityFinishReason(finishReason string) string {
+	switch strings.ToUpper(strings.TrimSpace(finishReason)) {
+	case "MAX_TOKENS":
+		return "incomplete"
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_FUNCTION_CALL", "MALFORMED_RESPONSE", "UNEXPECTED_TOOL_CALL":
+		return "failed"
+	default:
+		return "completed"
+	}
 }
 
 func ensureAntigravityInteractionsStep(out [][]byte, st *antigravityToInteractionsStreamState, stepType string, part ojson.Result) [][]byte {
@@ -308,12 +502,140 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 		return appendAntigravityThoughtSignature(out, st, part)
 	}
 	if fc := part.Get("functionCall"); fc.Exists() {
+		hasPartialArgs := antigravityHasPartialArgs(fc)
+		willContinue, explicitWillContinue := antigravityWillContinueState(fc)
+		isContinuation := st.ActiveToolCall != nil && st.ActiveToolCall.canContinueWith(fc)
+		if isContinuation || hasPartialArgs || willContinue || (explicitWillContinue && !fc.Get("args").Exists()) {
+			if !isContinuation {
+				if st.ActiveToolCall != nil {
+					out = appendAntigravityInteractionsStepStop(out, st)
+				}
+				rawName := strings.Clone(strings.TrimSpace(fc.Get("name").String()))
+				if rawName == "" {
+					return appendAntigravityThoughtSignature(out, st, part)
+				}
+				upstreamID := strings.Clone(strings.TrimSpace(fc.Get("id").String()))
+				if hasPartialArgs || (!willContinue && !fc.Get("args").Exists()) {
+					// Clone fc.Raw so any keys or numeric tokens retained by
+					// VertexPartialArgsAssembler stay independent of caller buffers.
+					ownedFC := ojson.Parse(strings.Clone(fc.Raw))
+					streamingCall := translatorcommon.NewVertexStreamingToolCall(rawName, rawName, upstreamID, "", 0)
+					delta, done := streamingCall.Assembler.PushFunctionCall(ownedFC)
+					if streamingCall.Assembler.Err() != nil {
+						return appendAntigravityThoughtSignature(out, st, part)
+					}
+					out = appendAntigravityThoughtSignature(out, st, part)
+					out = appendAntigravityInteractionsStepStop(out, st)
+					out = appendAntigravityInteractionsStepStart(out, st, "function_call", fc)
+					id := strings.Clone(antigravityFunctionPartID(fc))
+					if id == "" {
+						id = st.StepID
+					}
+					streamingCall.ID = id
+					streamingCall.Index = st.ActiveStepIndex
+					if delta != "" {
+						out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+					}
+					if done {
+						return appendAntigravityInteractionsStepStop(out, st)
+					}
+					st.ActiveToolCall = &antigravityInteractionsToolCall{
+						StreamingCall: streamingCall,
+						RawName:       rawName,
+						UpstreamID:    upstreamID,
+						StepIndex:     st.ActiveStepIndex,
+					}
+					return out
+				}
+				out = appendAntigravityThoughtSignature(out, st, part)
+				out = appendAntigravityInteractionsStepStop(out, st)
+				out = appendAntigravityInteractionsStepStart(out, st, "function_call", fc)
+				active := &antigravityInteractionsToolCall{
+					RawName:    rawName,
+					UpstreamID: upstreamID,
+					StepIndex:  st.ActiveStepIndex,
+				}
+				if delta := antigravityInteractionsStartArgs(active, fc.Get("args")); delta != "" {
+					out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+				}
+				st.ActiveToolCall = active
+				return out
+			}
+			active := st.ActiveToolCall
+			if active.UpstreamID == "" {
+				if fcID := strings.TrimSpace(fc.Get("id").String()); fcID != "" {
+					active.UpstreamID = strings.Clone(fcID)
+					if active.StreamingCall != nil {
+						active.StreamingCall.UpstreamID = active.UpstreamID
+					}
+				}
+			}
+			recordAntigravityToolThoughtSignature(active, antigravityThoughtSignature(part))
+			if active.StreamingCall == nil && hasPartialArgs && !active.ArgumentsStarted {
+				id := strings.Clone(antigravityFunctionPartID(fc))
+				if id == "" {
+					id = st.StepID
+				}
+				active.StreamingCall = translatorcommon.NewVertexStreamingToolCall(active.RawName, active.RawName, active.UpstreamID, id, active.StepIndex)
+			}
+			if active.StreamingCall != nil {
+				ownedFC := ojson.Parse(strings.Clone(fc.Raw))
+				delta, done := active.StreamingCall.Assembler.PushFunctionCall(ownedFC)
+				if active.StreamingCall.Assembler.Err() != nil {
+					sig := active.ThoughtSignature
+					st.ActiveToolCall = nil
+					if sig != "" {
+						out = appendAntigravityActiveStepThoughtSignature(out, st, sig)
+					}
+					return appendAntigravityInteractionsStepStop(out, st)
+				}
+				if done {
+					sig := active.ThoughtSignature
+					st.ActiveToolCall = nil
+					if sig != "" {
+						out = appendAntigravityActiveStepThoughtSignature(out, st, sig)
+					}
+					if delta != "" {
+						out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+					}
+					return appendAntigravityInteractionsStepStop(out, st)
+				}
+				if delta != "" {
+					out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+				}
+				return out
+			}
+			delta := antigravityInteractionsContinuationArgs(active, fc.Get("args"))
+			done := explicitWillContinue && !willContinue
+			if done {
+				if active.ArgumentsStarted {
+					delta += "}"
+				} else {
+					delta = "{}"
+					active.ArgumentsStarted = true
+				}
+				sig := active.ThoughtSignature
+				st.ActiveToolCall = nil
+				if sig != "" {
+					out = appendAntigravityActiveStepThoughtSignature(out, st, sig)
+				}
+				if delta != "" {
+					out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+				}
+				return appendAntigravityInteractionsStepStop(out, st)
+			}
+			if delta != "" {
+				out = appendAntigravityInteractionsArgumentsDelta(out, st, delta)
+			}
+			return out
+		}
+		if st.ActiveToolCall != nil {
+			out = appendAntigravityInteractionsStepStop(out, st)
+		}
 		out = appendAntigravityThoughtSignature(out, st, part)
-		out = ensureAntigravityInteractionsStep(out, st, "function_call", fc)
-		deltaDoc := ojson.NewDoc([]byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`))
-		_ = deltaDoc.Set("index", st.ActiveStepIndex)
-		_ = deltaDoc.Set("delta.arguments", antigravityFunctionCallArgsString(fc.Get("args")))
-		out = append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
+		out = appendAntigravityInteractionsStepStop(out, st)
+		out = appendAntigravityInteractionsStepStart(out, st, "function_call", fc)
+		out = appendAntigravityInteractionsArgumentsDelta(out, st, antigravityFunctionCallArgsString(fc.Get("args")))
 		return appendAntigravityInteractionsStepStop(out, st)
 	}
 	if fr := part.Get("functionResponse"); fr.Exists() {
@@ -344,10 +666,7 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 func appendAntigravityThoughtSignature(out [][]byte, st *antigravityToInteractionsStreamState, part ojson.Result) [][]byte {
 	if signature := antigravityThoughtSignature(part); signature != "" {
 		out = ensureAntigravityInteractionsStep(out, st, "thought", ojson.Result{})
-		signatureDeltaDoc := ojson.NewDoc([]byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`))
-		_ = signatureDeltaDoc.Set("index", st.ActiveStepIndex)
-		_ = signatureDeltaDoc.Set("delta.signature", signature)
-		return append(out, translatorcommon.SSEEventData("step.delta", signatureDeltaDoc.Bytes()))
+		return appendAntigravityActiveStepThoughtSignature(out, st, signature)
 	}
 	return out
 }

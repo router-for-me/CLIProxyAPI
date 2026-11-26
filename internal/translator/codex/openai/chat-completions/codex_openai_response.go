@@ -304,6 +304,8 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		_ = templateDoc.Set("choices.0.finish_reason", finishReason)
 		_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+	} else if dataType == "response.failed" || dataType == "error" {
+		return [][]byte{buildCodexFailedOpenAIError(rootResult)}
 	} else if dataType == "response.output_item.added" {
 		itemResult := rootResult.Get("item")
 		if itemResult.Exists() && itemResult.Get("type").String() == "message" {
@@ -526,6 +528,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	rootResult := util.ParseGJSONBytesNoCopy(rawJSON)
 	// Verify this is a terminal response event.
 	responseType := rootResult.Get("type").String()
+	if responseType == "response.failed" || responseType == "error" {
+		return buildCodexFailedOpenAIError(rootResult)
+	}
 	if responseType != "response.completed" && responseType != "response.incomplete" {
 		return []byte{}
 	}
@@ -605,7 +610,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 							if text := summaryItem.Get("text").String(); text != "" {
 								reasoningText += text
 							}
-							break
 						}
 					}
 				}
@@ -734,6 +738,40 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	}
 
 	return templateDoc.Bytes()
+}
+
+func buildCodexFailedOpenAIError(rootResult ojson.Result) []byte {
+	errNode := rootResult.Get("response.error")
+	if !errNode.Exists() || errNode.Type == ojson.Null {
+		errNode = rootResult.Get("error")
+	}
+	var msg string
+	if errNode.Type == ojson.String {
+		msg = strings.TrimSpace(errNode.String())
+	} else {
+		msg = strings.TrimSpace(errNode.Get("message").String())
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(rootResult.Get("message").String())
+	}
+	if msg == "" {
+		msg = "upstream response failed"
+	}
+	errType := strings.TrimSpace(errNode.Get("type").String())
+	if errType == "" {
+		errType = "server_error"
+	}
+	errDoc := ojson.NewDocString(`{"error":{"message":"","type":""}}`)
+	_ = errDoc.Set("error.message", msg)
+	_ = errDoc.Set("error.type", errType)
+	code := errNode.Get("code")
+	if !code.Exists() || code.Type == ojson.Null {
+		code = rootResult.Get("code")
+	}
+	if code.Exists() && code.Type != ojson.Null && strings.TrimSpace(code.String()) != "" {
+		_ = errDoc.Set("error.code", strings.TrimSpace(code.String()))
+	}
+	return errDoc.Bytes()
 }
 
 func codexAnnotationResults(value ojson.Result) []ojson.Result {

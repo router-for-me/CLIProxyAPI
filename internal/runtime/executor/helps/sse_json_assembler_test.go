@@ -160,8 +160,38 @@ func TestSSEJSONAssembler_RawMultilineJSONAndNilReceiver(t *testing.T) {
 	}
 
 	var nilAsm *SSEJSONAssembler
+	if nilAsm.HasPending() {
+		t.Fatal("nil receiver HasPending() = true, want false")
+	}
 	nilAsm.Reset()
 	if p := nilAsm.Push([]byte(`data: {"nil":true}`)); string(p) != `{"nil":true}` {
 		t.Fatalf("nil receiver Push = %q, want %q", string(p), `{"nil":true}`)
+	}
+
+	asmPending := NewSSEJSONAssembler(32)
+	if asmPending.HasPending() {
+		t.Fatal("fresh assembler HasPending() = true, want false")
+	}
+	if gotPartial := asmPending.Push([]byte(`data: {"response":`)); gotPartial != nil {
+		t.Fatalf("partial frame returned %q, want nil", string(gotPartial))
+	}
+	if !asmPending.HasPending() {
+		t.Fatal("assembler with partial frame HasPending() = false, want true")
+	}
+	if gotComplete := asmPending.Push([]byte(`data: {"ok":true}}`)); string(gotComplete) != "{\"response\":\n{\"ok\":true}}" {
+		t.Fatalf("completed frame = %q", string(gotComplete))
+	}
+	if asmPending.HasPending() {
+		t.Fatal("completed assembler HasPending() = true, want false")
+	}
+	if gotOversized := asmPending.Push([]byte(`data: {"oversized":"` + strings.Repeat("x", 40))); gotOversized != nil {
+		t.Fatalf("oversized frame returned %q, want nil", string(gotOversized))
+	}
+	if !asmPending.HasPending() {
+		t.Fatal("discarding oversized event HasPending() = false, want true")
+	}
+	asmPending.Push([]byte(""))
+	if asmPending.HasPending() {
+		t.Fatal("assembler after empty event boundary HasPending() = true, want false")
 	}
 }

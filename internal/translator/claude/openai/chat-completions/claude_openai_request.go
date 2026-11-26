@@ -118,27 +118,31 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	// Max tokens configuration with fallback to default value.
 	// OpenAI Chat Completions deprecated max_tokens in favor of
 	// max_completion_tokens, so accept either spelling.
-	if maxTokens := firstExisting(root.Get("max_tokens"), root.Get("max_completion_tokens")); maxTokens.Exists() {
+	if maxTokens := root.Get("max_tokens"); maxTokens.Type == ojson.Number && maxTokens.Int() > 0 {
 		_ = outDoc.Set("max_tokens", maxTokens.Int())
+	} else if maxCompletion := root.Get("max_completion_tokens"); maxCompletion.Type == ojson.Number && maxCompletion.Int() > 0 {
+		_ = outDoc.Set("max_tokens", maxCompletion.Int())
 	}
 
 	// Top P setting for nucleus sampling.
-	if topP := root.Get("top_p"); topP.Exists() {
+	if topP := root.Get("top_p"); topP.Type == ojson.Number {
 		_ = outDoc.Set("top_p", topP.Float())
 	}
 
 	// Stop sequences configuration for custom termination conditions
-	if stop := root.Get("stop"); stop.Exists() {
+	if stop := root.Get("stop"); stop.Exists() && stop.Type != ojson.Null {
 		if stop.IsArray() {
 			var stopSequences []string
 			stop.ForEach(func(_, value ojson.Result) bool {
-				stopSequences = append(stopSequences, value.String())
+				if value.Type == ojson.String && value.String() != "" {
+					stopSequences = append(stopSequences, value.String())
+				}
 				return true
 			})
 			if len(stopSequences) > 0 {
 				_ = outDoc.Set("stop_sequences", stopSequences)
 			}
-		} else {
+		} else if stop.Type == ojson.String && stop.String() != "" {
 			_ = outDoc.Set("stop_sequences", []string{stop.String()})
 		}
 	}
@@ -637,14 +641,4 @@ func defaultClaudeChatMaxTokensForModel(modelName string) int {
 		return maxTokens
 	}
 	return info.MaxCompletionTokens
-}
-
-// firstExisting returns the first non-null result that exists, or an empty result.
-func firstExisting(values ...ojson.Result) ojson.Result {
-	for _, value := range values {
-		if value.Exists() && value.Type != ojson.Null {
-			return value
-		}
-	}
-	return ojson.Result{}
 }
