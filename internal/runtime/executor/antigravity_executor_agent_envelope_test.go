@@ -7,6 +7,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -110,4 +111,276 @@ func TestAntigravityAgentEnvelopeBeforePayloadRules(t *testing.T) {
 	if errBuild != nil || calls != 1 || ojson.GetBytes(raw, "requestId").Str != "configured" || ojson.GetBytes(raw, "request.labels").Exists() {
 		t.Fatalf("payload rules not final: calls=%d payload=%s err=%v", calls, raw, errBuild)
 	}
+}
+
+func TestAntigravityAgentEnvelopeHomeModeWithoutEnumScope(t *testing.T) {
+	t.Run("isolates_distinct_accounts", func(t *testing.T) {
+		e := &AntigravityExecutor{}
+		authA := &cliproxyauth.Auth{
+			ID:                "ag-home-no-scope-distinct",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"refresh_token": "rt-home-A",
+				"email":         "home-a@example.com",
+				"project_id":    "proj-home-A",
+			},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:                "ag-home-no-scope-distinct",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"refresh_token": "rt-home-B",
+				"email":         "home-b@example.com",
+				"project_id":    "proj-home-B",
+			},
+		}
+		_, rawA, errA := e.buildRequestDoc(t.Context(), authA, "token-a", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-home","contents":[]}}`), false, "", "https://upstream.example")
+		if errA != nil {
+			t.Fatal(errA)
+		}
+		_, rawB, errB := e.buildRequestDoc(t.Context(), authB, "token-b", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-home","contents":[]}}`), false, "", "https://upstream.example")
+		if errB != nil {
+			t.Fatal(errB)
+		}
+		labelsA := ojson.GetBytes(rawA, "request.labels")
+		labelsB := ojson.GetBytes(rawB, "request.labels")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id", "request_id"} {
+			if labelsA.Get(k).Str == labelsB.Get(k).Str {
+				t.Fatalf("home mode without enum scope leaked %s=%q across accounts", k, labelsB.Get(k).Str)
+			}
+		}
+		if ojson.GetBytes(rawA, "requestId").Str == ojson.GetBytes(rawB, "requestId").Str {
+			t.Fatalf("home mode without enum scope leaked requestId=%q across accounts", ojson.GetBytes(rawB, "requestId").Str)
+		}
+	})
+
+	t.Run("isolates_sanitized_home_accounts_without_refresh_token", func(t *testing.T) {
+		e := &AntigravityExecutor{}
+		authA := &cliproxyauth.Auth{
+			ID:                "ag-home-sanitized",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"access_token": "tok-home-A",
+				"email":        "sanitized-a@example.com",
+				"project_id":   "proj-sanitized-A",
+			},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:                "ag-home-sanitized",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"access_token": "tok-home-B",
+				"email":        "sanitized-b@example.com",
+				"project_id":   "proj-sanitized-B",
+			},
+		}
+		_, rawA, errA := e.buildRequestDoc(t.Context(), authA, "tok-home-A", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-sanitized","contents":[]}}`), false, "", "https://upstream.example")
+		if errA != nil {
+			t.Fatal(errA)
+		}
+		_, rawB, errB := e.buildRequestDoc(t.Context(), authB, "tok-home-B", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-sanitized","contents":[]}}`), false, "", "https://upstream.example")
+		if errB != nil {
+			t.Fatal(errB)
+		}
+		labelsA := ojson.GetBytes(rawA, "request.labels")
+		labelsB := ojson.GetBytes(rawB, "request.labels")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id"} {
+			if labelsA.Get(k).Str == labelsB.Get(k).Str {
+				t.Fatalf("sanitized home mode without enum scope leaked %s=%q across accounts", k, labelsB.Get(k).Str)
+			}
+		}
+	})
+
+	t.Run("isolates_shared_project_accounts_by_access_token_fallback", func(t *testing.T) {
+		e := &AntigravityExecutor{}
+		authA := &cliproxyauth.Auth{
+			ID:                "ag-home-shared-project",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"project_id":   "shared-project",
+				"access_token": "shared-proj-token-a",
+			},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:                "ag-home-shared-project",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"project_id":   "shared-project",
+				"access_token": "shared-proj-token-b",
+			},
+		}
+		_, rawA, errA := e.buildRequestDoc(t.Context(), authA, "shared-proj-token-a", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-shared-proj","contents":[]}}`), false, "", "https://upstream.example")
+		if errA != nil {
+			t.Fatal(errA)
+		}
+		_, rawB, errB := e.buildRequestDoc(t.Context(), authB, "shared-proj-token-b", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-shared-proj","contents":[]}}`), false, "", "https://upstream.example")
+		if errB != nil {
+			t.Fatal(errB)
+		}
+		labelsA := ojson.GetBytes(rawA, "request.labels")
+		labelsB := ojson.GetBytes(rawB, "request.labels")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id", "request_id"} {
+			if labelsA.Get(k).Str == labelsB.Get(k).Str {
+				t.Fatalf("shared-project home accounts without account identity leaked %s=%q", k, labelsB.Get(k).Str)
+			}
+		}
+	})
+
+	t.Run("isolates_ephemeral_token_fallback_when_stable_fields_empty", func(t *testing.T) {
+		authA := &cliproxyauth.Auth{
+			ID:                "ag-home-ephemeral",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata:          map[string]any{"access_token": "ephemeral-token-a"},
+		}
+		authB := &cliproxyauth.Auth{
+			ID:                "ag-home-ephemeral",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata:          map[string]any{"access_token": "ephemeral-token-b"},
+		}
+		docA := ojson.NewDocString(`{"request":{"contents":[]}}`)
+		docB := ojson.NewDocString(`{"request":{"contents":[]}}`)
+		helps.ApplyAntigravityAgentEnvelope(docA, authA, "sess-ephemeral", "gemini-3-flash", "")
+		helps.ApplyAntigravityAgentEnvelope(docB, authB, "sess-ephemeral", "gemini-3-flash", "")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id"} {
+			if docA.Get("request.labels."+k).Str == docB.Get("request.labels."+k).Str {
+				t.Fatalf("home mode token fallback leaked %s=%q across accounts", k, docB.Get("request.labels."+k).Str)
+			}
+		}
+	})
+
+	t.Run("preserves_session_on_same_account_access_token_rotation", func(t *testing.T) {
+		e := &AntigravityExecutor{}
+		authBefore := &cliproxyauth.Auth{
+			ID:                "ag-home-rotate",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"access_token":  "access-old",
+				"refresh_token": "rt-home-same",
+				"email":         "same@example.com",
+				"project_id":    "proj-same",
+			},
+		}
+		authAfter := &cliproxyauth.Auth{
+			ID:                "ag-home-rotate",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"access_token":  "access-new",
+				"refresh_token": "rt-home-same",
+				"email":         "same@example.com",
+				"project_id":    "proj-same",
+			},
+		}
+		_, rawBefore, errBefore := e.buildRequestDoc(t.Context(), authBefore, "access-old", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-rotate","contents":[]}}`), false, "", "https://upstream.example")
+		if errBefore != nil {
+			t.Fatal(errBefore)
+		}
+		_, rawAfter, errAfter := e.buildRequestDoc(t.Context(), authAfter, "access-new", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-rotate","contents":[]}}`), false, "", "https://upstream.example")
+		if errAfter != nil {
+			t.Fatal(errAfter)
+		}
+		labelsBefore := ojson.GetBytes(rawBefore, "request.labels")
+		labelsAfter := ojson.GetBytes(rawAfter, "request.labels")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id"} {
+			if labelsBefore.Get(k).Str != labelsAfter.Get(k).Str {
+				t.Fatalf("same-account access_token rotation changed %s from %q to %q", k, labelsBefore.Get(k).Str, labelsAfter.Get(k).Str)
+			}
+		}
+	})
+
+	t.Run("preserves_session_on_sanitized_home_access_token_rotation", func(t *testing.T) {
+		e := &AntigravityExecutor{}
+		authBefore := &cliproxyauth.Auth{
+			ID:                "ag-home-sanitized-rotate",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Attributes:        map[string]string{cliproxyauth.AntigravityModelEnumHomeScopeAttribute: "   "},
+			Metadata: map[string]any{
+				"access_token": "sanitized-access-old",
+				"email":        "Sanitized-Same@Example.com",
+				"project_id":   "proj-sanitized-same",
+			},
+		}
+		authAfter := &cliproxyauth.Auth{
+			ID:                "ag-home-sanitized-rotate",
+			Provider:          "antigravity",
+			RegistrationEpoch: 0,
+			Metadata: map[string]any{
+				"access_token": "sanitized-access-new",
+				"email":        "sanitized-same@example.com",
+				"project_id":   "proj-sanitized-same",
+			},
+		}
+		_, rawBefore, errBefore := e.buildRequestDoc(t.Context(), authBefore, "sanitized-access-old", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-sanitized-rotate","contents":[]}}`), false, "", "https://upstream.example")
+		if errBefore != nil {
+			t.Fatal(errBefore)
+		}
+		_, rawAfter, errAfter := e.buildRequestDoc(t.Context(), authAfter, "sanitized-access-new", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-sanitized-rotate","contents":[]}}`), false, "", "https://upstream.example")
+		if errAfter != nil {
+			t.Fatal(errAfter)
+		}
+		labelsBefore := ojson.GetBytes(rawBefore, "request.labels")
+		labelsAfter := ojson.GetBytes(rawAfter, "request.labels")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id"} {
+			if labelsBefore.Get(k).Str != labelsAfter.Get(k).Str {
+				t.Fatalf("sanitized same-account access_token rotation changed %s from %q to %q", k, labelsBefore.Get(k).Str, labelsAfter.Get(k).Str)
+			}
+		}
+	})
+
+	t.Run("preserves_session_on_local_inplace_manager_update", func(t *testing.T) {
+		mgr := cliproxyauth.NewManager(nil, nil, nil)
+		mgr.SetConfig(&config.Config{})
+		authA := &cliproxyauth.Auth{
+			ID:       "ag-local-inplace-keep",
+			Provider: "antigravity",
+			Metadata: map[string]any{
+				"refresh_token": "rt-local-A",
+				"email":         "local-a@example.com",
+				"project_id":    "proj-local-A",
+			},
+		}
+		regA, errReg := mgr.Register(cliproxyauth.WithSkipPersist(t.Context()), authA)
+		if errReg != nil {
+			t.Fatalf("Register A: %v", errReg)
+		}
+		e := &AntigravityExecutor{}
+		_, rawA, errA := e.buildRequestDoc(t.Context(), regA, "token-a", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-local-inplace","contents":[]}}`), false, "", "https://upstream.example")
+		if errA != nil {
+			t.Fatal(errA)
+		}
+		authB := &cliproxyauth.Auth{
+			ID:       "ag-local-inplace-keep",
+			Provider: "antigravity",
+			Metadata: map[string]any{
+				"refresh_token": "rt-local-B",
+				"email":         "local-b@example.com",
+				"project_id":    "proj-local-B",
+			},
+		}
+		updatedB, errUpdate := mgr.Update(cliproxyauth.WithSkipPersist(t.Context()), authB)
+		if errUpdate != nil {
+			t.Fatalf("Update B: %v", errUpdate)
+		}
+		_, rawB, errB := e.buildRequestDoc(t.Context(), updatedB, "token-b", "gemini-3-flash", ojson.NewDocString(`{"request":{"sessionId":"sess-local-inplace","contents":[]}}`), false, "", "https://upstream.example")
+		if errB != nil {
+			t.Fatal(errB)
+		}
+		labelsA := ojson.GetBytes(rawA, "request.labels")
+		labelsB := ojson.GetBytes(rawB, "request.labels")
+		for _, k := range []string{"cascade_id", "root_cascade_id", "trajectory_id"} {
+			if labelsA.Get(k).Str != labelsB.Get(k).Str {
+				t.Fatalf("local in-place Manager.Update unexpectedly changed %s from %q to %q", k, labelsA.Get(k).Str, labelsB.Get(k).Str)
+			}
+		}
+	})
 }

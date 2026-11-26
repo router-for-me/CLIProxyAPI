@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -239,8 +240,20 @@ func TestCompletionsStreamWithoutFinishReasonIsReportedAsError(t *testing.T) {
 	if strings.Contains(out, "data: [DONE]") {
 		t.Errorf("truncated legacy completions stream was terminated with [DONE]: %q", out)
 	}
-	if !strings.Contains(out, "finish_reason") {
-		t.Errorf("truncated legacy completions stream did not surface error: %q", out)
+	foundErrorMsg := false
+	for _, line := range strings.Split(out, "\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
+		if !ok {
+			continue
+		}
+		msg := ojson.GetBytes([]byte(strings.TrimSpace(payload)), "error.message")
+		if msg.Type == ojson.String && strings.Contains(msg.String(), "upstream stream closed before any chunk carried finish_reason") {
+			foundErrorMsg = true
+			break
+		}
+	}
+	if !foundErrorMsg {
+		t.Errorf("truncated legacy completions stream did not surface SSE error.message: %q", out)
 	}
 }
 

@@ -1993,3 +1993,72 @@ func TestConvertOpenAIRequestToCodexParallelToolCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToCodex_ReasoningEffortNullAndEmpty(t *testing.T) {
+	tests := []struct {
+		name            string
+		field           string
+		wantCodexEffort string
+		wantRespExists  bool
+		wantRespEffort  string
+	}{
+		{
+			name:            "null reasoning_effort falls back to medium for codex and omitted for responses",
+			field:           `"reasoning_effort":null,`,
+			wantCodexEffort: "medium",
+			wantRespExists:  false,
+		},
+		{
+			name:            "empty reasoning_effort falls back to medium for codex and omitted for responses",
+			field:           `"reasoning_effort":"",`,
+			wantCodexEffort: "medium",
+			wantRespExists:  false,
+		},
+		{
+			name:            "whitespace reasoning_effort falls back to medium for codex and omitted for responses",
+			field:           `"reasoning_effort":"   ",`,
+			wantCodexEffort: "medium",
+			wantRespExists:  false,
+		},
+		{
+			name:            "non-string reasoning_effort falls back to medium for codex and omitted for responses",
+			field:           `"reasoning_effort":123,`,
+			wantCodexEffort: "medium",
+			wantRespExists:  false,
+		},
+		{
+			name:            "trimmed string reasoning_effort preserved",
+			field:           `"reasoning_effort":" high ",`,
+			wantCodexEffort: "high",
+			wantRespExists:  true,
+			wantRespEffort:  "high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"model":"gpt-5.4",` + tt.field + `"messages":[{"role":"user","content":"hi"}]}`)
+
+			codexOut, errCodex := ConvertOpenAIRequestToCodex("gpt-5.4", input, true)
+			if errCodex != nil {
+				t.Fatalf("ConvertOpenAIRequestToCodex() error = %v", errCodex)
+			}
+			codexEffort := ojson.GetBytesNoCopy(codexOut, "reasoning.effort")
+			if codexEffort.Type != ojson.String || codexEffort.String() != tt.wantCodexEffort {
+				t.Fatalf("codex reasoning.effort = %s (type %v), want %q; output=%s", codexEffort.Raw, codexEffort.Type, tt.wantCodexEffort, string(codexOut))
+			}
+
+			respOut, errResp := ConvertOpenAIRequestToResponses("gpt-5.4", input, true)
+			if errResp != nil {
+				t.Fatalf("ConvertOpenAIRequestToResponses() error = %v", errResp)
+			}
+			respEffort := ojson.GetBytesNoCopy(respOut, "reasoning.effort")
+			if respEffort.Exists() != tt.wantRespExists {
+				t.Fatalf("responses reasoning.effort exists = %v (raw=%s), want %v; output=%s", respEffort.Exists(), respEffort.Raw, tt.wantRespExists, string(respOut))
+			}
+			if tt.wantRespExists && (respEffort.Type != ojson.String || respEffort.String() != tt.wantRespEffort) {
+				t.Fatalf("responses reasoning.effort = %s (type %v), want %q; output=%s", respEffort.Raw, respEffort.Type, tt.wantRespEffort, string(respOut))
+			}
+		})
+	}
+}
