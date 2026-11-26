@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -500,12 +501,24 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
+		var terminalDelivered bool
 		var sawFinishReason bool
 		var streamFailed bool
 		var streamAborted bool
 		var upstreamEvent string
 		var frameData [][]byte
-		defer streamUsage.Publish(ctx, reporter)
+		defer func() {
+			if errCtx := ctx.Err(); (streamAborted || errCtx != nil) && !seenDone && !terminalDelivered && !streamFailed {
+				if errCtx == nil {
+					errCtx = context.Canceled
+				}
+				if !streamUsage.PublishFailure(ctx, reporter, errCtx) {
+					reporter.PublishFailure(ctx, errCtx)
+				}
+				return
+			}
+			streamUsage.Publish(ctx, reporter)
+		}()
 
 		publishStreamError := func(streamErr statusErr, containsPayload bool) {
 			loggedErr := streamErr
@@ -575,6 +588,9 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					if openAICompatChunkIsTerminal(responseFormat, chunks[i]) {
+						terminalDelivered = true
+					}
 				case <-ctx.Done():
 					streamAborted = true
 					return true
@@ -586,6 +602,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			}
 			if isDone {
 				seenDone = true
+				terminalDelivered = true
 				return true
 			}
 			return false
@@ -646,6 +663,9 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			return
 		}
 		if errScan != nil && !seenDone {
+			if terminalDelivered && openAICompatIsContextCancelErr(ctx, errScan) {
+				return
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
 				reporter.PublishFailure(ctx, errScan)
@@ -654,7 +674,10 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
-		} else if !seenDone {
+		} else if !seenDone && !terminalDelivered {
+			if ctx.Err() != nil {
+				return
+			}
 			// Without a translator-confirmed terminal state, a clean Responses or Claude EOF
 			// without [DONE] remains a failed stream instead of completing it.
 			if responseFormat == sdktranslator.FormatOpenAIResponse || (responseFormat == sdktranslator.FormatClaude && !sawFinishReason) {
@@ -679,6 +702,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
+					streamAborted = true
 					return
 				}
 			}
@@ -781,12 +805,21 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		streamUsage.SetRequestPayload(payload, contentType)
 		usageObserver := helps.NewOpenAIStreamUsageObserver(&streamUsage, streamScannerBuffer)
 		observer := helps.NewStreamResponseModelObserver(reporter)
+		requestedImages := openAICompatRequestedImageCount(payload, contentType)
+		var streamCompleted bool
+		var streamFailed bool
 		defer func() {
 			observer.Finish()
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 			usageObserver.Finish()
+			if errCtx := ctx.Err(); errCtx != nil && !streamCompleted && !streamFailed {
+				if !streamUsage.PublishFailure(ctx, reporter, errCtx) {
+					reporter.PublishFailure(ctx, errCtx)
+				}
+				return
+			}
 			streamUsage.Publish(ctx, reporter)
 			reporter.EnsurePublished(ctx)
 		}()
@@ -800,12 +833,19 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 				usageObserver.Feed(chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+					if detail, okDetail := streamUsage.Detail(); okDetail && detail.ImageCount != nil && *detail.ImageCount >= requestedImages {
+						streamCompleted = true
+					}
 				case <-ctx.Done():
 					return
 				}
 			}
 			if errRead != nil {
 				if errRead != io.EOF {
+					if streamCompleted && openAICompatIsContextCancelErr(ctx, errRead) {
+						return
+					}
+					streamFailed = true
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					observer.Finish()
 					usageObserver.Finish()
@@ -816,6 +856,8 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 					case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
 					case <-ctx.Done():
 					}
+				} else if ctx.Err() == nil {
+					streamCompleted = true
 				}
 				return
 			}
@@ -953,6 +995,71 @@ func openAICompatAuthHasRefreshToken(auth *cliproxyauth.Auth) bool {
 		return true
 	}
 	return false
+}
+
+func openAICompatIsContextCancelErr(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+			return true
+		}
+	}
+	return false
+}
+
+func openAICompatChunkIsTerminal(responseFormat sdktranslator.Format, chunk []byte) bool {
+	switch responseFormat {
+	case sdktranslator.FormatClaude:
+		return bytes.Contains(chunk, []byte(`"type":"message_stop"`))
+	case sdktranslator.FormatOpenAIResponse:
+		return bytes.Contains(chunk, []byte(`"type":"response.completed"`)) || bytes.Contains(chunk, []byte(`"type":"response.incomplete"`))
+	default:
+		return false
+	}
+}
+
+func openAICompatRequestedImageCount(payload []byte, contentType string) int64 {
+	if len(payload) == 0 {
+		return 1
+	}
+	if json.Valid(payload) {
+		if n := ojson.GetBytesNoCopy(payload, "n").Int(); n > 1 {
+			return n
+		}
+		return 1
+	}
+	mediaType, params, errParse := mime.ParseMediaType(contentType)
+	if errParse != nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), "multipart/") {
+		return 1
+	}
+	boundary := strings.TrimSpace(params["boundary"])
+	if boundary == "" {
+		return 1
+	}
+	reader := multipart.NewReader(bytes.NewReader(payload), boundary)
+	for {
+		part, errNext := reader.NextPart()
+		if errNext != nil {
+			break
+		}
+		if part.FormName() == "n" {
+			raw, errRead := io.ReadAll(io.LimitReader(part, 32))
+			_ = part.Close()
+			if errRead == nil {
+				if n, errConv := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); errConv == nil && n > 1 {
+					return n
+				}
+			}
+			return 1
+		}
+		_ = part.Close()
+	}
+	return 1
 }
 
 func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {

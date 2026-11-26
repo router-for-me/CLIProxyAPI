@@ -32,6 +32,9 @@ var antigravityNow = time.Now
 // Refresh refreshes the authentication credentials using the refresh token.
 func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		if err == nil {
+			rebindAntigravitySignatureGrantAfterHomeRefresh(auth, refreshed)
+		}
 		return refreshed, err
 	}
 	if auth == nil {
@@ -162,6 +165,7 @@ func (e *AntigravityExecutor) ensureAccessTokenWithOptions(ctx context.Context, 
 			if errHome != nil {
 				return nil, errHome
 			}
+			rebindAntigravitySignatureGrantAfterHomeRefresh(latest, refreshed)
 			token := metaStringValue(refreshed.Metadata, "access_token")
 			if strings.TrimSpace(token) == "" {
 				return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token", credentialScoped: true}
@@ -240,28 +244,12 @@ func (e *AntigravityExecutor) refreshTokenWithOptions(ctx context.Context, auth 
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	grantIdentity := antigravitySignatureGrantIdentity(auth)
-	grantRetained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
-	grantBinding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
-	currentBinding := antigravitySignatureGrantBinding(auth)
-	if grantRetained != "" && grantBinding == currentBinding {
-		// Preserve identity only when a prior refresh explicitly bound this exact token pair.
-		if grantIdentity != "" {
-			auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
-		}
-	} else {
-		delete(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)
-	}
+	grantIdentity := prepareAntigravitySignatureGrantForRefresh(auth)
 	auth.Metadata["access_token"] = tokenResp.AccessToken
 	if tokenResp.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = tokenResp.RefreshToken
 	}
-	if retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)); retained != "" {
-		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = antigravitySignatureGrantBinding(auth)
-	} else {
-		auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
-		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = antigravitySignatureGrantBinding(auth)
-	}
+	finalizeAntigravitySignatureGrantAfterRefresh(auth, grantIdentity)
 	auth.Metadata["expires_in"] = tokenResp.ExpiresIn
 	now := time.Now()
 	auth.Metadata["timestamp"] = now.UnixMilli()
@@ -274,6 +262,135 @@ func (e *AntigravityExecutor) refreshTokenWithOptions(ctx context.Context, auth 
 		e.queueAntigravityCreditsRefresh(ctx, auth, tokenResp.AccessToken, 0)
 	}
 	return auth, nil
+}
+
+func prepareAntigravitySignatureGrantForRefresh(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	grantIdentity := antigravitySignatureGrantIdentity(auth)
+	if !antigravityHasValidSignatureGrant(auth) {
+		delete(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)
+		delete(auth.Metadata, antigravitySignatureGrantHomeBindingMetadataKey)
+	} else if grantIdentity != "" {
+		auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
+	}
+	return grantIdentity
+}
+
+func finalizeAntigravitySignatureGrantAfterRefresh(auth *cliproxyauth.Auth, grantIdentity string) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	binding := antigravitySignatureGrantBinding(auth)
+	if retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)); retained != "" {
+		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = binding
+		return
+	}
+	if grantIdentity != "" {
+		auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
+		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = binding
+	}
+}
+
+func rebindAntigravitySignatureGrantAfterHomeRefresh(prev, next *cliproxyauth.Auth) {
+	if prev == nil || next == nil {
+		return
+	}
+	// Preserve an authoritative grant binding already projected by Home.
+	if antigravityHasValidSignatureGrant(next) {
+		return
+	}
+	if !sameAntigravityHomeRefreshGrant(prev, next) {
+		if next.Metadata != nil {
+			delete(next.Metadata, antigravitySignatureGrantScopeMetadataKey)
+			delete(next.Metadata, antigravitySignatureGrantBindingMetadataKey)
+			delete(next.Metadata, antigravitySignatureGrantHomeBindingMetadataKey)
+		}
+		return
+	}
+	grantIdentity := antigravitySignatureGrantIdentity(prev)
+	nextBinding := antigravitySignatureGrantBinding(next)
+	if grantIdentity == "" || nextBinding == "" {
+		return
+	}
+	if next.Metadata == nil {
+		next.Metadata = make(map[string]any)
+	}
+	next.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
+	next.Metadata[antigravitySignatureGrantBindingMetadataKey] = nextBinding
+}
+
+func sameAntigravityHomeRefreshGrant(prev, next *cliproxyauth.Auth) bool {
+	if prev == nil || next == nil {
+		return false
+	}
+	prevID := strings.TrimSpace(prev.ID)
+	nextID := strings.TrimSpace(next.ID)
+	if prevID != "" && nextID != "" && prevID != nextID {
+		return false
+	}
+	prevEnumScope := ""
+	if prev.Attributes != nil {
+		prevEnumScope = strings.TrimSpace(prev.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute])
+	}
+	nextEnumScope := ""
+	if next.Attributes != nil {
+		nextEnumScope = strings.TrimSpace(next.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute])
+	}
+	if (prevEnumScope != "" || nextEnumScope != "") && prevEnumScope != nextEnumScope {
+		return false
+	}
+	prevRefresh := strings.TrimSpace(metaStringValue(prev.Metadata, "refresh_token"))
+	nextRefresh := strings.TrimSpace(metaStringValue(next.Metadata, "refresh_token"))
+	if prevRefresh != "" && nextRefresh != "" && prevRefresh != nextRefresh {
+		return false
+	}
+	if antigravityMetaFieldConflicts(prev.Metadata, next.Metadata, "project_id", false) ||
+		antigravityMetaFieldConflicts(prev.Metadata, next.Metadata, "email", true) ||
+		antigravityMetaFieldConflicts(prev.Metadata, next.Metadata, "account_id", false) {
+		return false
+	}
+	if prevEnumScope != "" && prevEnumScope == nextEnumScope {
+		return true
+	}
+	if prevRefresh != "" && prevRefresh == nextRefresh {
+		return true
+	}
+	if prevRefresh == "" || nextRefresh == "" {
+		// project_id can be shared across distinct accounts, so require an
+		// account-level identifier (email or account_id) as positive continuity proof.
+		return antigravityMetaFieldMatches(prev.Metadata, next.Metadata, "email", true) ||
+			antigravityMetaFieldMatches(prev.Metadata, next.Metadata, "account_id", false)
+	}
+	return false
+}
+
+func antigravityMetaFieldConflicts(prevMeta, nextMeta map[string]any, key string, foldCase bool) bool {
+	prevVal := strings.TrimSpace(metaStringValue(prevMeta, key))
+	nextVal := strings.TrimSpace(metaStringValue(nextMeta, key))
+	if prevVal == "" || nextVal == "" {
+		return false
+	}
+	if foldCase {
+		return !strings.EqualFold(prevVal, nextVal)
+	}
+	return prevVal != nextVal
+}
+
+func antigravityMetaFieldMatches(prevMeta, nextMeta map[string]any, key string, foldCase bool) bool {
+	prevVal := strings.TrimSpace(metaStringValue(prevMeta, key))
+	nextVal := strings.TrimSpace(metaStringValue(nextMeta, key))
+	if prevVal == "" || nextVal == "" {
+		return false
+	}
+	if foldCase {
+		return strings.EqualFold(prevVal, nextVal)
+	}
+	return prevVal == nextVal
 }
 
 func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {

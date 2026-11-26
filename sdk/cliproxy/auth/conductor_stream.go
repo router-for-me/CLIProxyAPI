@@ -832,6 +832,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		errStream = markUpstreamExecutionAttemptFromContext(attemptCtx, errStream)
 		if errStream != nil {
 			abandonAttempt(streamResult)
+			recordAntigravityAttemptedModelFromAttempt(ctx, execCtx, provider, auth.ID, resultModel, errStream)
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
@@ -953,6 +954,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if bootstrapErr != nil {
 			abandonAttempt(streamResult)
+			recordAntigravityAttemptedModelFromAttempt(ctx, execCtx, provider, auth.ID, resultModel, bootstrapErr)
 			if !hasUpstreamExecutionAttempt(bootstrapErr) {
 				if preRefreshBootstrapErr != nil {
 					syncPreferredUpstreamError(&upstreamErr, newStreamBootstrapError(preRefreshBootstrapErr, preRefreshBootstrapHeaders))
@@ -1053,6 +1055,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 			}
 			emptyErr := markUpstreamExecutionAttemptFromContext(attemptCtx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
+			recordAntigravityAttemptedModelFromAttempt(ctx, execCtx, provider, auth.ID, resultModel, emptyErr)
 			currentErr := newStreamBootstrapError(emptyErr, streamResult.Headers)
 			if hasUpstreamExecutionAttempt(emptyErr) {
 				syncPreferredUpstreamError(&upstreamErr, currentErr)
