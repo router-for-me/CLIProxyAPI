@@ -110,11 +110,11 @@ func claudeQuotaCandidate(a *Auth) bool {
 	}
 	now := time.Now()
 	blocked := a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now)
-	// Under a quota, a sibling result can leave an old server error on the
+	// Under a quota, a sibling result can leave an old transient error on the
 	// auth. The live deadlines below show whether it still blocks. Other
 	// errors, such as 401 or 403, are about the credential and stay.
-	staleServerError := a.Quota.Exceeded && (a.Quota.Reason == "quota" || a.Quota.Reason == "credential_quota") && isServerError(a.LastError)
-	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests && !staleServerError {
+	staleTransientError := a.Quota.Exceeded && (a.Quota.Reason == "quota" || a.Quota.Reason == "credential_quota") && isTransientError(a.LastError)
+	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests && !staleTransientError {
 		return false
 	}
 	// These deadlines come from failures other than quota, or from a forced
@@ -134,11 +134,11 @@ func claudeQuotaCandidate(a *Auth) bool {
 		quota := isQuotaModelState(s)
 		// A quota state can keep an old error from before the quota. The live
 		// deadlines above show whether that error still blocks the model. A
-		// model without quota passes only with a server error whose retry
+		// model without quota passes only with a transient error whose retry
 		// deadline has expired or was cleared. A model that is unavailable
 		// without a deadline still blocks.
-		expiredServerError := isServerError(s.LastError) && (!s.Unavailable || (!s.NextRetryAfter.IsZero() && !s.NextRetryAfter.After(now)))
-		if !quota && !expiredServerError && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
+		expiredTransientError := isTransientError(s.LastError) && (!s.Unavailable || (!s.NextRetryAfter.IsZero() && !s.NextRetryAfter.After(now)))
+		if !quota && !expiredTransientError && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
 			return false
 		}
 		if quota && isModelStateActiveCooldown(s, now) {
@@ -161,8 +161,10 @@ func hasLiveNonQuotaBlock(s *ModelState, now time.Time) bool {
 	return s.Status != StatusDisabled && !isQuotaModelState(s) && isModelStateActiveCooldown(s, now)
 }
 
-func isServerError(err *Error) bool {
-	return err != nil && err.HTTPStatus >= http.StatusInternalServerError
+// isTransientError matches the statuses that MarkResult cools down as
+// transient: 408 and 5xx.
+func isTransientError(err *Error) bool {
+	return err != nil && (err.HTTPStatus == http.StatusRequestTimeout || err.HTTPStatus >= http.StatusInternalServerError)
 }
 
 func isQuotaModelState(s *ModelState) bool {

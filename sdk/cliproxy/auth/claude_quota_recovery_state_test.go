@@ -329,27 +329,31 @@ func expireNonQuotaDeadlines(m *Manager, authID, model string) {
 }
 
 func TestClaudeQuotaRecoveryIgnoresExpiredAuthError(t *testing.T) {
-	withQuotaCooldownEnabled(t)
-	m := NewManager(nil, nil, nil)
-	a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
-	if _, err := m.Register(context.Background(), a); err != nil {
-		t.Fatal(err)
-	}
-	quota := 5 * 24 * time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
-	outage := time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-haiku", RetryAfter: &outage, Error: &Error{HTTPStatus: 503, Message: "overloaded"}})
-	expireNonQuotaDeadlines(m, a.ID, "claude-haiku")
-	snapshot, _ := m.GetByID(a.ID)
-	if snapshot.LastError == nil || snapshot.LastError.HTTPStatus != 503 || !snapshot.Quota.Exceeded {
-		t.Fatalf("fixture: LastError=%+v quota=%+v, want an old 503 under a credential quota", snapshot.LastError, snapshot.Quota)
-	}
-	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := m.GetByID(a.ID)
-	if after.Quota.Exceeded {
-		t.Fatal("an expired 503 on the auth record kept the account blocked")
+	for _, status := range []int{503, 408} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			m := NewManager(nil, nil, nil)
+			a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
+			if _, err := m.Register(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			quota := 5 * 24 * time.Hour
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+			outage := time.Hour
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-haiku", RetryAfter: &outage, Error: &Error{HTTPStatus: status, Message: "transient"}})
+			expireNonQuotaDeadlines(m, a.ID, "claude-haiku")
+			snapshot, _ := m.GetByID(a.ID)
+			if snapshot.LastError == nil || snapshot.LastError.HTTPStatus != status || !snapshot.Quota.Exceeded {
+				t.Fatalf("fixture: LastError=%+v quota=%+v, want an old transient error under a credential quota", snapshot.LastError, snapshot.Quota)
+			}
+			if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := m.GetByID(a.ID)
+			if after.Quota.Exceeded {
+				t.Fatal("an expired transient error on the auth record kept the account blocked")
+			}
+		})
 	}
 }
 
@@ -486,6 +490,10 @@ func TestClaudeQuotaCandidateIgnoresNormalizedSiblingError(t *testing.T) {
 	}}
 	if !claudeQuotaCandidate(a) {
 		t.Fatal("a normalized expired 503 on a sibling stopped the probe")
+	}
+	a.ModelStates["haiku"].LastError = &Error{HTTPStatus: 408, Message: "request timeout"}
+	if !claudeQuotaCandidate(a) {
+		t.Fatal("a normalized expired 408 on a sibling stopped the probe")
 	}
 	a.ModelStates["haiku"].Unavailable = true
 	if claudeQuotaCandidate(a) {
