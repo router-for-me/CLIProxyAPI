@@ -356,9 +356,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		return nil, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
 	}
-	// Fast requests are skipped: their errors are request-scoped and never fail over.
+	// A Fast request's errors stop at the caller unless the headers show a credential-wide
+	// limit, as for a Fast 429 on the wire, so only then is its stream held.
 	var upstreamBody io.Reader = decodedBody
-	if e.cfg != nil && e.cfg.Claude.StreamBootstrapBuffering && !fastRequest {
+	if e.cfg != nil && e.cfg.Claude.StreamBootstrapBuffering && (!fastRequest || helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(httpResp.Header)) {
 		bootstrap := helps.ReadClaudeStreamBootstrap(decodedBody)
 		if bootstrap.RateLimit != nil {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, bootstrap.Held)
@@ -368,6 +369,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			// Nothing reached the client yet, so this is the credential's 429, classified
 			// like one on the wire so the request fails over.
+			if fastRequest {
+				header := httpResp.Header.Clone()
+				header.Set("Content-Type", "application/json")
+				return nil, newClaudeFastDirectResponseError(&http.Response{StatusCode: http.StatusTooManyRequests, Header: header}, bootstrap.RateLimit)
+			}
 			return nil, classifyClaudeUpstreamErrorWithCooling(http.StatusTooManyRequests, httpResp.Header, bootstrap.RateLimit, e.modelLevelCooling())
 		}
 		upstreamBody = bootstrap.Stream

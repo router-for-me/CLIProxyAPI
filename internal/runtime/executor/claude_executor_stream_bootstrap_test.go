@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -111,5 +113,52 @@ func TestClaudeStreamBootstrapBufferingKeepsStreamsIdentical(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestClaudeStreamBootstrapBufferingFastHoldsOnlyCredentialWideLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		header               http.Header
+		wantHeld             bool
+		wantCredentialScoped bool
+	}{
+		{"unified rejection", http.Header{"Anthropic-Ratelimit-Unified-Status": []string{"rejected"}, "Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"}}, true, true},
+		{"ordinary fast limit", http.Header{}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				header := tc.header.Clone()
+				header.Set("Content-Type", "text/event-stream")
+				return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(claudeBootstrapTestStart + claudeBootstrapTestRateLimit)), Request: req}, nil
+			})
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+			auth := &cliproxyauth.Auth{ID: "fast-bootstrap", Attributes: map[string]string{"api_key": "sk-ant-oat-fast-bootstrap"}, Metadata: claudeOAuthTestMetadata()}
+			exec := NewClaudeExecutor(&config.Config{Claude: config.ClaudeConfig{StreamBootstrapBuffering: true}})
+			result, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-5",
+				Payload: []byte(`{"model":"claude-opus-5","max_tokens":16,"speed":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+			}, cliproxyexecutor.Options{Stream: true, SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude})
+			if !tc.wantHeld {
+				if err != nil {
+					t.Fatalf("ExecuteStream() error = %v, want the stream released", err)
+				}
+				_, err = drainClaudeBootstrapTestStream(result)
+			} else if result != nil {
+				t.Fatal("ExecuteStream returned a stream, want the credential-wide limit before any byte")
+			}
+			var scoped interface{ IsCredentialScoped() bool }
+			if err == nil || !errors.As(err, &scoped) || scoped.IsCredentialScoped() != tc.wantCredentialScoped {
+				t.Fatalf("error = %T %v, want credential-scoped %t", err, err, tc.wantCredentialScoped)
+			}
+			var terminated *cliproxyexecutor.RequestTerminatedError
+			if tc.wantHeld && (!errors.As(err, &terminated) || terminated.HTTPStatus != http.StatusTooManyRequests || terminated.Header.Get("Content-Type") != "application/json") {
+				t.Fatalf("held error = %#v, want a JSON 429 like a Fast 429 on the wire", terminated)
+			}
+			var requestScoped cliproxyexecutor.RequestScopedError
+			if isRequestScoped := errors.As(err, &requestScoped) && requestScoped.IsRequestScoped(); isRequestScoped == tc.wantCredentialScoped {
+				t.Fatalf("error %T request-scoped = %t, want %t", err, isRequestScoped, !tc.wantCredentialScoped)
+			}
+		})
 	}
 }
