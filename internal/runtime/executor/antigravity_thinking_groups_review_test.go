@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -668,5 +669,163 @@ func TestAntigravityThinkingGroupsReviewRefusalPrecedesTokenRefresh(t *testing.T
 	var part *translatorcommon.UnsupportedPartError
 	if !errors.As(errExecute, &part) {
 		t.Fatalf("expected translation refusal without refresh, got %v", errExecute)
+	}
+}
+
+func TestAntigravityThinkingGroupsReviewClaudeCreditsFallbackCachedFinal5m(t *testing.T) {
+	const group = "claude-credits-final5m"
+	const high, low = group + "-high", group + "-low"
+	const quotaError = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exhausted","details":[{"reason":"QUOTA_EXHAUSTED"}]}}`
+	const rateLimitError = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}`
+	const capacityError = `{"error":{"code":503,"status":"UNAVAILABLE","details":[{"reason":"MODEL_CAPACITY_EXHAUSTED"}]}}`
+	const success = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"recovered"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+
+	for _, tc := range []struct {
+		name       string
+		stream     bool
+		state      func(deadline time.Time) *cliproxyauth.ModelState
+		wantCredit bool
+	}{
+		{
+			name:       "switched-quota-final-3m-execute",
+			wantCredit: true,
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					Quota:          cliproxyauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &cliproxyauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    quotaError,
+						Metadata:   map[string]string{"antigravity_credits_retry_hint_ns": strconv.FormatInt(int64(5*time.Hour), 10)},
+					},
+				}
+			},
+		},
+		{
+			name:       "switched-quota-final-3m-stream",
+			stream:     true,
+			wantCredit: true,
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					Quota:          cliproxyauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &cliproxyauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    quotaError,
+						Metadata:   map[string]string{"antigravity_credits_retry_hint_ns": strconv.FormatInt(int64(5*time.Hour), 10)},
+					},
+				}
+			},
+		},
+		{
+			name: "switched-short-rate-limit-cached",
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					Quota:          cliproxyauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &cliproxyauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    rateLimitError,
+						Metadata:   map[string]string{"antigravity_credits_retry_hint_ns": strconv.FormatInt(int64(45*time.Second), 10)},
+					},
+				}
+			},
+		},
+		{
+			name: "switched-non-quota-cooldown-cached",
+			state: func(deadline time.Time) *cliproxyauth.ModelState {
+				return &cliproxyauth.ModelState{
+					Status:         cliproxyauth.StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: deadline,
+					LastError:      &cliproxyauth.Error{HTTPStatus: http.StatusServiceUnavailable, Message: capacityError},
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := newIssue7865TestAuth(t.Name())
+			attempts := make(chan string, 4)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1internal:loadCodeAssist" {
+					_, _ = io.WriteString(w, `{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"100","minimumCreditAmountForUsage":"50"}]}}`)
+					return
+				}
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil || r.URL.Path != antigravityStreamPath || ojson.GetBytes(body, "model").Str != low {
+					t.Errorf("unexpected Claude request: path=%s body=%s err=%v", r.URL.Path, body, errRead)
+				}
+				attempts <- ojson.GetBytes(body, "enabledCreditTypes.0").Str
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: "+success+"\n\n")
+			}))
+			t.Cleanup(server.Close)
+			auth.Attributes = map[string]string{"base_url": server.URL}
+			auth.ModelStates = map[string]*cliproxyauth.ModelState{low: tc.state(time.Now().Add(3 * time.Minute))}
+
+			cfg := &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}
+			e := NewAntigravityExecutor(cfg)
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 1)
+			manager.RegisterExecutor(e)
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: high}, {ID: low}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			registered, errRegister := manager.Register(t.Context(), auth)
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			if !manager.StoreAntigravityModelCatalog(t.Context(), registered, map[string]string{high: "HIGH", low: "LOW"}, map[string]map[string]int{group: {"low": 50000, "high": 60000}}, nil) {
+				t.Fatal("failed to publish catalog")
+			}
+			cliproxyauth.SetAntigravityCreditsHintForAuth(registered, cliproxyauth.AntigravityCreditsHint{Known: true, Available: true, UpdatedAt: time.Now()})
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHintForAuth(registered, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			req := cliproxyexecutor.Request{Model: high, Payload: []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+			var payload []byte
+			var errExecute error
+			if tc.stream {
+				var result *cliproxyexecutor.StreamResult
+				result, errExecute = manager.ExecuteStream(t.Context(), []string{"antigravity"}, req, opts)
+				if errExecute == nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							errExecute = chunk.Err
+						}
+						payload = append(payload, chunk.Payload...)
+					}
+				}
+			} else {
+				var resp cliproxyexecutor.Response
+				resp, errExecute = manager.Execute(t.Context(), []string{"antigravity"}, req, opts)
+				payload = resp.Payload
+			}
+
+			if tc.wantCredit {
+				if errExecute != nil || !strings.Contains(string(payload), "recovered") || len(attempts) != 1 {
+					t.Fatalf("expected credits recovery during final 3m cooldown, got err=%v calls=%d", errExecute, len(attempts))
+				}
+				if gotCredit := <-attempts; gotCredit != "GOOGLE_ONE_AI" {
+					t.Fatalf("enabledCreditTypes.0 = %q, want GOOGLE_ONE_AI", gotCredit)
+				}
+				return
+			}
+
+			var status interface{ StatusCode() int }
+			if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusTooManyRequests || len(attempts) != 0 {
+				t.Fatalf("expected cooldown rejection without credits attempt, got err=%v calls=%d", errExecute, len(attempts))
+			}
+		})
 	}
 }

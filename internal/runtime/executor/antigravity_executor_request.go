@@ -57,6 +57,11 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, credential, model.ID, time.Now(), useCredits); errCooldown != nil {
 				return rejectCooldown(model.ID, errCooldown)
 			}
+		} else if useCredits {
+			if errCooldown := cliproxyauth.CheckAntigravityDirectCreditsModel(ctx, credential, model.ID, time.Now()); errCooldown != nil {
+				prepared.cooldownRejected = true
+				return cliproxyauth.RejectAntigravityTarget(errCooldown)
+			}
 		}
 		if errCooldown := e.checkAntigravityRequestCooldown(ctx, credential, model.ID, countTokens); errCooldown != nil {
 			return rejectCooldown(model.ID, errCooldown)
@@ -98,6 +103,11 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, updatedAuth, prepared.model.ID, time.Now(), useCredits); errCooldown != nil {
 				err := rejectCooldown(prepared.model.ID, errCooldown)
 				return prepared, err
+			}
+		} else if useCredits {
+			if errCooldown := cliproxyauth.CheckAntigravityDirectCreditsModel(ctx, updatedAuth, prepared.model.ID, time.Now()); errCooldown != nil {
+				prepared.cooldownRejected = true
+				return prepared, cliproxyauth.RejectAntigravityTarget(errCooldown)
 			}
 		}
 		prepared.auth = updatedAuth
@@ -181,15 +191,13 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	// A matched variant limits output using the same catalog as its ID and enum.
 	if selection.MaxOutputTokens > 0 {
 		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
-	} else if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
+	} else if maxOut, ok := antigravityRequestedMaxOutputTokensDoc(doc); ok {
 		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
 		if modelInfo == nil && lowerModel != modelName {
 			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
 		}
-		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
-			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				helps.CapAntigravityMaxOutputTokensDoc(doc, modelInfo.MaxCompletionTokens, isClaudeModel)
-			}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 && maxOut > modelInfo.MaxCompletionTokens {
+			helps.CapAntigravityMaxOutputTokensDoc(doc, modelInfo.MaxCompletionTokens, isClaudeModel)
 		}
 	}
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
@@ -197,10 +205,11 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	}
 	if isClaudeModel {
 		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
+			canonicalizeAntigravityToolConfigForValidatedDoc(doc)
 			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
 	} else if selection.MaxOutputTokens == 0 {
-		_ = doc.Delete("request.generationConfig.maxOutputTokens")
+		stripAntigravityMaxOutputTokensDoc(doc)
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
@@ -281,6 +290,77 @@ func antigravityToolChoiceModeIsNoneDoc(doc *ojson.Doc) bool {
 		}
 	}
 	return false
+}
+
+// canonicalizeAntigravityToolConfigForValidatedDoc merges snake_case tool_config
+// and function_calling_config containers into their camelCase canonical paths before
+// setting VALIDATED mode, preserving non-conflicting fields while preventing
+// duplicate proto-JSON keys on upstream requests.
+func canonicalizeAntigravityToolConfigForValidatedDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	canonicalizeAntigravityFunctionCallingConfigDoc(doc)
+	if snakeToolConfig := doc.Get("request.tool_config"); snakeToolConfig.Exists() {
+		if snakeToolConfig.IsObject() {
+			if !doc.Get("request.toolConfig").IsObject() {
+				_ = doc.SetRaw("request.toolConfig", snakeToolConfig.Raw)
+				canonicalizeAntigravityFunctionCallingConfigDoc(doc)
+			} else {
+				helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig", snakeToolConfig, "functioncallingconfig")
+				if fcc := snakeToolConfig.Get("functionCallingConfig"); fcc.IsObject() {
+					helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", fcc)
+				}
+				if fccSnake := snakeToolConfig.Get("function_calling_config"); fccSnake.IsObject() {
+					helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", fccSnake)
+				}
+			}
+		}
+		_ = doc.Delete("request.tool_config")
+	}
+}
+
+func canonicalizeAntigravityFunctionCallingConfigDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	snakeFCC := doc.Get("request.toolConfig.function_calling_config")
+	if !snakeFCC.Exists() {
+		return
+	}
+	if snakeFCC.IsObject() {
+		helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", snakeFCC)
+	}
+	_ = doc.Delete("request.toolConfig.function_calling_config")
+}
+
+// stripAntigravityMaxOutputTokensDoc removes maxOutputTokens and its snake_case
+// aliases under both generationConfig and generation_config containers, pruning
+// an emptied generation_config container and merging mixed containers when both
+// generationConfig and generation_config remain present.
+func stripAntigravityMaxOutputTokensDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	_ = doc.Delete("request.generationConfig.maxOutputTokens")
+	_ = doc.Delete("request.generationConfig.max_output_tokens")
+	deletedSnakeGenConfig := false
+	for _, path := range []string{
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
+	} {
+		if doc.Get(path).Exists() && doc.Delete(path) == nil {
+			deletedSnakeGenConfig = true
+		}
+	}
+	if deletedSnakeGenConfig {
+		if gc := doc.Get("request.generation_config"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
+			_ = doc.Delete("request.generation_config")
+		}
+	}
+	if doc.Get("request.generation_config").Exists() && doc.Get("request.generationConfig").Exists() {
+		helps.CanonicalizeAntigravityGenerationConfigDoc(doc)
+	}
 }
 
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
@@ -881,8 +961,9 @@ func antigravityAuthID(auth *cliproxyauth.Auth) string {
 }
 
 const (
-	antigravitySignatureGrantScopeMetadataKey   = "cpa_signature_cache_grant"
-	antigravitySignatureGrantBindingMetadataKey = "cpa_signature_cache_grant_binding"
+	antigravitySignatureGrantScopeMetadataKey       = "cpa_signature_cache_grant"
+	antigravitySignatureGrantBindingMetadataKey     = "cpa_signature_cache_grant_binding"
+	antigravitySignatureGrantHomeBindingMetadataKey = "cpa_signature_cache_grant_home_binding"
 )
 
 func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
@@ -897,21 +978,59 @@ func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
 	return antigravityCredentialScope("grant:", refresh+"\x00"+access)
 }
 
+func antigravitySignatureGrantHomeBinding(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Attributes == nil || strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")) != "" {
+		return ""
+	}
+	homeScope := strings.TrimSpace(auth.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute])
+	if homeScope == "" {
+		return ""
+	}
+	return antigravityCredentialScope("home-bind:", homeScope)
+}
+
+func antigravityHasValidSignatureGrant(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+	if retained == "" {
+		return false
+	}
+	tokenBinding := antigravitySignatureGrantBinding(auth)
+	if tokenBinding == "" {
+		return false
+	}
+	binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
+	if binding != "" && binding == tokenBinding {
+		return true
+	}
+	homeBinding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantHomeBindingMetadataKey))
+	if homeBinding != "" {
+		if expected := antigravitySignatureGrantHomeBinding(auth); expected != "" && homeBinding == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func antigravitySignatureGrantIdentity(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Metadata != nil {
-		retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
-		binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
-		if retained != "" && binding != "" && binding == antigravitySignatureGrantBinding(auth) {
-			return retained
-		}
-		if binding := antigravitySignatureGrantBinding(auth); binding != "" {
-			return binding
+	binding := antigravitySignatureGrantBinding(auth)
+	if binding == "" {
+		return ""
+	}
+	if antigravityHasValidSignatureGrant(auth) {
+		return strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+	}
+	if auth.Attributes != nil && strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")) == "" {
+		if homeScope := strings.TrimSpace(auth.Attributes[cliproxyauth.AntigravityModelEnumHomeScopeAttribute]); homeScope != "" {
+			return antigravityCredentialScope("home-grant:", homeScope)
 		}
 	}
-	return ""
+	return binding
 }
 
 func antigravitySignatureCacheScope(auth *cliproxyauth.Auth) string {
@@ -1104,4 +1223,28 @@ func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID st
 		return stableID
 	}
 	return generateSessionID()
+}
+
+func antigravityRequestedMaxOutputTokensDoc(doc *ojson.Doc) (int, bool) {
+	if doc == nil {
+		return 0, false
+	}
+	maxOut := 0
+	found := false
+	for _, path := range []string{
+		"request.generationConfig.maxOutputTokens",
+		"request.generationConfig.max_output_tokens",
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
+	} {
+		val := doc.Get(path)
+		if val.Exists() && val.Type == ojson.Number {
+			n := int(val.Int())
+			if !found || n > maxOut {
+				maxOut = n
+				found = true
+			}
+		}
+	}
+	return maxOut, found
 }

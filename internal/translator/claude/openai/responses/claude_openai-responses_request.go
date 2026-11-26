@@ -207,10 +207,18 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 	}
 
 	names := buildClaudeToolNames(root, toolSearch)
+	allDescriptors := responsesToolDescriptors(root, toolSearch)
 	winners := responsesToolWinners(root, toolSearch)
 	// Native tool search declares discovered tools as deferred and replays
 	// search results as tool_reference blocks, which keeps the cached prefix.
-	nativeToolSearch := responsesClientToolSearchWins(responsesToolDescriptors(root, toolSearch))
+	nativeToolSearch := responsesClientToolSearchWins(allDescriptors)
+	// Resolve allowed_tools before input processing so historical
+	// tool_search_output tool_reference blocks and final tools[] use the exact
+	// same allowed tool set.
+	allowedToolsActive, allowedToolsMode, allowedToolsModeValid, allowedWinners := resolveResponsesAllowedToolsFilter(root, winners, toolSearch)
+	if allowedToolsActive {
+		winners = allowedWinners
+	}
 
 	// input array processing
 	var pendingRole string
@@ -741,7 +749,7 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 	// The deferred anchor goes between declared and discovered tools, so each
 	// discovery only appends to tools[].
 	anchorIndex := -1
-	for _, descriptor := range responsesToolDescriptors(root, toolSearch) {
+	for _, descriptor := range allDescriptors {
 		winner, ok := winners[descriptor.name]
 		if !ok || winner.order != descriptor.order {
 			continue
@@ -768,7 +776,7 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 		}
 		toolItems = append(toolItems, tJSON)
 	}
-	if nativeToolSearch {
+	if nativeToolSearch && (!allowedToolsActive || anchorIndex >= 0) {
 		if anchorIndex < 0 {
 			anchorIndex = len(toolItems)
 		}
@@ -784,15 +792,19 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
 	toolChoiceNone := false
 	forcedToolFilteredOut := false
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && toolChoice.Type != ojson.Null {
 		switch toolChoice.Type {
 		case ojson.String:
 			switch toolChoice.String() {
 			case "auto":
-				_ = outDoc.SetRaw("tool_choice", `{"type":"auto"}`)
+				if len(toolItems) > 0 {
+					_ = outDoc.SetRaw("tool_choice", `{"type":"auto"}`)
+				}
 			case "none":
-				// Leave unset; implies no tools
 				toolChoiceNone = true
+				if len(toolItems) > 0 {
+					_ = outDoc.SetRaw("tool_choice", `{"type":"none"}`)
+				}
 			case "required":
 				if len(includedToolNames) > 0 {
 					_ = outDoc.SetRaw("tool_choice", `{"type":"any"}`)
@@ -802,9 +814,32 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 			}
 		case ojson.JSON:
 			choiceType := strings.TrimSpace(toolChoice.Get("type").String())
-			if choiceType == "none" {
+			switch choiceType {
+			case "none":
 				toolChoiceNone = true
-			} else if choiceType == "function" || choiceType == "custom" {
+				if len(toolItems) > 0 {
+					_ = outDoc.SetRaw("tool_choice", `{"type":"none"}`)
+				}
+			case "auto":
+				if len(toolItems) > 0 {
+					_ = outDoc.SetRaw("tool_choice", `{"type":"auto"}`)
+				}
+			case "allowed_tools":
+				if !allowedToolsModeValid || len(toolItems) == 0 {
+					// Fail closed when allowed_tools has an unknown mode or no matching tools.
+					toolChoiceNone = true
+				} else {
+					switch allowedToolsMode {
+					case "none":
+						toolChoiceNone = true
+						_ = outDoc.SetRaw("tool_choice", `{"type":"none"}`)
+					case "required", "any":
+						_ = outDoc.SetRaw("tool_choice", `{"type":"any"}`)
+					default:
+						_ = outDoc.SetRaw("tool_choice", `{"type":"auto"}`)
+					}
+				}
+			case "function", "custom":
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
 					fn = toolChoice.Get("custom.name").String()
@@ -832,9 +867,11 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 				} else {
 					forcedToolFilteredOut = true
 				}
-			} else if choiceType != "" && choiceType != "auto" {
-				if _, ok := includedToolNames[choiceType]; !ok {
-					forcedToolFilteredOut = true
+			default:
+				if choiceType != "" {
+					if _, ok := includedToolNames[choiceType]; !ok {
+						forcedToolFilteredOut = true
+					}
 				}
 			}
 		default:
@@ -2108,6 +2145,118 @@ func responsesToolDescriptorPrecedes(left, right responsesToolDescriptor) bool {
 		return left.direct
 	}
 	return left.order < right.order
+}
+
+func resolveResponsesAllowedToolsFilter(root ojson.Result, winners map[string]responsesToolDescriptor, toolSearch bool) (active bool, mode string, modeValid bool, allowedWinners map[string]responsesToolDescriptor) {
+	toolChoice := root.Get("tool_choice")
+	if !toolChoice.Exists() || toolChoice.Type != ojson.JSON {
+		return false, "", false, nil
+	}
+	if strings.TrimSpace(toolChoice.Get("type").String()) != "allowed_tools" {
+		return false, "", false, nil
+	}
+	mode, toolsArr := extractResponsesAllowedToolsChoice(toolChoice)
+	switch mode {
+	case "", "auto", "required", "any", "none":
+		modeValid = true
+	default:
+		return true, mode, false, map[string]responsesToolDescriptor{}
+	}
+	acceptedNames := make(map[string]struct{}, len(winners))
+	for name := range winners {
+		acceptedNames[name] = struct{}{}
+	}
+	toolNameMap := responsesToolNameMap(root, acceptedNames, toolSearch)
+	entries := toolsArr.Array()
+	allowedWinners = make(map[string]responsesToolDescriptor, len(winners))
+	for name, descriptor := range winners {
+		if matchesResponsesAllowedTools(descriptor, entries, toolNameMap) {
+			allowedWinners[name] = descriptor
+		}
+	}
+	return true, mode, true, allowedWinners
+}
+
+func extractResponsesAllowedToolsChoice(toolChoice ojson.Result) (string, ojson.Result) {
+	mode := strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
+	}
+	toolsArr := toolChoice.Get("tools")
+	if !toolsArr.IsArray() {
+		toolsArr = toolChoice.Get("allowed_tools.tools")
+	}
+	return mode, toolsArr
+}
+
+func matchesResponsesAllowedTools(descriptor responsesToolDescriptor, entries []ojson.Result, toolNameMap map[string]string) bool {
+	for _, entry := range entries {
+		if matchesResponsesAllowedToolEntry(descriptor, entry, toolNameMap) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesResponsesAllowedToolEntry(descriptor responsesToolDescriptor, entry ojson.Result, toolNameMap map[string]string) bool {
+	entryType := strings.ToLower(strings.TrimSpace(entry.Get("type").String()))
+	switch entryType {
+	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		return descriptor.toolType == "web_search"
+	case responsesToolSearchType:
+		return descriptor.clientSearch || descriptor.toolType == responsesToolSearchType
+	case "namespace":
+		ns := strings.TrimSpace(entry.Get("name").String())
+		if ns == "" {
+			ns = strings.TrimSpace(entry.Get("namespace").String())
+		}
+		return ns != "" && descriptor.namespace == ns
+	case "function", "custom", "tool", "":
+		switch entryType {
+		case "function":
+			if descriptor.toolType != "function" {
+				return false
+			}
+		case "custom":
+			if descriptor.toolType != "custom" {
+				return false
+			}
+		default:
+			if descriptor.toolType != "function" && descriptor.toolType != "custom" {
+				return false
+			}
+		}
+		fn := strings.TrimSpace(entry.Get("function.name").String())
+		if fn == "" {
+			fn = strings.TrimSpace(entry.Get("custom.name").String())
+		}
+		if fn == "" {
+			fn = strings.TrimSpace(entry.Get("name").String())
+		}
+		if fn == "" {
+			return false
+		}
+		ns := strings.TrimSpace(entry.Get("namespace").String())
+		if ns == "" {
+			ns = strings.TrimSpace(entry.Get("function.namespace").String())
+		}
+		if ns == "" {
+			ns = strings.TrimSpace(entry.Get("custom.namespace").String())
+		}
+		if ns != "" {
+			return descriptor.namespace == ns && (descriptor.childName == fn || descriptor.name == qualifyResponsesNamespaceToolName(ns, fn))
+		}
+		if mapped := toolNameMap[fn]; mapped != "" {
+			fn = mapped
+		}
+		return descriptor.name == fn
+	default:
+		if entryType == "" || descriptor.toolType != entryType {
+			return false
+		}
+		entryName := strings.TrimSpace(entry.Get("name").String())
+		return entryName == "" || descriptor.name == entryName
+	}
 }
 
 func responsesToolWinners(root ojson.Result, toolSearch bool) map[string]responsesToolDescriptor {
