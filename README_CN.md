@@ -92,19 +92,15 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>kedaya.ai 是一家稳定高效的 AI 模型 API 中转服务商，覆盖 Claude、GPT、Gemini、Grok、Antigravity、DeepSeek 等主流模型，兼容 OpenAI（含 Responses）、Anthropic、Gemini 原生协议，可无缝接入 CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI 等客户端。OpenAI及Grok模型价格最低可达官方0.01折！专属入口：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
 </tr>
 <tr>
-<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>
-    🥚 <b>【免费领鸡蛋！】注册提工单报暗号，白嫖 $5 额度 + 首充 85 折！</b><br>
-    🚀 <b>不只是 API 中转，更是全能 Web 工作台：</b>无需自建前端，网页直接用对话、AI绘图、视频生成、自动化工作流。<br>
-    ⚡ <b>全主流覆盖：</b>Claude、GPT、Gemini、DeepSeek 等顶尖模型极速聚合。<br>
-    🛡️ <b>服务保障：</b>随时退款 ｜ 免费开票 ｜ 对公对私 ｜ 客服长时在线，主打一个听劝！<br><br>
-    👉 Xcode贵宾入口：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best/register?aff=OuDv</a><br>
-    💬 工单暗号：<code>CLIProxyAPI</code>（提交工单即可直接到账）
+  <td width="180"><a href="https://apipdx.com"><img src="./assets/paidaxing.gif" alt="派大星" width="150"></a></td>
+  <td>
+    🎁 <b>【注册即送 5 额度！】优惠码 <code>CLIPROXYAPI</code>，填了就到账，不用提工单！</b><br>
+    🚀 <b>一站式 AI 中转站：</b>Claude、GPT、Gemini、DeepSeek、KIMI、GLM 等主流模型全聚合，一个 Key 走遍全家桶。<br>
+    💰 <b>便宜：</b>GPT 低至 <b>0.06 折</b>，DeepSeek、KIMI、GLM 低至 <b>4 折</b>，量大更省，日常高频调用也不心疼。<br>
+    🛡️ <b>稳定：</b>高可用线路长时在线，兼容 Claude Code、Codex 等常用客户端，关键时候不掉链子。<br><br>
+    👉 派大星贵宾入口：<a href="https://apipdx.com">https://apipdx.com</a><br>
+    💬 优惠码：<code>CLIPROXYAPI</code>（注册时填写，直接送 5 额度）
   </td>
-</tr>
-<tr>
-<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="陈局" width="150"></a></td>
-<td>感谢 <a href="https://x.com/chenju_ai">陈局</a> 赞助了本项目！这大概是本栏唯一一个不打站点广告的。好的开源项目值得被付费，陈局来随个份子，敬作者一杯。X 上找 <a href="https://x.com/chenju_ai">陈局</a> 吹吹水。</td>
 </tr>
 <tr>
 <td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>

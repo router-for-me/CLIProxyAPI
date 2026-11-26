@@ -818,3 +818,31 @@ func countShadowPluginFiles(t *testing.T, dir string) int {
 	}
 	return count
 }
+
+func TestAcquireShadowPluginLoadDoesNotReuseResidentImage(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "fixture.dll")
+	content := []byte("resident test plugin")
+	if errWrite := os.WriteFile(source, content, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	file := pluginFile{ID: "shadow-reload", Path: source}
+	first, releaseFirst, errFirst := acquireShadowPluginLoad(file)
+	if errFirst != nil {
+		t.Fatal(errFirst)
+	}
+	releaseFirst()
+	second, releaseSecond, errSecond := acquireShadowPluginLoad(file)
+	if errSecond != nil {
+		t.Fatal(errSecond)
+	}
+	defer releaseSecond()
+	if first == second {
+		t.Fatalf("native reload reused resident path %s", first)
+	}
+	for _, path := range []string{first, second} {
+		raw, errRead := os.ReadFile(path)
+		if errRead != nil || string(raw) != string(content) {
+			t.Fatalf("shadow content at %s = %q, error %v", path, raw, errRead)
+		}
+	}
+}

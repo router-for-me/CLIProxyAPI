@@ -60,7 +60,15 @@ func pluginSchedulerNeedsAllPriorities(scheduler PluginScheduler) bool {
 		return true
 	}
 	if pool, ok := scheduler.(pluginSchedulerPriorityPool); ok && pool != nil {
-		return pool.SchedulerWantsAllPriorityCandidates()
+		if pool.SchedulerWantsAllPriorityCandidates() {
+			return true
+		}
+		// Hosts that narrow per-scheduler priority tiers internally can receive the full
+		// available pool while an active scheduler is installed, so hot-reloading a single
+		// non-across scheduler into an across-priorities replacement still sees lower tiers.
+		if state, okState := scheduler.(pluginSchedulerState); okState && state != nil && state.HasScheduler() {
+			return true
+		}
 	}
 	return false
 }
