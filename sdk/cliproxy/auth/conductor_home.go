@@ -1886,17 +1886,23 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	}
 	switch status {
 	case http.StatusTooManyRequests:
-		return isAntigravityCreditsQuota429(lastErr, retryAfterFromError(lastErr))
+		retryAfter := retryAfterFromError(lastErr)
+		var cooldownErr *modelCooldownError
+		if errors.As(lastErr, &cooldownErr) && cooldownErr != nil {
+			// A modelCooldownError wrapped in trustedRetryAfterError exposes the live
+			// remaining cooldown rather than the original upstream retry hint; defer to
+			// any hint carried by the underlying cause so credits admission uses the
+			// stored upstream hint instead of mistaking final countdown minutes for a
+			// short transient rate limit.
+			retryAfter = retryAfterFromError(cooldownErr.Unwrap())
+		}
+		return isAntigravityCreditsQuota429(lastErr, retryAfter)
 	case http.StatusServiceUnavailable:
 		return isAntigravityCreditsCapacity503(lastErr)
 	case 0:
 		var authErr *Error
 		if errors.As(lastErr, &authErr) && authErr != nil {
 			return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
-		}
-		var cooldownErr *modelCooldownError
-		if errors.As(lastErr, &cooldownErr) {
-			return true
 		}
 		return false
 	default:
