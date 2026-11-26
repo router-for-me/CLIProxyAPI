@@ -83,6 +83,7 @@ func (a *Applier) applyCompatibleDoc(doc *ojson.Doc, config thinking.ThinkingCon
 
 func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	includeThoughts, hasIncludeThoughts := extractGeminiIncludeThoughtsDoc(doc)
+	stripGeminiNonCanonicalThinkingDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinkingBudget")
 	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_budget")
 	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_level")
@@ -116,6 +117,7 @@ func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingCo
 
 func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	includeThoughts, hasIncludeThoughts := extractGeminiIncludeThoughtsDoc(doc)
+	stripGeminiNonCanonicalThinkingDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinkingLevel")
 	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_level")
 	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_budget")
@@ -129,10 +131,34 @@ func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingC
 	return nil
 }
 
+func stripGeminiNonCanonicalThinkingDoc(doc *ojson.Doc) {
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinking_config")
+	deletedSnakeGenConfig := false
+	for _, path := range []string{
+		"generation_config.thinkingConfig",
+		"generation_config.thinking_config",
+	} {
+		if doc.Get(path).Exists() && util.DeleteJSONDocIfExists(doc, path) == nil {
+			deletedSnakeGenConfig = true
+		}
+	}
+	if deletedSnakeGenConfig {
+		if gc := doc.Get("generation_config"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
+			_ = util.DeleteJSONDocIfExists(doc, "generation_config")
+		}
+	}
+}
+
 func extractGeminiIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 	for _, path := range []string{
 		"generationConfig.thinkingConfig.includeThoughts",
 		"generationConfig.thinkingConfig.include_thoughts",
+		"generationConfig.thinking_config.includeThoughts",
+		"generationConfig.thinking_config.include_thoughts",
+		"generation_config.thinkingConfig.includeThoughts",
+		"generation_config.thinkingConfig.include_thoughts",
+		"generation_config.thinking_config.includeThoughts",
+		"generation_config.thinking_config.include_thoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:

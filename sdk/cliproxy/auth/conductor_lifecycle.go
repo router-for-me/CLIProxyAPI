@@ -101,7 +101,7 @@ func (m *Manager) RegisterExecutorWithRevision(executor ProviderExecutor) uint64
 	if executor == nil {
 		return 0
 	}
-	provider := strings.TrimSpace(executor.Identifier())
+	provider := strings.ToLower(strings.TrimSpace(executor.Identifier()))
 	if provider == "" {
 		return 0
 	}
@@ -898,6 +898,12 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
 		delete(sessionAuths, id)
 		if len(sessionAuths) == 0 {
 			delete(m.homeRuntimeAuths, sessionID)
+		}
+	}
+	for sessionID, owners := range m.homeRuntimeAuthOwners {
+		delete(owners, id)
+		if len(owners) == 0 {
+			delete(m.homeRuntimeAuthOwners, sessionID)
 		}
 	}
 	if m.authEpochs == nil {

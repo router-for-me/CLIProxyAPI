@@ -309,7 +309,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				hasReasoningContent := false
 				for i := 0; i < len(partResults); i++ {
 					partResult := partResults[i]
-					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription") {
+					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription", "audio_transcription") {
 						delete(p.LastToolCallIndex, candidateIndex)
 						if p.ActiveToolCall[candidateIndex] != nil {
 							p.HasIncompleteToolCall[candidateIndex] = true
@@ -332,6 +332,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					// Speech-to-text models (gemini-3.5-transcribe) deliver the
 					// transcript in an audioTranscription part instead of text.
 					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if !audioTranscriptionResult.Exists() {
+						audioTranscriptionResult = partResult.Get("audio_transcription")
+					}
 					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
 						partTextResult = audioTranscriptionResult.Get("text")
 					}
@@ -693,7 +696,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 				for i := 0; i < len(partsResults); i++ {
 					partResult := partsResults[i]
-					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription") {
+					if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall", "inlineData", "inline_data", "audioTranscription", "audio_transcription") {
 						lastToolCall = nil
 						continue
 					}
@@ -711,6 +714,9 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					// Speech-to-text models (gemini-3.5-transcribe) deliver the
 					// transcript in an audioTranscription part instead of text.
 					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if !audioTranscriptionResult.Exists() {
+						audioTranscriptionResult = partResult.Get("audio_transcription")
+					}
 					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
 						partTextResult = audioTranscriptionResult.Get("text")
 					}

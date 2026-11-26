@@ -492,21 +492,22 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 
 func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []byte {
 	var (
-		responseNodeRaw         string
-		responsePartsRaw        string
-		responsePartsIndex      int
-		traceID                 string
-		finishReason            string
-		modelVersion            string
-		responseID              string
-		role                    string
-		usageRaw                string
-		groundingMetadataRaw    string
-		parts                   []string
-		pendingKind             string
-		pendingText             strings.Builder
-		pendingThoughtSig       string
-		pendingFromCurrentChunk bool
+		responseNodeRaw           string
+		responsePartsRaw          string
+		responsePartsIndex        int
+		traceID                   string
+		finishReason              string
+		modelVersion              string
+		responseID                string
+		role                      string
+		usageRaw                  string
+		groundingMetadataRaw      string
+		groundingMetadataNonEmpty bool
+		parts                     []string
+		pendingKind               string
+		pendingText               strings.Builder
+		pendingThoughtSig         string
+		pendingFromCurrentChunk   bool
 	)
 
 	flushPending := func() {
@@ -623,7 +624,17 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 								}
 							case "groundingMetadata":
 								if cv.IsObject() && cv.Raw != "" {
-									groundingMetadataRaw = cv.Raw
+									hasFields := false
+									cv.ForEach(func(_, _ ojson.Result) bool {
+										hasFields = true
+										return false
+									})
+									if hasFields {
+										groundingMetadataRaw = cv.Raw
+										groundingMetadataNonEmpty = true
+									} else if !groundingMetadataNonEmpty {
+										groundingMetadataRaw = cv.Raw
+									}
 								}
 							case "content":
 								if cv.IsObject() {
@@ -762,7 +773,7 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 	if finishReason != "" {
 		_ = templateDoc.Set("candidates.0.finishReason", finishReason)
 	}
-	if groundingMetadataRaw != "" && !templateDoc.Get("candidates.0.groundingMetadata").Exists() {
+	if groundingMetadataRaw != "" && (groundingMetadataNonEmpty || !templateDoc.Get("candidates.0.groundingMetadata").Exists()) {
 		_ = templateDoc.SetRawBytes("candidates.0.groundingMetadata", []byte(groundingMetadataRaw))
 	}
 	if modelVersion != "" {

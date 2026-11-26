@@ -87,7 +87,7 @@ func (a *Applier) applyCompatibleDoc(doc *ojson.Doc, config thinking.ThinkingCon
 
 func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
-	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	stripAntigravityNonCanonicalThinkingDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingBudget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
@@ -126,7 +126,7 @@ func formatAntigravityThinkingLevel(level thinking.ThinkingLevel) string {
 
 func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) error {
 	includeThoughts, hasIncludeThoughts := extractAntigravityIncludeThoughtsDoc(doc)
-	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	stripAntigravityNonCanonicalThinkingDoc(doc)
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinkingLevel")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_level")
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.thinking_budget")
@@ -148,12 +148,34 @@ func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingC
 	return nil
 }
 
+func stripAntigravityNonCanonicalThinkingDoc(doc *ojson.Doc) {
+	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+	deletedSnakeGenConfig := false
+	for _, path := range []string{
+		"request.generation_config.thinkingConfig",
+		"request.generation_config.thinking_config",
+	} {
+		if doc.Get(path).Exists() && util.DeleteJSONDocIfExists(doc, path) == nil {
+			deletedSnakeGenConfig = true
+		}
+	}
+	if deletedSnakeGenConfig {
+		if gc := doc.Get("request.generation_config"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
+			_ = util.DeleteJSONDocIfExists(doc, "request.generation_config")
+		}
+	}
+}
+
 func extractAntigravityIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
 	for _, path := range []string{
 		"request.generationConfig.thinkingConfig.includeThoughts",
 		"request.generationConfig.thinkingConfig.include_thoughts",
 		"request.generationConfig.thinking_config.includeThoughts",
 		"request.generationConfig.thinking_config.include_thoughts",
+		"request.generation_config.thinkingConfig.includeThoughts",
+		"request.generation_config.thinkingConfig.include_thoughts",
+		"request.generation_config.thinking_config.includeThoughts",
+		"request.generation_config.thinking_config.include_thoughts",
 	} {
 		switch value := doc.Get(path); value.Type {
 		case ojson.True:
@@ -181,7 +203,7 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 	}
 	if minBudget > 0 && budget >= 0 && budget < minBudget {
 		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
-		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
+		stripAntigravityNonCanonicalThinkingDoc(doc)
 		return -2
 	}
 
