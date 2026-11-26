@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -19,13 +20,7 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	var excludedSet map[string]struct{}
 
 	for _, record := range records {
-		offeredCandidates := remainingCandidates
-		if !schedulerWantsAcrossPriorities(record.plugin.Capabilities) {
-			offeredCandidates = highestPrioritySchedulerCandidates(remainingCandidates)
-		}
-		subReq := cloneSchedulerPickRequest(req, offeredCandidates)
-
-		resp, called, errPick := h.callScheduler(ctx, record, subReq)
+		resp, subReq, called, errPick := h.pickFromSchedulerRecord(ctx, record, req, remainingCandidates)
 		if errPick != nil {
 			return resp, true, errPick
 		}
@@ -163,6 +158,139 @@ func (h *Host) schedulerRecord() *capabilityRecord {
 		return &copyRecord
 	}
 	return nil
+}
+
+func (h *Host) pickFromSchedulerRecord(ctx context.Context, record capabilityRecord, req pluginapi.SchedulerPickRequest, remainingCandidates []pluginapi.SchedulerAuthCandidate) (pluginapi.SchedulerPickResponse, pluginapi.SchedulerPickRequest, bool, error) {
+	currentRecord := record
+	if reloading, _, _ := h.schedulerReloadSnapshot(currentRecord.id); reloading {
+		if !h.waitForSchedulerReload(ctx, currentRecord.id) {
+			if ctx != nil && ctx.Err() != nil {
+				return pluginapi.SchedulerPickResponse{}, pluginapi.SchedulerPickRequest{}, true, ctx.Err()
+			}
+			return pluginapi.SchedulerPickResponse{}, pluginapi.SchedulerPickRequest{}, false, nil
+		}
+		refreshed, okRefreshed := h.schedulerRecordByID(currentRecord.id)
+		if !okRefreshed {
+			return pluginapi.SchedulerPickResponse{}, pluginapi.SchedulerPickRequest{}, false, nil
+		}
+		currentRecord = refreshed
+	}
+
+	_, genBefore, _ := h.schedulerReloadSnapshot(currentRecord.id)
+	subReq := buildSchedulerSubRequest(currentRecord, req, remainingCandidates)
+	resp, called, errPick := h.callScheduler(ctx, currentRecord, subReq)
+	if !h.shouldRetrySchedulerAfterReload(ctx, currentRecord, genBefore, resp, called, errPick, subReq) {
+		return resp, subReq, called, errPick
+	}
+
+	if !h.waitForSchedulerReload(ctx, currentRecord.id) {
+		if ctx != nil && ctx.Err() != nil {
+			return pluginapi.SchedulerPickResponse{}, subReq, true, ctx.Err()
+		}
+		return resp, subReq, called, errPick
+	}
+	refreshed, okRefreshed := h.schedulerRecordByID(currentRecord.id)
+	if !okRefreshed {
+		return pluginapi.SchedulerPickResponse{}, subReq, false, nil
+	}
+	retrySubReq := buildSchedulerSubRequest(refreshed, req, remainingCandidates)
+	retryResp, retryCalled, errRetry := h.callScheduler(ctx, refreshed, retrySubReq)
+	return retryResp, retrySubReq, retryCalled, errRetry
+}
+
+func buildSchedulerSubRequest(record capabilityRecord, req pluginapi.SchedulerPickRequest, remainingCandidates []pluginapi.SchedulerAuthCandidate) pluginapi.SchedulerPickRequest {
+	offeredCandidates := remainingCandidates
+	if !schedulerWantsAcrossPriorities(record.plugin.Capabilities) {
+		offeredCandidates = highestPrioritySchedulerCandidates(remainingCandidates)
+	}
+	return cloneSchedulerPickRequest(req, offeredCandidates)
+}
+
+func (h *Host) shouldRetrySchedulerAfterReload(ctx context.Context, record capabilityRecord, genBefore uint64, resp pluginapi.SchedulerPickResponse, called bool, errPick error, subReq pluginapi.SchedulerPickRequest) bool {
+	if h == nil || (ctx != nil && ctx.Err() != nil) {
+		return false
+	}
+	reloading, genAfter, _ := h.schedulerReloadSnapshot(record.id)
+	if !reloading && genAfter == genBefore && h.recordCurrent(record) {
+		return false
+	}
+	if errPick != nil || !called || !resp.Handled || resp.Reject {
+		return true
+	}
+	_, valid, _ := normalizeSchedulerResponse(resp, subReq)
+	return !valid
+}
+
+func (h *Host) schedulerReloadSnapshot(pluginID string) (bool, uint64, <-chan struct{}) {
+	if h == nil {
+		return false, 0, nil
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return false, 0, nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.schedulerReloads[pluginID]
+	if state == nil {
+		return false, 0, nil
+	}
+	return state.reloading, state.generation, state.done
+}
+
+func (h *Host) waitForSchedulerReload(ctx context.Context, pluginID string) bool {
+	reloading, _, done := h.schedulerReloadSnapshot(pluginID)
+	if !reloading || done == nil {
+		return true
+	}
+	h.mu.Lock()
+	timeout := h.schedulerReloadWaitTimeout
+	waitHook := h.schedulerReloadWaitHook
+	h.mu.Unlock()
+	if timeout <= 0 {
+		timeout = defaultSchedulerReloadWaitTimeout
+	}
+	if waitHook != nil {
+		waitHook(pluginID)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	if ctx == nil {
+		select {
+		case <-done:
+			return true
+		case <-timer.C:
+			return false
+		}
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+func (h *Host) schedulerRecordByID(pluginID string) (capabilityRecord, bool) {
+	if h == nil {
+		return capabilityRecord{}, false
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return capabilityRecord{}, false
+	}
+	for _, record := range h.activeRecords() {
+		if record.id != pluginID {
+			continue
+		}
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.Scheduler == nil {
+			return capabilityRecord{}, false
+		}
+		return record, true
+	}
+	return capabilityRecord{}, false
 }
 
 func (h *Host) schedulerRecords() []capabilityRecord {
