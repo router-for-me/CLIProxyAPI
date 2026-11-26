@@ -147,12 +147,22 @@ func (h *Host) callSchedulerContinuity(ctx context.Context, record capabilityRec
 	return resp, true, nil
 }
 
+// SchedulerWantsQuotaSignals reports whether any active scheduler opted into quota snapshots.
+// The manager then attaches them to the candidates, and buildSchedulerSubRequest strips them
+// again for every scheduler in the chain that did not opt in.
 func (h *Host) SchedulerWantsQuotaSignals() bool {
-	record := h.schedulerRecord()
-	if record == nil {
+	if h == nil {
 		return false
 	}
-	return schedulerWantsQuotaSignals(record.plugin.Capabilities)
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.Scheduler == nil {
+			continue
+		}
+		if schedulerWantsQuotaSignals(record.plugin.Capabilities) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) schedulerRecord() *capabilityRecord {
@@ -212,7 +222,13 @@ func buildSchedulerSubRequest(record capabilityRecord, req pluginapi.SchedulerPi
 	if !schedulerWantsAcrossPriorities(record.plugin.Capabilities) {
 		offeredCandidates = highestPrioritySchedulerCandidates(remainingCandidates)
 	}
-	return cloneSchedulerPickRequest(req, offeredCandidates)
+	subReq := cloneSchedulerPickRequest(req, offeredCandidates)
+	if !schedulerWantsQuotaSignals(record.plugin.Capabilities) {
+		for index := range subReq.Candidates {
+			subReq.Candidates[index].Quota = nil
+		}
+	}
+	return subReq
 }
 
 func (h *Host) shouldRetrySchedulerAfterReload(ctx context.Context, record capabilityRecord, genBefore uint64, resp pluginapi.SchedulerPickResponse, called bool, errPick error, subReq pluginapi.SchedulerPickRequest) bool {
@@ -525,6 +541,11 @@ func cloneSchedulerAuthCandidates(in []pluginapi.SchedulerAuthCandidate) []plugi
 	for i, candidate := range in {
 		candidate.Attributes = cloneStringMap(candidate.Attributes)
 		candidate.Metadata = cloneInterceptorMetadata(candidate.Metadata)
+		if candidate.Quota != nil {
+			quota := *candidate.Quota
+			quota.Signals = cloneStringMap(quota.Signals)
+			candidate.Quota = &quota
+		}
 		out[i] = candidate
 	}
 	return out

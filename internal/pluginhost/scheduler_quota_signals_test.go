@@ -2,10 +2,10 @@ package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -22,7 +22,7 @@ func TestRPCCapabilitiesSchedulerQuotaSignals(t *testing.T) {
 	if caps.SchedulerQuotaSignals {
 		t.Fatal("SchedulerQuotaSignals = true by default, want false")
 	}
-	// The RPC layer serializes capabilities with encoding/json; read the wire form with ojson.
+	// Read the RPC wire form of the capabilities with ojson.
 	raw, errMarshal := json.Marshal(caps)
 	if errMarshal != nil {
 		t.Fatalf("Marshal() error = %v", errMarshal)
@@ -140,5 +140,50 @@ func TestSchedulerQuotaSignals_RPCRoundTrip(t *testing.T) {
 	quota := received.Candidates[0].Quota
 	if !quota.ObservedAt.Equal(observedAt) || quota.Signals["X-Codex-Secondary-Reset-At"] != "1794130700" {
 		t.Fatalf("plugin received quota %+v, want the host snapshot", quota)
+	}
+}
+
+func TestSchedulerQuotaSignals_OnlyOptedInSchedulersInChainSeeQuota(t *testing.T) {
+	var plainReq, quotaReq pluginapi.SchedulerPickRequest
+	plain := schedulerFunc(func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+		plainReq = req
+		return pluginapi.SchedulerPickResponse{}, nil
+	})
+	quota := schedulerFunc(func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+		quotaReq = req
+		return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, nil
+	})
+	host := newHostWithRecords(
+		capabilityRecord{id: "plain-sched", priority: 2, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: plain}}},
+		capabilityRecord{id: "quota-sched", priority: 1, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler:             quota,
+			SchedulerQuotaSignals: true,
+		}}},
+	)
+	if !host.SchedulerWantsQuotaSignals() {
+		t.Fatal("SchedulerWantsQuotaSignals() = false with one opted-in scheduler, want true")
+	}
+
+	signals := map[string]string{"X-Codex-Secondary-Reset-At": "1794130700"}
+	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{
+		Provider: "codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{{
+			ID:       "auth-a",
+			Provider: "codex",
+			Quota:    &pluginapi.SchedulerQuotaSnapshot{Signals: signals},
+		}},
+	})
+	if errPick != nil || !handled || resp.AuthID != "auth-a" {
+		t.Fatalf("PickAuth() = %+v, %v, %v; want auth-a handled", resp, handled, errPick)
+	}
+	if len(plainReq.Candidates) != 1 || plainReq.Candidates[0].Quota != nil {
+		t.Fatalf("scheduler without opt-in received %+v, want one candidate without quota", plainReq.Candidates)
+	}
+	if len(quotaReq.Candidates) != 1 || quotaReq.Candidates[0].Quota == nil {
+		t.Fatalf("opted-in scheduler received %+v, want one candidate with quota", quotaReq.Candidates)
+	}
+	quotaReq.Candidates[0].Quota.Signals["X-Codex-Secondary-Reset-At"] = "0"
+	if signals["X-Codex-Secondary-Reset-At"] != "1794130700" {
+		t.Fatal("scheduler mutation leaked into the host's quota signals")
 	}
 }
