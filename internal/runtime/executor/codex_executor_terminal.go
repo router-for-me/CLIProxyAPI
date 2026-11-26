@@ -252,7 +252,7 @@ func codexTerminalStreamErrShouldHandle(body []byte) bool {
 	if codexTerminalErrorIsContextLength(body) {
 		return true
 	}
-	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+	if isCodexUsageLimitError(body) || isCodexAPIBillingError(body) || isCodexTransientCapacityError(body) {
 		return true
 	}
 	code, _, ok := codexStatusErrorClassification(http.StatusBadRequest, body)
@@ -367,9 +367,10 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
-	credentialScoped := isUsageLimit && !modelLevelCooling
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
-	if transientCapacity || isUsageLimit {
+	isBillingLimit := isCodexAPIBillingError(body)
+	credentialScoped := isBillingLimit || (isUsageLimit && !modelLevelCooling)
+	transientCapacity := !isBillingLimit && !isUsageLimit && isCodexTransientCapacityError(body)
+	if transientCapacity || isUsageLimit || isBillingLimit {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
@@ -503,6 +504,19 @@ func codexErrorCodeOf(errorBody []byte) string {
 		}
 	}
 	return ""
+}
+
+func isCodexAPIBillingError(body []byte) bool {
+	switch strings.ToLower(codexErrorCodeOf(body)) {
+	case "credit_balance_exhausted", "billing_hard_limit_reached", "insufficient_quota":
+		return true
+	}
+	for _, path := range []string{"error.type", "type", "body.error.type"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(body, path).String()), "insufficient_quota") {
+			return true
+		}
+	}
+	return false
 }
 
 // isCodexTransientCapacityError covers every Codex capacity rejection that
@@ -767,8 +781,6 @@ func newCodexBootstrapOverloadErrWithRetryAfter(body []byte, preferredRetryAfter
 
 // isCodexOverloadBootstrapFailure reports whether a terminal failure delivered inside an HTTP 200
 // stream is a transient capacity rejection that a different credential may be able to serve.
-// Only these failures justify replacing the whole attempt during bootstrap; every other terminal
-// failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
 func isCodexOverloadBootstrapFailure(body []byte) bool {
 	if isCodexTransientCapacityError(body) {
 		return true
