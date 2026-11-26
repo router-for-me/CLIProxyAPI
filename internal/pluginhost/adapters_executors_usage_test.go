@@ -3,8 +3,11 @@ package pluginhost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,8 +63,57 @@ func (p *testUsageCapturePlugin) assertNoRecord(t *testing.T, wait time.Duration
 	}
 }
 
+const testUsageDrainPluginName = "pluginhost-test-usage-drain"
+
+var (
+	testUsageDrainMu           sync.Mutex
+	testUsageBarrierID         atomic.Uint64
+	testUsageDrainAfterPublish func()
+)
+
+type testUsageBarrierPlugin struct {
+	barrier string
+	onHit   func()
+}
+
+func (p testUsageBarrierPlugin) HandleUsage(_ context.Context, record coreusage.Record) {
+	if record.Provider == p.barrier && p.onHit != nil {
+		p.onHit()
+	}
+}
+
+func drainTestUsageQueue(t *testing.T) {
+	t.Helper()
+	testUsageDrainMu.Lock()
+	defer testUsageDrainMu.Unlock()
+
+	done := make(chan struct{})
+	var once sync.Once
+	barrier := fmt.Sprintf("pluginhost-usage-drain-%d", testUsageBarrierID.Add(1))
+	coreusage.RegisterNamedPlugin(testUsageDrainPluginName, testUsageBarrierPlugin{
+		barrier: barrier,
+		onHit: func() {
+			once.Do(func() { close(done) })
+		},
+	})
+	defer coreusage.RegisterNamedPlugin(testUsageDrainPluginName, noopUsagePlugin{})
+
+	coreusage.PublishRecord(context.Background(), coreusage.Record{Provider: barrier})
+	if hook := testUsageDrainAfterPublish; hook != nil {
+		hook()
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out draining default usage queue")
+	}
+}
+
 func registerTestUsagePlugin(t *testing.T, name string, plugin coreusage.Plugin) {
 	t.Helper()
+	// Drain preexisting records queued by earlier tests before registering
+	// this capture plugin so FIFO delivery only observes records published after setup.
+	drainTestUsageQueue(t)
 	coreusage.RegisterNamedPlugin(name, plugin)
 	t.Cleanup(func() {
 		coreusage.RegisterNamedPlugin(name, noopUsagePlugin{})
@@ -71,6 +123,67 @@ func registerTestUsagePlugin(t *testing.T, name string, plugin coreusage.Plugin)
 type noopUsagePlugin struct{}
 
 func (noopUsagePlugin) HandleUsage(context.Context, coreusage.Record) {}
+
+func TestRegisterTestUsagePluginDrainsQueuedRecords(t *testing.T) {
+	gateEntered := make(chan struct{})
+	gateRelease := make(chan struct{})
+	releaseGate := sync.OnceFunc(func() { close(gateRelease) })
+	defer releaseGate()
+
+	gateProvider := fmt.Sprintf("%s-gate-%d", t.Name(), testUsageBarrierID.Add(1))
+	gateName := t.Name() + "-gate"
+	var enterOnce sync.Once
+	coreusage.RegisterNamedPlugin(gateName, testUsageBarrierPlugin{
+		barrier: gateProvider,
+		onHit: func() {
+			enterOnce.Do(func() { close(gateEntered) })
+			<-gateRelease
+		},
+	})
+	t.Cleanup(func() {
+		releaseGate()
+		coreusage.RegisterNamedPlugin(gateName, noopUsagePlugin{})
+	})
+
+	// Block the global usage worker inside gate.HandleUsage so staleRecord is guaranteed
+	// to remain queued when registerTestUsagePlugin starts.
+	coreusage.PublishRecord(t.Context(), coreusage.Record{Provider: gateProvider})
+	select {
+	case <-gateEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for usage worker to enter gate")
+	}
+
+	staleAuthID := fmt.Sprintf("%s-stale-%d", t.Name(), testUsageBarrierID.Add(1))
+	coreusage.PublishRecord(t.Context(), coreusage.Record{
+		Provider:     "antigravity",
+		ExecutorType: "plugin:" + homePluginID,
+		Model:        homePluginModel,
+		AuthID:       staleAuthID,
+	})
+
+	prevHook := testUsageDrainAfterPublish
+	testUsageDrainAfterPublish = releaseGate
+	defer func() { testUsageDrainAfterPublish = prevHook }()
+
+	capture := newTestUsageCapturePlugin("")
+	registerTestUsagePlugin(t, t.Name(), capture)
+	// If registerTestUsagePlugin did not drain before registering capture, releasing
+	// the gate here deterministically delivers the queued stale record to capture.
+	releaseGate()
+
+	barrier := fmt.Sprintf("%s-barrier-%d", t.Name(), testUsageBarrierID.Add(1))
+	coreusage.PublishRecord(t.Context(), coreusage.Record{Provider: barrier})
+	for {
+		rec := capture.waitRecord(t, 5*time.Second)
+		if rec.Provider == barrier {
+			break
+		}
+		if rec.AuthID == staleAuthID {
+			t.Fatalf("captured preexisting queued usage record: %+v", rec)
+		}
+	}
+}
 
 func TestExecutorAdapterExecutePublishesUsage(t *testing.T) {
 	plugin := newTestUsageCapturePlugin("plugin-provider")

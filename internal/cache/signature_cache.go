@@ -96,6 +96,7 @@ var currentSignatureKVClient = func() (signatureKVClient, bool, error) {
 type groupCache struct {
 	mu      sync.RWMutex
 	entries map[string]SignatureEntry
+	deleted bool
 }
 
 // hashText creates a stable, Unicode-safe key from text content
@@ -141,12 +142,12 @@ func purgeExpiredCaches() {
 				delete(sc.entries, k)
 			}
 		}
-		isEmpty := len(sc.entries) == 0
-		sc.mu.Unlock()
-		// Remove cache bucket if empty
-		if isEmpty {
-			signatureCache.Delete(key)
+		// Remove cache bucket while holding the lock to prevent TOCTOU eviction.
+		if len(sc.entries) == 0 && !sc.deleted {
+			sc.deleted = true
+			signatureCache.CompareAndDelete(key, sc)
 		}
+		sc.mu.Unlock()
 		return true
 	})
 	purgeExpiredCodexReasoningReplayCache(now)
@@ -191,15 +192,20 @@ func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature st
 
 	groupKey := signatureCacheGroupKey(modelName, scope)
 	textHash := hashText(text)
-	sc := getOrCreateGroupCache(groupKey)
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-
-	sc.entries[textHash] = SignatureEntry{
-		Signature: signature,
-		Timestamp: time.Now(),
+	for {
+		sc := getOrCreateGroupCache(groupKey)
+		sc.mu.Lock()
+		if sc.deleted {
+			sc.mu.Unlock()
+			continue
+		}
+		sc.entries[textHash] = SignatureEntry{
+			Signature: signature,
+			Timestamp: time.Now(),
+		}
+		sc.mu.Unlock()
+		return true
 	}
-	return true
 }
 
 // GetCachedSignature retrieves a legacy, unscoped signature for compatibility callers.
@@ -338,11 +344,11 @@ func DeleteCachedSignatureRequired(ctx context.Context, modelName, text string) 
 	sc := val.(*groupCache)
 	sc.mu.Lock()
 	delete(sc.entries, textHash)
-	isEmpty := len(sc.entries) == 0
-	sc.mu.Unlock()
-	if isEmpty {
-		signatureCache.Delete(groupKey)
+	if len(sc.entries) == 0 && !sc.deleted {
+		sc.deleted = true
+		signatureCache.CompareAndDelete(groupKey, sc)
 	}
+	sc.mu.Unlock()
 	return nil
 }
 

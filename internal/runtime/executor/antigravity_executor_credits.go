@@ -3,6 +3,9 @@ package executor
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -11,12 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -73,19 +78,23 @@ var (
 	antigravityShortCooldownByAuth      sync.Map
 	antigravityCreditsBalanceByAuth     sync.Map // credential-scoped auth key → antigravityCreditsBalance
 	antigravityCreditsCurrentScope      sync.Map
-	antigravityCreditsHintRefreshByID   sync.Map // auth.ID → *antigravityCreditsHintRefreshState
+	antigravityCreditsHintRefreshByID   sync.Map // credential-scoped refresh key → *antigravityCreditsHintRefreshState
 	antigravityCreditsRefreshRegistries sync.Map // auth.ID → *antigravityCreditsRefreshRegistry
 	antigravityRefreshGroup             singleflight.Group
 	antigravityQuotaExhaustedKeywords   = []string{
 		"quota_exhausted",
 		"quota exhausted",
 	}
+	antigravityClearedCreditsBalancePayload = []byte("null")
+	antigravityCreditsBalanceWriteSeq       atomic.Uint64
+	antigravityCreditsBalanceWritePrefix    = newAntigravityCreditsBalanceWritePrefix()
 )
 
 type antigravityKVClient interface {
 	KVGet(ctx context.Context, key string) ([]byte, bool, error)
 	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
 	KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
+	KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error)
 	KVDel(ctx context.Context, keys ...string) (int64, error)
 }
 
@@ -98,6 +107,26 @@ type antigravityCreditsBalance struct {
 	MinCreditAmount float64
 	PaidTierID      string
 	Known           bool
+}
+
+type antigravityCreditsBalanceHomeRecord struct {
+	CreditAmount    float64
+	MinCreditAmount float64
+	PaidTierID      string
+	Known           bool
+	WriteVersion    string `json:"write_version,omitempty"`
+}
+
+func newAntigravityCreditsBalanceWritePrefix() string {
+	var buf [8]byte
+	if _, errRand := cryptorand.Read(buf[:]); errRand == nil {
+		return hex.EncodeToString(buf[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 16)
+}
+
+func nextAntigravityCreditsBalanceWriteVersion() string {
+	return antigravityCreditsBalanceWritePrefix + "-" + strconv.FormatUint(antigravityCreditsBalanceWriteSeq.Add(1), 10)
 }
 
 type antigravityCreditsRefreshRegistry struct {
@@ -159,7 +188,7 @@ func antigravityAuthHasCreditsRequired(ctx context.Context, auth *cliproxyauth.A
 		if errBalance != nil {
 			return false, errBalance
 		}
-		if !found {
+		if !found || isClearedAntigravityCreditsBalancePayload(raw) {
 			return true, nil
 		}
 		var homeBalance antigravityCreditsBalance
@@ -338,8 +367,192 @@ func isAntigravityAuthDisabled(auth *cliproxyauth.Auth) bool {
 	return auth == nil || auth.Disabled || auth.Status == cliproxyauth.StatusDisabled
 }
 
+func clearAntigravityCreditsFailureKeyIfCurrent(auth *cliproxyauth.Auth, clearLocalBalance bool) {
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return
+	}
+	defer unlock()
+	antigravityCreditsFailureByAuth.Delete(key)
+	if clearLocalBalance {
+		antigravityCreditsBalanceByAuth.Delete(key)
+	}
+}
+
+func clearAntigravityCreditsFailureIfHomeHintNotUnavailable(ctx context.Context, client antigravityKVClient, auth *cliproxyauth.Auth, hintKey string) {
+	rawLatest, foundLatest, errLatest := client.KVGet(ctx, hintKey)
+	if errLatest != nil {
+		// Transient read error: retain local failure state so a later call can retry.
+		log.Errorf("antigravity executor: home kv best-effort credits hint recheck failed prefix=cpa:antigravity:*: %v", errLatest)
+		return
+	}
+	if !foundLatest {
+		clearAntigravityCreditsFailureKeyIfCurrent(auth, false)
+		return
+	}
+	var latestHint cliproxyauth.AntigravityCreditsHint
+	if errUnmarshal := json.Unmarshal(rawLatest, &latestHint); errUnmarshal != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits hint recheck unmarshal failed prefix=cpa:antigravity:*: %v", errUnmarshal)
+		return
+	}
+	if !latestHint.Known || latestHint.Available {
+		clearAntigravityCreditsFailureKeyIfCurrent(auth, false)
+	}
+}
+
+func clearAntigravityCreditsFailureStateHomeKV(auth *cliproxyauth.Auth, client antigravityKVClient, errClient error) {
+	if errClient != nil || client == nil {
+		log.Errorf("antigravity executor: home kv best-effort credits failure clear failed prefix=cpa:antigravity:*: %v", errClient)
+		return
+	}
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return
+	}
+	_, hadFailure := antigravityCreditsFailureByAuth.Load(key)
+	unlock()
+
+	ctx := context.Background()
+	hintKey := cliproxyauth.AntigravityCreditsHintKVKey(auth)
+	if hintKey == "" {
+		return
+	}
+	// Read balanceKey before hintKey (reverse of publish's hint-then-balance order)
+	// so we can never pair an older unavailable hint with a newer positive balance.
+	balanceKey := antigravityCreditsBalanceKey(strings.TrimSpace(auth.ID), cliproxyauth.AntigravityCreditsScope(auth))
+	rawBalance, foundBalance, errGetBalance := client.KVGet(ctx, balanceKey)
+	if errGetBalance != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits balance get failed prefix=cpa:antigravity:*: %v", errGetBalance)
+		return
+	}
+	rawHint, foundHint, errGetHint := client.KVGet(ctx, hintKey)
+	if errGetHint != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits hint get failed prefix=cpa:antigravity:*: %v", errGetHint)
+		return
+	}
+	if !foundHint {
+		clearAntigravityCreditsFailureKeyIfCurrent(auth, false)
+		return
+	}
+	var hint cliproxyauth.AntigravityCreditsHint
+	if errUnmarshal := json.Unmarshal(rawHint, &hint); errUnmarshal != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits hint unmarshal failed prefix=cpa:antigravity:*: %v", errUnmarshal)
+		return
+	}
+	now := time.Now()
+	if !hint.Known || hint.Available {
+		clearAntigravityCreditsFailureKeyIfCurrent(auth, false)
+		return
+	}
+	if !hadFailure && cliproxyauth.IsAntigravityCreditsHintFresh(hint, now) {
+		clearAntigravityCreditsFailureKeyIfCurrent(auth, false)
+		return
+	}
+
+	emptyHint := cliproxyauth.AntigravityCreditsHint{UpdatedAt: now}
+	rawEmptyHint, errMarshalEmpty := json.Marshal(emptyHint)
+	if errMarshalEmpty != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits hint marshal failed prefix=cpa:antigravity:*: %v", errMarshalEmpty)
+		return
+	}
+
+	balancePresent := foundBalance && !isClearedAntigravityCreditsBalancePayload(rawBalance)
+	if !balancePresent {
+		swapped, errCAS := client.KVCompareAndSwap(ctx, hintKey, rawHint, true, rawEmptyHint, 30*time.Minute)
+		if errCAS != nil {
+			if errors.Is(errCAS, kvstore.ErrCompareAndSwapUnsupported) {
+				log.Debugf("antigravity executor: home kv credits failure clear skipped because CAS is unsupported: %v", errCAS)
+				return
+			}
+			log.Errorf("antigravity executor: home kv best-effort credits hint cas failed prefix=cpa:antigravity:*: %v", errCAS)
+			return
+		}
+		if swapped {
+			clearAntigravityCreditsFailureKeyIfCurrent(auth, true)
+		} else {
+			clearAntigravityCreditsFailureIfHomeHintNotUnavailable(ctx, client, auth, hintKey)
+		}
+		return
+	}
+
+	var balanceRecord antigravityCreditsBalanceHomeRecord
+	if errUnmarshalBal := json.Unmarshal(rawBalance, &balanceRecord); errUnmarshalBal != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits balance unmarshal failed prefix=cpa:antigravity:*: %v", errUnmarshalBal)
+		return
+	}
+	if strings.TrimSpace(balanceRecord.WriteVersion) == "" {
+		// Unversioned Home KV balance records from pre-upgrade writers cannot be
+		// distinguished from concurrent identical-value writes via single-key CAS.
+		// Keep the unavailable hint intact so stale balances cannot resurrect and
+		// concurrent legacy refreshes are never cleared.
+		log.Debugf("antigravity executor: home kv credits failure clear skipped for unversioned balance record")
+		return
+	}
+
+	// Transition the observed unavailable hint to a distinct unavailable guard
+	// version before invalidating the exact observed balance via CAS. If a
+	// concurrent refresh updates either key at any point, CAS rejects our write
+	// without deleting the fresh balance or overwriting the fresh hint. If CAS
+	// fails or is unsupported, the unavailable hint and failure state remain
+	// intact so stale positive balances cannot resurrect.
+	guardHint := hint
+	if guardHint.UpdatedAt.IsZero() {
+		guardHint.UpdatedAt = now.Add(-cliproxyauth.AntigravityCreditsHintRefreshInterval - time.Second)
+	} else {
+		guardHint.UpdatedAt = guardHint.UpdatedAt.Add(-time.Nanosecond)
+	}
+	rawGuardHint, errMarshalGuard := json.Marshal(guardHint)
+	if errMarshalGuard != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits hint marshal failed prefix=cpa:antigravity:*: %v", errMarshalGuard)
+		return
+	}
+
+	swappedGuard, errGuard := client.KVCompareAndSwap(ctx, hintKey, rawHint, true, rawGuardHint, 30*time.Minute)
+	if errGuard != nil {
+		if errors.Is(errGuard, kvstore.ErrCompareAndSwapUnsupported) {
+			log.Debugf("antigravity executor: home kv credits failure clear skipped because CAS is unsupported: %v", errGuard)
+			return
+		}
+		log.Errorf("antigravity executor: home kv best-effort credits hint cas failed prefix=cpa:antigravity:*: %v", errGuard)
+		return
+	}
+	if !swappedGuard {
+		clearAntigravityCreditsFailureIfHomeHintNotUnavailable(ctx, client, auth, hintKey)
+		return
+	}
+
+	swappedBalance, errBalanceCAS := client.KVCompareAndSwap(ctx, balanceKey, rawBalance, true, antigravityClearedCreditsBalancePayload, 30*time.Minute)
+	if errBalanceCAS != nil {
+		if errors.Is(errBalanceCAS, kvstore.ErrCompareAndSwapUnsupported) {
+			log.Debugf("antigravity executor: home kv credits balance invalidation skipped because CAS is unsupported: %v", errBalanceCAS)
+			return
+		}
+		log.Errorf("antigravity executor: home kv best-effort credits balance cas failed prefix=cpa:antigravity:*: %v", errBalanceCAS)
+		return
+	}
+	if !swappedBalance {
+		clearAntigravityCreditsFailureIfHomeHintNotUnavailable(ctx, client, auth, hintKey)
+		return
+	}
+
+	swappedReset, errReset := client.KVCompareAndSwap(ctx, hintKey, rawGuardHint, true, rawEmptyHint, 30*time.Minute)
+	if errReset != nil {
+		log.Errorf("antigravity executor: home kv best-effort credits hint reset cas failed prefix=cpa:antigravity:*: %v", errReset)
+		return
+	}
+	if swappedReset {
+		clearAntigravityCreditsFailureKeyIfCurrent(auth, true)
+	} else {
+		clearAntigravityCreditsFailureIfHomeHintNotUnavailable(ctx, client, auth, hintKey)
+	}
+}
+
 func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		clearAntigravityCreditsFailureStateHomeKV(auth, client, errClient)
 		return
 	}
 	key, unlock, current := lockAntigravityCreditsScope(auth)
@@ -348,10 +561,8 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	}
 	defer unlock()
 	_, hadFailure := antigravityCreditsFailureByAuth.LoadAndDelete(key)
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth); ok && hint.Known && !hint.Available {
-		if hadFailure || !cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
-			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{})
-		}
+	if cliproxyauth.ClearAntigravityCreditsUnavailableHintForAuthChecked(auth, hadFailure) {
+		antigravityCreditsBalanceByAuth.Delete(key)
 	}
 }
 func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
@@ -644,10 +855,7 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 		return
 	}
 	refreshScope := cliproxyauth.AntigravityCreditsScope(auth)
-	refreshKey := authID
-	if refreshScope != "" {
-		refreshKey += "|" + refreshScope
-	}
+	refreshKey := antigravityCreditsRefreshKeyForScope(authID, refreshScope)
 	registryValue, _ := antigravityCreditsRefreshRegistries.LoadOrStore(authID, &antigravityCreditsRefreshRegistry{})
 	registry, okRegistry := registryValue.(*antigravityCreditsRefreshRegistry)
 	if !okRegistry || registry == nil {
@@ -846,10 +1054,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 			state := task.state
 			state.mu.Lock()
 			defer state.mu.Unlock()
-			refreshKey := authID
-			if state.scope != "" {
-				refreshKey += "|" + state.scope
-			}
+			refreshKey := antigravityCreditsRefreshKeyForScope(authID, state.scope)
 			current, _ := antigravityCreditsHintRefreshByID.Load(refreshKey)
 			if current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch || state.scope != cliproxyauth.AntigravityCreditsScope(auth) {
 				return
@@ -883,12 +1088,19 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
 		runIfCurrentTask(func() {
 			if balance != nil {
-				storeAntigravityCreditsBalanceBestEffort(auth, *balance)
+				// Persist hint before balance so concurrent Home KV cleanup (which
+				// reads balance before hint) can never pair an older unavailable hint
+				// with a newer balance. Skip writing balance if persisting the hint fails.
+				if cliproxyauth.SetAntigravityCreditsHintForAuthBestEffort(auth, hint) {
+					storeAntigravityCreditsBalanceBestEffort(auth, *balance)
+					if hint.Available {
+						clearAntigravityCreditsPermanentlyDisabled(auth)
+					}
+				}
+				return
 			}
+			deleteAntigravityCreditsBalanceBestEffort(auth)
 			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, hint)
-			if balance != nil && hint.Available {
-				clearAntigravityCreditsPermanentlyDisabled(auth)
-			}
 		})
 	}
 	paidTierID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(bodyBytes, "paidTier.id").String()))
@@ -951,6 +1163,21 @@ func antigravityShortCooldownKey(auth *cliproxyauth.Auth, modelName string) stri
 		return ""
 	}
 	return authID + "|" + cliproxyauth.AntigravityCreditsScope(auth) + "|" + modelName + "|sc"
+}
+
+func antigravityCreditsRefreshKeyForScope(authID, scope string) string {
+	refreshKey := strings.TrimSpace(authID)
+	if scope != "" {
+		refreshKey += "|" + scope
+	}
+	return refreshKey
+}
+
+func antigravityCreditsRefreshKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return antigravityCreditsRefreshKeyForScope(auth.ID, cliproxyauth.AntigravityCreditsScope(auth))
 }
 
 func newAntigravityCreditsCacheKey(authID, scope string) any {
@@ -1165,7 +1392,14 @@ func storeAntigravityCreditsBalanceBestEffort(auth *cliproxyauth.Auth, bal antig
 			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errClient)
 			return
 		}
-		raw, errMarshal := json.Marshal(bal)
+		record := antigravityCreditsBalanceHomeRecord{
+			CreditAmount:    bal.CreditAmount,
+			MinCreditAmount: bal.MinCreditAmount,
+			PaidTierID:      bal.PaidTierID,
+			Known:           bal.Known,
+			WriteVersion:    nextAntigravityCreditsBalanceWriteVersion(),
+		}
+		raw, errMarshal := json.Marshal(record)
 		if errMarshal != nil {
 			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errMarshal)
 			return
@@ -1179,6 +1413,41 @@ func storeAntigravityCreditsBalanceBestEffort(auth *cliproxyauth.Auth, bal antig
 	if current {
 		defer unlock()
 		antigravityCreditsBalanceByAuth.Store(key, bal)
+	}
+}
+
+func isClearedAntigravityCreditsBalancePayload(raw []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), antigravityClearedCreditsBalancePayload)
+}
+
+func deleteAntigravityCreditsBalanceHomeKVBestEffort(auth *cliproxyauth.Auth) {
+	if auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance delete failed prefix=cpa:antigravity:*: %v", errClient)
+			return
+		}
+		if _, errDel := client.KVDel(context.Background(), antigravityCreditsBalanceKey(authID, cliproxyauth.AntigravityCreditsScope(auth))); errDel != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance delete failed prefix=cpa:antigravity:*: %v", errDel)
+		}
+	}
+}
+
+func deleteAntigravityCreditsBalanceBestEffort(auth *cliproxyauth.Auth) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	deleteAntigravityCreditsBalanceHomeKVBestEffort(auth)
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if current {
+		defer unlock()
+		antigravityCreditsBalanceByAuth.Delete(key)
 	}
 }
 
