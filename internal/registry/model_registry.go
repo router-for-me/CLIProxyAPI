@@ -1792,8 +1792,9 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 	defer r.mutex.RUnlock()
 
 	type providerModel struct {
-		count int
-		info  *ModelInfo
+		count             int
+		info              *ModelInfo
+		supportsWebSearch bool
 	}
 
 	providerModels := make(map[string]*providerModel)
@@ -1818,15 +1819,13 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 				providerModels[modelID] = entry
 			}
 			entry.count++
-			if entry.info == nil {
-				if clientInfos != nil {
-					if info := clientInfos[modelID]; info != nil {
+			if clientInfos != nil {
+				if info := clientInfos[modelID]; info != nil {
+					if entry.info == nil {
 						entry.info = info
 					}
-				}
-				if entry.info == nil {
-					if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
-						entry.info = reg.Info
+					if info.SupportsWebSearch {
+						entry.supportsWebSearch = true
 					}
 				}
 			}
@@ -1895,12 +1894,21 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+			var cloned *ModelInfo
 			if entry.info != nil {
-				result = append(result, cloneModelInfo(entry.info))
-				continue
+				cloned = cloneModelInfo(entry.info)
+			} else if ok && registration != nil {
+				if registration.InfoByProvider != nil && registration.InfoByProvider[provider] != nil {
+					cloned = cloneModelInfo(registration.InfoByProvider[provider])
+				} else if registration.Info != nil {
+					cloned = cloneModelInfo(registration.Info)
+				}
 			}
-			if ok && registration != nil && registration.Info != nil {
-				result = append(result, cloneModelInfo(registration.Info))
+			if cloned != nil {
+				if entry.supportsWebSearch {
+					cloned.SupportsWebSearch = true
+				}
+				result = append(result, cloned)
 			}
 		}
 	}
@@ -2201,30 +2209,35 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
-
-	// Get all available models for this handler type
-	models := r.GetAvailableModels(handlerType)
+	// Get all available models while preserving canonical ID and creation timestamps
+	// across handler types (e.g., gemini uses "name" without "id" or "created", and
+	// claude formats "created_at" instead of numeric "created").
+	models := r.GetAvailableModelInfos()
 	if len(models) == 0 {
 		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
 	}
 
-	// Sort models by creation timestamp (newest first)
+	// Sort models using a strict weak ordering: models with a creation timestamp
+	// sort before those without, then newest first, with lexicographical ID tie-breaking.
 	sort.Slice(models, func(i, j int) bool {
-		// Extract created timestamps from map
-		createdI, okI := models[i]["created"].(int64)
-		createdJ, okJ := models[j]["created"].(int64)
-		if !okI || !okJ {
-			return false
+		hasCreatedI := models[i].Created != 0
+		hasCreatedJ := models[j].Created != 0
+		if hasCreatedI != hasCreatedJ {
+			return hasCreatedI
 		}
-		return createdI > createdJ
+		if hasCreatedI && models[i].Created != models[j].Created {
+			return models[i].Created > models[j].Created
+		}
+		return models[i].ID < models[j].ID
 	})
 
 	// Find the first model with available clients
 	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCount(modelID); count > 0 {
-				return modelID, nil
-			}
+		if model.ID == "" {
+			continue
+		}
+		if count := r.GetModelCount(model.ID); count > 0 {
+			return model.ID, nil
 		}
 	}
 

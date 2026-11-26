@@ -84,6 +84,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	// are clamped instead of rejected to improve interoperability.
 	strictBudget := !userDefined && !fromSuffix && fromFormat != "" && sameFamily && !modelFamilyMismatch
 	originalMode := config.Mode
+	if config.Mode == ModeLevel {
+		normalizedLevel := ThinkingLevel(strings.ToLower(strings.TrimSpace(string(config.Level))))
+		if !userDefined || normalizedLevel == LevelNone || normalizedLevel == LevelAuto {
+			config.Level = normalizedLevel
+		}
+	}
 
 	switch capability {
 	case CapabilityBudgetOnly:
