@@ -2301,3 +2301,52 @@ func TestFixCLIToolResponse_SnakeCaseAndMixedCasing(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeAntigravitySystemInstruction_NullAndNonObject(t *testing.T) {
+	t.Run("camelCase null systemInstruction is removed", func(t *testing.T) {
+		input := []byte(`{"systemInstruction":null,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+		out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+		}
+		if sys := ojson.GetBytesNoCopy(out, "request.systemInstruction"); sys.Exists() {
+			t.Fatalf("expected null systemInstruction to be removed, got: %s", sys.Raw)
+		}
+	})
+
+	t.Run("snake_case null system_instruction is removed", func(t *testing.T) {
+		input := []byte(`{"system_instruction":null,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+		out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+		}
+		if sys := ojson.GetBytesNoCopy(out, "request.system_instruction"); sys.Exists() {
+			t.Fatalf("expected system_instruction to be removed, got: %s", sys.Raw)
+		}
+		if sys := ojson.GetBytesNoCopy(out, "request.systemInstruction"); sys.Exists() {
+			t.Fatalf("expected null system_instruction not to produce systemInstruction, got: %s", sys.Raw)
+		}
+	})
+
+	t.Run("non-object systemInstruction is not mutated into role user", func(t *testing.T) {
+		for _, rawVal := range []string{`123`, `true`, `[]`, `"be brief"`} {
+			doc := ojson.NewDocString(`{"request":{"systemInstruction":` + rawVal + `,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+			NormalizeAntigravityRequestDoc(doc)
+			sys := doc.Get("request.systemInstruction")
+			if sys.IsObject() {
+				t.Fatalf("non-object systemInstruction (%s) mutated into object: %s", rawVal, sys.Raw)
+			}
+			if sys.Raw != rawVal {
+				t.Fatalf("non-object systemInstruction = %s, want %s", sys.Raw, rawVal)
+			}
+		}
+	})
+
+	t.Run("direct NormalizeAntigravityRequestDoc removes null systemInstruction", func(t *testing.T) {
+		doc := ojson.NewDocString(`{"request":{"systemInstruction":null,"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+		NormalizeAntigravityRequestDoc(doc)
+		if sys := doc.Get("request.systemInstruction"); sys.Exists() {
+			t.Fatalf("expected null request.systemInstruction to be removed, got: %s", sys.Raw)
+		}
+	})
+}
