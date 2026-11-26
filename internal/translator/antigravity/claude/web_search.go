@@ -233,6 +233,9 @@ func antigravityTextContent(root ojson.Result) string {
 	}
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			if part.Get("thought").Bool() || part.Get("functionCall").Exists() {
+				continue
+			}
 			if text := part.Get("text"); text.Exists() {
 				textBuilder.WriteString(text.String())
 			}

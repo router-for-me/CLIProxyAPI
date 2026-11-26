@@ -2571,3 +2571,174 @@ func TestConvertAntigravityResponseToClaudeStream_FallbackIDWhenResponseIDMissin
 		}
 	})
 }
+
+func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingSkipsThoughtParts(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.8-flash-high",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.8-flash-high","request":{"tools":[{"googleSearch":{}}]}}`)
+	responseJSON := []byte(`{
+		"response": {
+			"responseId": "resp-ws-thought",
+			"modelVersion": "gemini-3.8-flash-high",
+			"candidates": [{
+				"content": {
+					"parts": [
+						{"text": "SECRET_INTERNAL_THOUGHT ", "thought": true},
+						{"text": "Beijing weather is clear today."}
+					]
+				},
+				"groundingMetadata": {
+					"webSearchQueries": ["Beijing weather"],
+					"groundingChunks": [{"web": {"uri": "https://example.com/weather", "title": "Weather"}}],
+					"groundingSupports": [{
+						"segment": {"startIndex": 0, "endIndex": 31, "text": "Beijing weather is clear today."},
+						"groundingChunkIndices": [0]
+					}]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 6, "thoughtsTokenCount": 2, "totalTokenCount": 18}
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.8-flash-high", requestJSON, translatedRequestJSON, responseJSON, nil)
+
+	if strings.Contains(string(output), "SECRET_INTERNAL_THOUGHT") {
+		t.Fatalf("non-stream web search leaked internal thought text: %s", string(output))
+	}
+	if got := ojson.GetBytesNoCopy(output, "content.#").Int(); got != 3 {
+		t.Fatalf("content block count = %d, want 3: %s", got, string(output))
+	}
+	if got := ojson.GetBytesNoCopy(output, "content.2.text").String(); got != "Beijing weather is clear today." {
+		t.Fatalf("text block = %q, want %q: %s", got, "Beijing weather is clear today.", string(output))
+	}
+	if got := ojson.GetBytesNoCopy(output, "content.2.citations.0.cited_text").String(); got != "Beijing weather is clear today." {
+		t.Fatalf("cited_text = %q, want %q: %s", got, "Beijing weather is clear today.", string(output))
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_WebSearchGroundingSkipsThoughtParts(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.8-flash-high",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.8-flash-high","request":{"tools":[{"googleSearch":{}}]}}`)
+
+	cases := []struct {
+		name   string
+		chunks [][]byte
+	}{
+		{
+			name: "single_chunk",
+			chunks: [][]byte{
+				[]byte(`{
+					"response": {
+						"responseId": "resp-ws-thought-stream-1",
+						"modelVersion": "gemini-3.8-flash-high",
+						"candidates": [{
+							"content": {
+								"parts": [
+									{"text": "SECRET_INTERNAL_THOUGHT ", "thought": true},
+									{"text": "Beijing weather is clear today."}
+								]
+							},
+							"groundingMetadata": {
+								"webSearchQueries": ["Beijing weather"],
+								"groundingChunks": [{"web": {"uri": "https://example.com/weather", "title": "Weather"}}],
+								"groundingSupports": [{
+									"segment": {"startIndex": 0, "endIndex": 31, "text": "Beijing weather is clear today."},
+									"groundingChunkIndices": [0]
+								}]
+							},
+							"finishReason": "STOP"
+						}],
+						"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 6, "thoughtsTokenCount": 2, "totalTokenCount": 18}
+					}
+				}`),
+			},
+		},
+		{
+			name: "multi_chunk_with_buffered_text",
+			chunks: [][]byte{
+				[]byte(`{
+					"response": {
+						"responseId": "resp-ws-thought-stream-2",
+						"modelVersion": "gemini-3.8-flash-high",
+						"candidates": [{
+							"content": {
+								"parts": [
+									{"text": "PRE_GROUNDING_THOUGHT ", "thought": true},
+									{"text": "Beijing weather "}
+								]
+							}
+						}]
+					}
+				}`),
+				[]byte(`{
+					"response": {
+						"responseId": "resp-ws-thought-stream-2",
+						"modelVersion": "gemini-3.8-flash-high",
+						"candidates": [{
+							"content": {
+								"parts": [
+									{"text": "SECRET_INTERNAL_THOUGHT ", "thought": true},
+									{"text": "is clear today."}
+								]
+							},
+							"groundingMetadata": {
+								"webSearchQueries": ["Beijing weather"],
+								"groundingChunks": [{"web": {"uri": "https://example.com/weather", "title": "Weather"}}],
+								"groundingSupports": [{
+									"segment": {"startIndex": 0, "endIndex": 31, "text": "Beijing weather is clear today."},
+									"groundingChunkIndices": [0]
+								}]
+							},
+							"finishReason": "STOP"
+						}],
+						"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 6, "thoughtsTokenCount": 4, "totalTokenCount": 20}
+					}
+				}`),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			var out []byte
+			for _, chunk := range tc.chunks {
+				out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.8-flash-high", requestJSON, translatedRequestJSON, chunk, &param), nil)...)
+			}
+			out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.8-flash-high", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+			outText := string(out)
+
+			if strings.Contains(outText, "SECRET_INTERNAL_THOUGHT") || strings.Contains(outText, "PRE_GROUNDING_THOUGHT") {
+				t.Fatalf("stream web search leaked internal thought text:\n%s", outText)
+			}
+
+			var emittedText strings.Builder
+			var citedTexts []string
+			for _, line := range strings.Split(outText, "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(line, "data: ")
+				switch ojson.Get(payload, "delta.type").String() {
+				case "text_delta":
+					emittedText.WriteString(ojson.Get(payload, "delta.text").String())
+				case "citations_delta":
+					citedTexts = append(citedTexts, ojson.Get(payload, "delta.citation.cited_text").String())
+				}
+			}
+
+			if emittedText.String() != "Beijing weather is clear today." {
+				t.Fatalf("emitted text = %q, want %q\n%s", emittedText.String(), "Beijing weather is clear today.", outText)
+			}
+			if len(citedTexts) != 1 || citedTexts[0] != "Beijing weather is clear today." {
+				t.Fatalf("citedTexts = %#v, want [%q]\n%s", citedTexts, "Beijing weather is clear today.", outText)
+			}
+		})
+	}
+}
