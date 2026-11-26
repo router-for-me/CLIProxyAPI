@@ -40,6 +40,11 @@ func NormalizeClaudeToolChoiceDoc(provider, model string, doc *ojson.Doc) bool {
 		return false
 	}
 	model = strings.ToLower(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	// Provider-qualified routes (anthropic/claude-fable-5-1) name the same model;
+	// strip the prefix the way the executor's model classifiers do.
+	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
+		model = model[slash+1:]
+	}
 	if !claude55Model.MatchString(model) && !claudeFableForcedToolChoiceModel.MatchString(model) {
 		return false
 	}
