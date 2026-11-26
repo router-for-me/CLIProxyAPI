@@ -24,16 +24,17 @@ import (
 type authFilesCooldownResponse struct {
 	ObservedAt time.Time `json:"observed_at"`
 	Files      []struct {
-		ID             string                    `json:"id"`
-		AuthIndex      string                    `json:"auth_index"`
-		Name           string                    `json:"name"`
-		Status         string                    `json:"status"`
-		StatusMessage  string                    `json:"status_message"`
-		Unavailable    bool                      `json:"unavailable"`
-		NextRetryAfter time.Time                 `json:"next_retry_after"`
-		Cooldowns      json.RawMessage           `json:"cooldowns"`
-		Quota          map[string]any            `json:"quota"`
-		ModelQuotas    map[string]map[string]any `json:"model_quotas"`
+		ID                string                    `json:"id"`
+		AuthIndex         string                    `json:"auth_index"`
+		Name              string                    `json:"name"`
+		Status            string                    `json:"status"`
+		StatusMessage     string                    `json:"status_message"`
+		Unavailable       bool                      `json:"unavailable"`
+		UnavailableReason string                    `json:"unavailable_reason"`
+		NextRetryAfter    time.Time                 `json:"next_retry_after"`
+		Cooldowns         json.RawMessage           `json:"cooldowns"`
+		Quota             map[string]any            `json:"quota"`
+		ModelQuotas       map[string]map[string]any `json:"model_quotas"`
 	} `json:"files"`
 }
 
@@ -43,6 +44,23 @@ func requestAuthFilesCooldowns(t *testing.T, h *Handler, query string) authFiles
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files"+query, nil)
 	h.ListAuthFiles(ctx)
+	return decodeAuthFilesCooldowns(t, rec)
+}
+
+// requestAuthFilesCooldownsV8 exercises the maintained v8 surface, where the
+// unavailable_reason diagnostic is exposed without changing the deprecated v0 shape.
+func requestAuthFilesCooldownsV8(t *testing.T, h *Handler, query string) authFilesCooldownResponse {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Set(ConfigV8ContextKey, true)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials"+query, nil)
+	h.ListAuthFiles(ctx)
+	return decodeAuthFilesCooldowns(t, rec)
+}
+
+func decodeAuthFilesCooldowns(t *testing.T, rec *httptest.ResponseRecorder) authFilesCooldownResponse {
+	t.Helper()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -719,6 +737,239 @@ func TestListAuthFiles_ModelCooling_OtherModelPermanentBlocked(t *testing.T) {
 	}
 	if file.Status != string(coreauth.StatusError) {
 		t.Errorf("expected status=%q because all models are blocked, got %q", coreauth.StatusError, file.Status)
+	}
+}
+
+func TestListAuthFiles_StaleUnavailableWithoutRecoveryReportsReason(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID:          "stale-unavailable",
+		Index:       "idx-stale-unavailable",
+		FileName:    "stale-unavailable.json",
+		Provider:    "codex",
+		Status:      coreauth.StatusActive,
+		Unavailable: true,
+		Attributes:  map[string]string{"runtime_only": "true"},
+	})
+	before, _ := manager.GetByID("stale-unavailable")
+
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+	payload := requestAuthFilesCooldownsV8(t, h, "?name=stale-unavailable.json")
+	if len(payload.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(payload.Files))
+	}
+	file := payload.Files[0]
+	if file.Status != string(coreauth.StatusError) {
+		t.Errorf("expected status=%q, got %q", coreauth.StatusError, file.Status)
+	}
+	if strings.TrimSpace(file.StatusMessage) == "" {
+		t.Error("expected non-empty status_message for permanently blocked credential")
+	}
+	if !file.Unavailable {
+		t.Error("expected unavailable=true")
+	}
+	if file.UnavailableReason != "no_recovery_deadline" {
+		t.Errorf("expected unavailable_reason=%q, got %q", "no_recovery_deadline", file.UnavailableReason)
+	}
+	if string(file.Cooldowns) != "[]" {
+		t.Errorf("expected cooldowns=[], got %s", file.Cooldowns)
+	}
+
+	// The v0 response shape stays frozen; the reason key is v8-only
+	// (status/status_message still reflect the error).
+	if v0 := requestAuthFilesCooldowns(t, h, "?name=stale-unavailable.json"); len(v0.Files) != 1 || v0.Files[0].UnavailableReason != "" {
+		t.Fatalf("v0 response shape changed: %+v", v0.Files)
+	}
+
+	after, _ := manager.GetByID("stale-unavailable")
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("GET mutated auth state")
+	}
+}
+
+func TestListAuthFiles_PersistentAuthFailureKeepsAuthFailureReason(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID:            "stale-auth-failure",
+		Index:         "idx-stale-auth-failure",
+		FileName:      "stale-auth-failure.json",
+		Provider:      "codex",
+		Status:        coreauth.StatusError,
+		StatusMessage: "unauthorized",
+		Unavailable:   true,
+		LastError:     &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+		Attributes:    map[string]string{"runtime_only": "true"},
+	})
+
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+	payload := requestAuthFilesCooldownsV8(t, h, "?name=stale-auth-failure.json")
+	if len(payload.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(payload.Files))
+	}
+	file := payload.Files[0]
+	if !file.Unavailable {
+		t.Error("expected unavailable=true for a persistent auth failure")
+	}
+	if file.Status != string(coreauth.StatusError) {
+		t.Errorf("expected status=%q, got %q", coreauth.StatusError, file.Status)
+	}
+	if file.StatusMessage != "unauthorized" {
+		t.Errorf("expected status_message=%q unchanged, got %q", "unauthorized", file.StatusMessage)
+	}
+	if file.UnavailableReason != "auth_failure" {
+		t.Errorf("expected unavailable_reason=%q, got %q", "auth_failure", file.UnavailableReason)
+	}
+}
+
+func TestAuthFileCooldownReasons(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	now := time.Now().UTC()
+	live := now.Add(30 * time.Minute)
+	later := now.Add(45 * time.Minute)
+
+	tests := []struct {
+		name            string
+		auth            *coreauth.Auth
+		listable        bool
+		wantReason      string
+		wantStatus      coreauth.Status
+		wantUnavailable bool
+		wantNextRetry   time.Time
+	}{
+		{
+			name: "disabled",
+			auth: &coreauth.Auth{
+				ID: "disabled", Status: coreauth.StatusDisabled, Disabled: true, Unavailable: true,
+			},
+			wantReason:      "",
+			wantStatus:      coreauth.StatusDisabled,
+			wantUnavailable: true,
+		},
+		{
+			name: "auth failure",
+			auth: &coreauth.Auth{
+				ID: "auth-failure", Index: "idx-auth-failure", FileName: "auth-failure.json",
+				Status: coreauth.StatusError, StatusMessage: "unauthorized", Unavailable: true,
+				LastError:  &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized"},
+				Attributes: map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "auth_failure", wantStatus: coreauth.StatusError, wantUnavailable: true,
+		},
+		{
+			name: "live credential cooldown",
+			auth: &coreauth.Auth{
+				ID: "cooldown", Index: "idx-cooldown", FileName: "cooldown.json",
+				Status: coreauth.StatusError, Unavailable: true,
+				NextRetryAfter: live,
+				Quota:          coreauth.QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: later},
+				Attributes:     map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "cooldown", wantStatus: coreauth.StatusError,
+			wantUnavailable: true, wantNextRetry: later,
+		},
+		{
+			name: "all models blocked",
+			auth: &coreauth.Auth{
+				ID: "model-blocked", Index: "idx-model-blocked", FileName: "model-blocked.json",
+				Status: coreauth.StatusError, Unavailable: true,
+				ModelStates: map[string]*coreauth.ModelState{
+					"cooling":   {Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: live},
+					"permanent": {Status: coreauth.StatusError, Unavailable: true},
+				},
+				Attributes: map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "model_blocked", wantStatus: coreauth.StatusError, wantUnavailable: true,
+		},
+		{
+			name: "quota exceeded without deadline",
+			auth: &coreauth.Auth{
+				ID: "quota", Index: "idx-quota", FileName: "quota.json",
+				Status: coreauth.StatusActive, Unavailable: true,
+				Quota:      coreauth.QuotaState{Exceeded: true, Reason: "credential_quota"},
+				Attributes: map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "", wantStatus: coreauth.StatusActive, wantUnavailable: true,
+		},
+		{
+			name: "scheduled refresh",
+			auth: &coreauth.Auth{
+				ID: "refresh", Index: "idx-refresh", FileName: "refresh.json",
+				Status: coreauth.StatusActive, Unavailable: true, NextRefreshAfter: live,
+				Attributes: map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "", wantStatus: coreauth.StatusActive, wantUnavailable: true,
+		},
+		{
+			name: "requires sign in",
+			auth: &coreauth.Auth{
+				ID: "sign-in", Index: "idx-sign-in", FileName: "sign-in.json",
+				Status: coreauth.StatusActive, Unavailable: true, RequiresSignIn: true,
+				Attributes: map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "", wantStatus: coreauth.StatusActive, wantUnavailable: true,
+		},
+		{
+			name: "stale unavailable",
+			auth: &coreauth.Auth{
+				ID: "stale", Index: "idx-stale", FileName: "stale.json",
+				Status: coreauth.StatusActive, Unavailable: true,
+				Attributes: map[string]string{"runtime_only": "true"},
+			},
+			listable: true, wantReason: "no_recovery_deadline", wantStatus: coreauth.StatusError, wantUnavailable: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			unavailable, status, statusMessage, nextRetry, reason := reconcileAuthFileCooldownState(tc.auth, now)
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", status, tc.wantStatus)
+			}
+			if unavailable != tc.wantUnavailable {
+				t.Errorf("unavailable = %v, want %v", unavailable, tc.wantUnavailable)
+			}
+			if !nextRetry.Equal(tc.wantNextRetry) {
+				t.Errorf("nextRetry = %v, want %v", nextRetry, tc.wantNextRetry)
+			}
+			if tc.wantReason == "no_recovery_deadline" && strings.TrimSpace(statusMessage) == "" {
+				t.Error("expected non-empty status_message for no_recovery_deadline")
+			}
+
+			if !tc.listable {
+				return
+			}
+			cfg := &config.Config{AuthDir: t.TempDir()}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			registerAuthForLookupTest(t, manager, tc.auth)
+			h := NewHandlerWithoutConfigFilePath(cfg, manager)
+			payload := requestAuthFilesCooldownsV8(t, h, "?name="+tc.auth.FileName)
+			if len(payload.Files) != 1 {
+				t.Fatalf("expected 1 file, got %d", len(payload.Files))
+			}
+			file := payload.Files[0]
+			if file.UnavailableReason != tc.wantReason {
+				t.Errorf("unavailable_reason = %q, want %q", file.UnavailableReason, tc.wantReason)
+			}
+			if file.Status != string(tc.wantStatus) {
+				t.Errorf("status = %q, want %q", file.Status, tc.wantStatus)
+			}
+			if file.Unavailable != tc.wantUnavailable {
+				t.Errorf("unavailable = %v, want %v", file.Unavailable, tc.wantUnavailable)
+			}
+			if !file.NextRetryAfter.Equal(tc.wantNextRetry) {
+				t.Errorf("next_retry_after = %v, want %v", file.NextRetryAfter, tc.wantNextRetry)
+			}
+		})
 	}
 }
 

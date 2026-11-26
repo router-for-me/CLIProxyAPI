@@ -138,6 +138,86 @@ func TestClearStaleUnavailableState_PreservesRealBlocks(t *testing.T) {
 	}
 }
 
+func TestIsStaleUnavailable_MatchesClearStaleUnavailableState(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+	tests := []struct {
+		name       string
+		mutate     func(*Auth)
+		wantStale  bool
+		wantClears bool
+	}{
+		{
+			name:       "no recovery deadline",
+			wantStale:  true,
+			wantClears: true,
+		},
+		{
+			name: "quota exceeded without deadline",
+			mutate: func(a *Auth) {
+				a.Quota = QuotaState{Exceeded: true, Reason: "credential_quota"}
+			},
+		},
+		{
+			name: "future quota deadline",
+			mutate: func(a *Auth) {
+				a.Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: future}
+			},
+		},
+		{
+			name: "scheduled refresh",
+			mutate: func(a *Auth) {
+				a.NextRefreshAfter = future
+			},
+		},
+		{
+			name: "requires sign in without valid token",
+			mutate: func(a *Auth) {
+				a.RequiresSignIn = true
+			},
+		},
+		{
+			name: "requires sign in with valid token",
+			mutate: func(a *Auth) {
+				a.RequiresSignIn = true
+				a.Metadata = map[string]any{"type": "codex", "access_token": "valid-access-token", "expired": future.Format(time.RFC3339)}
+			},
+			wantStale:  true,
+			wantClears: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &Auth{
+				ID:          "predicate-auth",
+				Provider:    "test",
+				Status:      StatusActive,
+				Unavailable: true,
+				Generation:  5,
+			}
+			if tc.mutate != nil {
+				tc.mutate(auth)
+			}
+			if got := IsStaleUnavailable(auth, now); got != tc.wantStale {
+				t.Fatalf("IsStaleUnavailable() = %v, want %v", got, tc.wantStale)
+			}
+			if got := clearStaleUnavailableState(auth, now); got != tc.wantClears {
+				t.Fatalf("clearStaleUnavailableState() = %v, want %v", got, tc.wantClears)
+			}
+			if tc.wantStale {
+				if auth.Unavailable || auth.Generation != 6 {
+					t.Fatalf("stale auth was not cleared: Unavailable=%v Generation=%d", auth.Unavailable, auth.Generation)
+				}
+				return
+			}
+			if !auth.Unavailable || auth.Generation != 5 {
+				t.Fatalf("preserved real block was mutated: Unavailable=%v Generation=%d", auth.Unavailable, auth.Generation)
+			}
+		})
+	}
+}
+
 func TestClearStaleUnavailableState_ClearsStaleModelStates(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	future := now.Add(time.Hour)

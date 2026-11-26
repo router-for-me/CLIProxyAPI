@@ -540,9 +540,9 @@ func isModelStateBlocked(state *coreauth.ModelState, now time.Time) bool {
 	return true
 }
 
-func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavailable bool, status coreauth.Status, statusMessage string, nextRetry time.Time) {
+func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavailable bool, status coreauth.Status, statusMessage string, nextRetry time.Time, reason string) {
 	if auth == nil {
-		return false, coreauth.StatusActive, "", time.Time{}
+		return false, coreauth.StatusActive, "", time.Time{}, ""
 	}
 	unavailable = auth.Unavailable
 	status = auth.Status
@@ -552,7 +552,7 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 	}
 
 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return unavailable, coreauth.StatusDisabled, statusMessage, nextRetry
+		return unavailable, coreauth.StatusDisabled, statusMessage, nextRetry, ""
 	}
 
 	// Never reconcile an active authentication or token failure to active.
@@ -563,7 +563,7 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 		if statusMessage == "" && auth.RequiresSignIn {
 			statusMessage = "unauthorized (refresh token invalid)"
 		}
-		return true, coreauth.StatusError, statusMessage, nextRetry
+		return true, coreauth.StatusError, statusMessage, nextRetry, "auth_failure"
 	}
 
 	// Check if there is an active credential-level cooldown.
@@ -617,7 +617,11 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 		if !nextRetry.IsZero() && !nextRetry.After(now) {
 			nextRetry = time.Time{}
 		}
-		return true, coreauth.StatusError, statusMessage, nextRetry
+		reason := "model_blocked"
+		if hasActiveCredCooldown {
+			reason = "cooldown"
+		}
+		return true, coreauth.StatusError, statusMessage, nextRetry, reason
 	}
 
 	// If the credential was not marked unavailable and has no active credential cooldown, keep unavailable=false.
@@ -626,12 +630,12 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 			status = coreauth.StatusActive
 			statusMessage = ""
 		}
-		return false, status, statusMessage, time.Time{}
+		return false, status, statusMessage, time.Time{}, ""
 	}
 
 	// If a cooldown was recorded but has expired (and no active model cooldown blocks all models):
 	if hadCooldown && !hasActiveCredCooldown && !hasActiveModelCooldown {
-		return false, coreauth.StatusActive, "", time.Time{}
+		return false, coreauth.StatusActive, "", time.Time{}, ""
 	}
 
 	// If partial models are still cooling, the credential as a whole remains available for other models.
@@ -640,7 +644,7 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 			status = coreauth.StatusActive
 			statusMessage = ""
 		}
-		return false, status, statusMessage, time.Time{}
+		return false, status, statusMessage, time.Time{}, ""
 	}
 
 	// If nextRetry is in the past, do not expose a past retry deadline.
@@ -648,7 +652,18 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 		nextRetry = time.Time{}
 	}
 
-	return unavailable, status, statusMessage, nextRetry
+	// A credential blocked without any recovery deadline can never be scheduled again.
+	// Surface it as an error instead of leaving a contradictory active/unavailable entry.
+	// Real blocks (quota, refresh, sign-in, forced cooldown) must keep their own reason.
+	if unavailable && nextRetry.IsZero() && coreauth.IsStaleUnavailable(auth, now) {
+		status = coreauth.StatusError
+		if strings.TrimSpace(statusMessage) == "" {
+			statusMessage = "unavailable (no recovery deadline)"
+		}
+		return true, status, statusMessage, time.Time{}, "no_recovery_deadline"
+	}
+
+	return unavailable, status, statusMessage, nextRetry, ""
 }
 
 func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQuotaContext) gin.H {
@@ -668,7 +683,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if name == "" {
 		name = auth.ID
 	}
-	unavailable, status, statusMessage, nextRetryAfter := reconcileAuthFileCooldownState(auth, time.Now().UTC())
+	unavailable, status, statusMessage, nextRetryAfter, unavailableReason := reconcileAuthFileCooldownState(auth, time.Now().UTC())
 	entry := gin.H{
 		"id":             auth.ID,
 		"auth_index":     auth.Index,
@@ -818,6 +833,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		entry["requires_sign_in"] = auth.RequiresSignIn
 		if statusMessage != "" {
 			entry["status_message"] = coreauth.SanitizeRenewalMessage(statusMessage)
+		}
+		// The deprecated v0 response shape stays frozen; only the maintained v8
+		// surface explains why an unavailable credential cannot recover.
+		if unavailableReason != "" {
+			entry["unavailable_reason"] = unavailableReason
 		}
 		entry["renewal_state"] = auth.RenewalStateAt(nowUTC)
 		recoveryStage := auth.RecoveryStageAt(nowUTC)

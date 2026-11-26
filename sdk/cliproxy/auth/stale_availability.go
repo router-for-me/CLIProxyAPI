@@ -2,10 +2,9 @@ package auth
 
 import "time"
 
-// clearStaleUnavailableState clears an "unavailable" flag that has no recovery
-// deadline and no terminal condition. Without this, availabilityBlock would
-// exclude the credential forever while cooldown snapshots stay empty.
-func clearStaleUnavailableState(auth *Auth, now time.Time) bool {
+// IsStaleUnavailable reports whether the credential's unavailable flag has
+// no recovery deadline and no terminal condition that keeps it blocked.
+func IsStaleUnavailable(auth *Auth, now time.Time) bool {
 	if auth == nil || !auth.Unavailable {
 		return false
 	}
@@ -28,6 +27,16 @@ func clearStaleUnavailableState(auth *Auth, now time.Time) bool {
 		return false
 	}
 	if effectiveAuthForceUntil(auth).After(now) {
+		return false
+	}
+	return true
+}
+
+// clearStaleUnavailableState clears an "unavailable" flag that has no recovery
+// deadline and no terminal condition. Without this, availabilityBlock would
+// exclude the credential forever while cooldown snapshots stay empty.
+func clearStaleUnavailableState(auth *Auth, now time.Time) bool {
+	if !IsStaleUnavailable(auth, now) {
 		return false
 	}
 
