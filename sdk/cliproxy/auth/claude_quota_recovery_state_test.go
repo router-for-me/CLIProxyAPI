@@ -258,32 +258,7 @@ func TestClaudeQuotaRecoveryIgnoresExpiredSiblingError(t *testing.T) {
 	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-haiku", RetryAfter: &outage, Error: &Error{HTTPStatus: 503, Message: "overloaded"}})
 	quota := 5 * 24 * time.Hour
 	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
-	// Move the 503 deadlines into the past, as if the hour has gone by.
-	past := time.Now().Add(-time.Minute)
-	m.mu.Lock()
-	cur := m.auths[a.ID]
-	for _, s := range []*ModelState{cur.ModelStates["claude-haiku"], cur.ModelStates["claude-haiku"].credentialQuotaShadow} {
-		if s == nil {
-			continue
-		}
-		s.NextRetryAfter = past
-		if !s.nonQuotaCooldownUntil.IsZero() {
-			s.nonQuotaCooldownUntil = past
-		}
-		if !s.nonCapacityCooldownUntil.IsZero() {
-			s.nonCapacityCooldownUntil = past
-		}
-	}
-	if !cur.nonQuotaCooldownUntil.IsZero() {
-		cur.nonQuotaCooldownUntil = past
-	}
-	if !cur.credentialRetryAfter.IsZero() {
-		cur.credentialRetryAfter = past
-	}
-	if !cur.nonAuthCredentialRetryAfter.IsZero() {
-		cur.nonAuthCredentialRetryAfter = past
-	}
-	m.mu.Unlock()
+	expireNonQuotaDeadlines(m, a.ID, "claude-haiku")
 	snapshot, _ := m.GetByID(a.ID)
 	if got := snapshot.ModelStates["claude-haiku"].LastError; got == nil || got.HTTPStatus != 503 {
 		t.Fatalf("fixture: haiku LastError=%+v, want the old 503", got)
@@ -321,5 +296,77 @@ func TestClaudeQuotaRecoveryKeepsFailureAcrossReplacement(t *testing.T) {
 	after, _ := m.GetByID(a.ID)
 	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); !blocked {
 		t.Fatal("a reload reset the failure count and an old usage response cleared a newer failure")
+	}
+}
+
+// expireNonQuotaDeadlines moves the non-quota deadlines of one model and of the
+// auth into the past, as if the retry window has gone by.
+func expireNonQuotaDeadlines(m *Manager, authID, model string) {
+	past := time.Now().Add(-time.Minute)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur := m.auths[authID]
+	for _, s := range []*ModelState{cur.ModelStates[model], cur.ModelStates[model].credentialQuotaShadow} {
+		if s == nil {
+			continue
+		}
+		if !s.Quota.Exceeded {
+			s.NextRetryAfter = past
+		}
+		for _, d := range []*time.Time{&s.nonQuotaCooldownUntil, &s.nonCapacityCooldownUntil} {
+			if !d.IsZero() {
+				*d = past
+			}
+		}
+	}
+	for _, d := range []*time.Time{&cur.nonQuotaCooldownUntil, &cur.credentialRetryAfter, &cur.nonAuthCredentialRetryAfter} {
+		if !d.IsZero() {
+			*d = past
+		}
+	}
+}
+
+func TestClaudeQuotaRecoveryIgnoresExpiredAuthError(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
+	if _, err := m.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	quota := 5 * 24 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+	outage := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-haiku", RetryAfter: &outage, Error: &Error{HTTPStatus: 503, Message: "overloaded"}})
+	expireNonQuotaDeadlines(m, a.ID, "claude-haiku")
+	snapshot, _ := m.GetByID(a.ID)
+	if snapshot.LastError == nil || snapshot.LastError.HTTPStatus != 503 || !snapshot.Quota.Exceeded {
+		t.Fatalf("fixture: LastError=%+v quota=%+v, want an old 503 under a credential quota", snapshot.LastError, snapshot.Quota)
+	}
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(a.ID)
+	if after.Quota.Exceeded {
+		t.Fatal("an expired 503 on the auth record kept the account blocked")
+	}
+}
+
+func TestClaudeQuotaRecoveryIgnoresUnavailableDisabledModel(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	newModelBlockedClaudeAuth(t, m, t.Name())
+	m.mu.Lock()
+	m.auths[t.Name()].ModelStates["claude-retired"] = &ModelState{Status: StatusDisabled, Unavailable: true, StatusMessage: "tos_violation"}
+	m.mu.Unlock()
+	snapshot, _ := m.GetByID(t.Name())
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(t.Name())
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); blocked {
+		t.Fatal("a disabled model stopped the recovery of another model")
+	}
+	if s := after.ModelStates["claude-retired"]; s == nil || s.Status != StatusDisabled {
+		t.Fatalf("recovery re-enabled a disabled model: %+v", s)
 	}
 }

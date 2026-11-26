@@ -85,19 +85,24 @@ func claudeQuotaCandidate(a *Auth) bool {
 		return false
 	}
 	now := time.Now()
-	blocked := a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now)
-	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests {
+	credentialQuota := a.Quota.Exceeded && a.Quota.Reason == "credential_quota"
+	blocked := credentialQuota && a.Quota.NextRecoverAt.After(now)
+	// Under a credential quota, a sibling result can leave an old server error
+	// on the auth. The live deadlines below show whether it still blocks.
+	// Other errors, such as 401 or 403, are about the credential and stay.
+	staleServerError := credentialQuota && a.LastError != nil && a.LastError.HTTPStatus >= http.StatusInternalServerError
+	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests && !staleServerError {
 		return false
 	}
-	// These deadlines come from failures other than quota, so usage data
-	// cannot clear them.
-	// A forced cooldown from the config also stays until its deadline.
+	// These deadlines come from failures other than quota, or from a forced
+	// cooldown in the config, so usage data cannot clear them.
 	if a.credentialRetryAfter.After(now) || a.nonAuthCredentialRetryAfter.After(now) || a.nonQuotaCooldownUntil.After(now) || a.forceCooldownUntil.After(now) || a.quotaForceCooldownUntil.After(now) || a.credQuotaForceUntil.After(now) {
 		return false
 	}
 	// Usage does not establish recovery from unrelated model/transport failures.
 	for _, s := range a.ModelStates {
-		if s == nil {
+		// The reset keeps a disabled model as it is, so it cannot stop recovery.
+		if s == nil || s.Status == StatusDisabled {
 			continue
 		}
 		if isModelStateActiveCooldown(s.credentialQuotaShadow, now) || s.nonQuotaCooldownUntil.After(now) || s.nonCapacityCooldownUntil.After(now) || s.forceCooldownUntil.After(now) || s.quotaForceCooldownUntil.After(now) {
