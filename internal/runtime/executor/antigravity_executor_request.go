@@ -57,6 +57,11 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, credential, model.ID, time.Now(), useCredits); errCooldown != nil {
 				return rejectCooldown(model.ID, errCooldown)
 			}
+		} else if useCredits {
+			if errCooldown := cliproxyauth.CheckAntigravityDirectCreditsModel(ctx, credential, model.ID, time.Now()); errCooldown != nil {
+				prepared.cooldownRejected = true
+				return cliproxyauth.RejectAntigravityTarget(errCooldown)
+			}
 		}
 		if errCooldown := e.checkAntigravityRequestCooldown(ctx, credential, model.ID, countTokens); errCooldown != nil {
 			return rejectCooldown(model.ID, errCooldown)
@@ -98,6 +103,11 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, updatedAuth, prepared.model.ID, time.Now(), useCredits); errCooldown != nil {
 				err := rejectCooldown(prepared.model.ID, errCooldown)
 				return prepared, err
+			}
+		} else if useCredits {
+			if errCooldown := cliproxyauth.CheckAntigravityDirectCreditsModel(ctx, updatedAuth, prepared.model.ID, time.Now()); errCooldown != nil {
+				prepared.cooldownRejected = true
+				return prepared, cliproxyauth.RejectAntigravityTarget(errCooldown)
 			}
 		}
 		prepared.auth = updatedAuth
