@@ -434,6 +434,37 @@ func isPayloadReplacementsPath(path []string) bool {
 	return len(path) >= 3 && path[0] == "payload" && path[1] == "replace" && path[2] == "replacements"
 }
 
+// isPreservedPointerBoolPath reports whether path targets a pointer-backed *bool
+// field whose explicit false value must survive zero-value pruning on save.
+func isPreservedPointerBoolPath(path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	switch path[len(path)-1] {
+	case "cache-user-id", "disable-cooling", "oauth-include-create-api-key":
+		return true
+	case "openapi":
+		switch len(path) {
+		case 2:
+			return path[0] == "vertex-api-key"
+		case 3:
+			return (path[0] == "vertex-api-key" && path[1] == "models") ||
+				path[0] == "oauth-model-alias" ||
+				path[0] == "oauth-settings"
+		default:
+			return false
+		}
+	case "interactions":
+		return len(path) == 2 && path[0] == "vertex-api-key"
+	case "disable-codex-cloaking":
+		// Only codex-api-key[].disable-codex-cloaking is pointer-backed (*bool);
+		// global codex.disable-codex-cloaking is a plain bool whose false is the default.
+		return len(path) == 2 && path[0] == "codex-api-key"
+	default:
+		return false
+	}
+}
+
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) || isPayloadReplacementsPath(path) {
 		return false
@@ -468,20 +499,29 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
-	// Pointer-backed booleans (such as cache-user-id, disable-cooling, and oauth-include-create-api-key): explicit values are meaningful and must be preserved.
-	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling" || path[len(path)-1] == "oauth-include-create-api-key") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+	// Pointer-backed booleans (such as cache-user-id, disable-cooling,
+	// oauth-include-create-api-key, openapi, interactions, and
+	// codex-api-key[].disable-codex-cloaking): explicit values are meaningful
+	// and must be preserved.
+	if isPreservedPointerBoolPath(path) && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
 		return false
 	}
 
-	// A parent mapping carrying an explicit session-date-pin-days or
-	// oauth-include-create-api-key value must survive the zero-value check below,
-	// or the new key is never written.
+	// A parent mapping carrying an explicit pointer-backed scalar override must
+	// survive the zero-value check below, or the new key is never written.
 	if node != nil && node.Kind == yaml.MappingNode {
 		if pinIdx := findMapKeyIndex(node, "session-date-pin-days"); pinIdx >= 0 {
 			return false
 		}
-		if scopeIdx := findMapKeyIndex(node, "oauth-include-create-api-key"); scopeIdx >= 0 {
-			return false
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			if keyNode == nil || valNode == nil {
+				continue
+			}
+			if valNode.Kind == yaml.ScalarNode && valNode.Tag == "!!bool" && isPreservedPointerBoolPath(appendPath(path, keyNode.Value)) {
+				return false
+			}
 		}
 	}
 

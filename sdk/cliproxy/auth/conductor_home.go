@@ -888,11 +888,18 @@ func (m *Manager) replaceHomeSelectionAuth(selection *HomeDispatchSelection, aut
 		return
 	}
 	for sessionID, owners := range m.homeRuntimeAuthOwners {
+		sessionAuths := m.homeRuntimeAuths[sessionID]
+		if sessionAuths == nil {
+			continue
+		}
 		for authID, owner := range owners {
-			if owner != selection || m.homeRuntimeAuths[sessionID] == nil {
+			if owner != selection {
 				continue
 			}
-			m.homeRuntimeAuths[sessionID][authID] = updated.Clone()
+			if existing, exists := sessionAuths[authID]; !exists || existing == nil {
+				continue
+			}
+			sessionAuths[authID] = updated.Clone()
 		}
 	}
 	m.mu.Unlock()
