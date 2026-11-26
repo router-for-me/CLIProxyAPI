@@ -129,9 +129,9 @@ func TestUnixPluginReloadAfterShutdownUsesReplacedFile(t *testing.T) {
 
 	secondClient.Shutdown()
 
-	// Reopening without a content change must reuse the already resident
-	// image instead of mapping a second copy of the same runtime, and the
-	// shutdown above must have reached that image exactly once.
+	// Reopening without a content change must map a fresh image. Reusing the
+	// resident image would bring back the shut-down instance and its package
+	// globals.
 	thirdClient, errOpenThird := dynamicLibraryLoader{}.Open(file, host)
 	if errOpenThird != nil {
 		t.Fatalf("Open() third error = %v", errOpenThird)
@@ -140,8 +140,8 @@ func TestUnixPluginReloadAfterShutdownUsesReplacedFile(t *testing.T) {
 	if !okThird {
 		t.Fatalf("Open() third client type = %T, want *dynamicLibraryClient", thirdClient)
 	}
-	if third.handle != second.handle {
-		t.Fatalf("third handle = %v, want reused resident handle %v", third.handle, second.handle)
+	if third.handle == second.handle {
+		t.Fatalf("third handle = %v, want a fresh image, not the shut-down handle", third.handle)
 	}
 	respThird, errCallThird := thirdClient.Call(context.Background(), "test.marker", nil)
 	if errCallThird != nil {
@@ -150,8 +150,8 @@ func TestUnixPluginReloadAfterShutdownUsesReplacedFile(t *testing.T) {
 	if string(respThird) != "v2" {
 		t.Fatalf("Call() third response = %q, want v2", respThird)
 	}
-	if gotCalls := testShutdownCallCount(t, thirdClient); gotCalls != baselineCalls+1 {
-		t.Fatalf("plugin shutdown calls = %d, want baseline %d + 1", gotCalls, baselineCalls)
+	if gotCalls := testShutdownCallCount(t, thirdClient); gotCalls != baselineCalls {
+		t.Fatalf("plugin shutdown calls = %d, want %d from fresh package globals", gotCalls, baselineCalls)
 	}
 	thirdClient.Shutdown()
 }
