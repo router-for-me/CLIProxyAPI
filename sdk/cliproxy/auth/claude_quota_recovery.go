@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -13,6 +14,56 @@ import (
 
 const claudeQuotaCheckInterval = 5 * time.Minute
 const claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
+const claudeUsageMaxBody = 1 << 20
+
+const claudeQuotaProbeConcurrency = 4
+
+// claudeQuotaProbeSet tracks in-flight usage probes. The zero value is ready.
+type claudeQuotaProbeSet struct {
+	mu       sync.Mutex
+	inFlight map[string]struct{}
+	slots    chan struct{}
+	wg       sync.WaitGroup
+}
+
+// tryStart reserves the probe of authID. It returns false when a probe for
+// authID is in flight, so one account never has two probes.
+func (s *claudeQuotaProbeSet) tryStart(authID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.inFlight[authID]; ok {
+		return false
+	}
+	if s.inFlight == nil {
+		s.inFlight = make(map[string]struct{})
+		s.slots = make(chan struct{}, claudeQuotaProbeConcurrency)
+	}
+	s.inFlight[authID] = struct{}{}
+	s.wg.Add(1)
+	return true
+}
+
+// acquire waits for a free probe slot. It returns false when ctx ends first.
+// Only a goroutine started after tryStart calls it, so s.slots is set.
+func (s *claudeQuotaProbeSet) acquire(ctx context.Context) bool {
+	select {
+	case s.slots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *claudeQuotaProbeSet) release() { <-s.slots }
+
+func (s *claudeQuotaProbeSet) finish(authID string) {
+	s.mu.Lock()
+	delete(s.inFlight, authID)
+	s.mu.Unlock()
+	s.wg.Done()
+}
+
+func (s *claudeQuotaProbeSet) wait() { s.wg.Wait() }
 
 // Reuse the auth refresh lifecycle so shutdown cancels outstanding quota reads.
 func (m *Manager) watchClaudeQuota(ctx context.Context) {
@@ -70,31 +121,48 @@ func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
 		if !claudeQuotaCandidate(a) {
 			continue
 		}
-		probeCtx := ctx
-		if rt := m.roundTripperFor(a); rt != nil {
-			probeCtx = context.WithValue(probeCtx, "cliproxy.roundtripper", rt)
-		}
-		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, claudeUsageURL, nil)
-		if err != nil {
+		// AGENTS.md forbids a deadline after the connection opens, so a stalled
+		// probe must hold only its own slot and not the loop.
+		if !m.claudeQuotaProbes.tryStart(a.ID) {
 			continue
 		}
-		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-		req.Header.Set("User-Agent", "CLIProxyAPI")
-		resp, err := m.HttpRequest(probeCtx, a, req)
-		if err != nil {
-			continue
-		}
-		body, errRead := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-		errClose := resp.Body.Close()
-		// Redirects and incomplete responses cannot establish recovery.
-		if len(body) > 1<<20 || errRead != nil || errClose != nil || resp.StatusCode != http.StatusOK || resp.Request == nil || resp.Request.Response != nil || resp.Request.URL.String() != claudeUsageURL || resp.Request.Header.Get("Authorization") != "Bearer "+authMetadataString(a, "access_token") {
-			continue
-		}
-		if claudeUsageAvailable(body) {
-			if errRestore := m.restoreClaudeQuota(ctx, a); errRestore != nil {
-				log.WithError(errRestore).Warn("Failed to persist restored Claude quota")
+		go func(a *Auth) {
+			defer m.claudeQuotaProbes.finish(a.ID)
+			if !m.claudeQuotaProbes.acquire(ctx) {
+				return
 			}
-		}
+			defer m.claudeQuotaProbes.release()
+			m.probeClaudeQuota(ctx, a)
+		}(a)
+	}
+}
+
+func (m *Manager) probeClaudeQuota(ctx context.Context, a *Auth) {
+	probeCtx := ctx
+	if rt := m.roundTripperFor(a); rt != nil {
+		probeCtx = context.WithValue(probeCtx, "cliproxy.roundtripper", rt)
+	}
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, claudeUsageURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("User-Agent", "CLIProxyAPI")
+	resp, err := m.HttpRequest(probeCtx, a, req)
+	if err != nil {
+		return
+	}
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, claudeUsageMaxBody+1))
+	errClose := resp.Body.Close()
+	// Redirects and incomplete responses cannot establish recovery.
+	if len(body) > claudeUsageMaxBody || errRead != nil || errClose != nil || resp.StatusCode != http.StatusOK || resp.Request == nil || resp.Request.Response != nil || resp.Request.URL.String() != claudeUsageURL || resp.Request.Header.Get("Authorization") != "Bearer "+authMetadataString(a, "access_token") {
+		return
+	}
+	if !claudeUsageAvailable(body) {
+		return
+	}
+	if errRestore := m.restoreClaudeQuota(ctx, a); errRestore != nil {
+		log.WithError(errRestore).Warn("Failed to persist restored Claude quota")
 	}
 }
 
@@ -173,10 +241,56 @@ func (m *Manager) restoreClaudeQuota(ctx context.Context, snapshot *Auth) error 
 		return ctx.Err()
 	}
 	_, _, err := m.resetQuota(ctx, snapshot.ID, func(current *Auth) bool {
-		return ctx.Err() == nil && !m.HomeEnabled() && current.RegistrationEpoch == snapshot.RegistrationEpoch && current.Generation == snapshot.Generation && claudeQuotaCandidate(current)
-	})
+		return ctx.Err() == nil && !m.HomeEnabled() && current.RegistrationEpoch == snapshot.RegistrationEpoch && authMetadataString(current, "access_token") == authMetadataString(snapshot, "access_token") && claudeQuotaNoNewerFailure(snapshot, current) && claudeQuotaCandidate(current)
+	}, true)
 	if err != nil {
 		return fmt.Errorf("restore Claude quota: %w", err)
 	}
 	return nil
+}
+
+// claudeQuotaNoNewerFailure reports whether every failure on current already
+// existed in snapshot. Successes clear failures, so they do not stop a
+// recovery. A failure recorded after the probe started does.
+func claudeQuotaNoNewerFailure(snapshot, current *Auth) bool {
+	if current.Unavailable && !snapshot.Unavailable {
+		return false
+	}
+	if !current.NextRetryAfter.IsZero() && !current.NextRetryAfter.Equal(snapshot.NextRetryAfter) {
+		return false
+	}
+	if !sameQuotaFailure(snapshot.Quota, current.Quota) || !sameFailureError(snapshot.LastError, current.LastError) {
+		return false
+	}
+	for model, cur := range current.ModelStates {
+		if cur == nil || !modelStateHasFailure(cur) {
+			continue
+		}
+		prev := snapshot.ModelStates[model]
+		if prev == nil || cur.Status != prev.Status || cur.Unavailable != prev.Unavailable || !cur.NextRetryAfter.Equal(prev.NextRetryAfter) || cur.cooldownRecordedSeq != prev.cooldownRecordedSeq {
+			return false
+		}
+		if !sameQuotaFailure(prev.Quota, cur.Quota) || !sameFailureError(prev.LastError, cur.LastError) {
+			return false
+		}
+	}
+	return true
+}
+
+func modelStateHasFailure(s *ModelState) bool {
+	return s.LastError != nil || s.Unavailable || s.Quota.Exceeded || !s.NextRetryAfter.IsZero() || s.Status == StatusError
+}
+
+func sameQuotaFailure(prev, cur QuotaState) bool {
+	if !cur.Exceeded {
+		return true
+	}
+	return prev.Exceeded && prev.Reason == cur.Reason && prev.NextRecoverAt.Equal(cur.NextRecoverAt) && prev.BackoffLevel == cur.BackoffLevel
+}
+
+func sameFailureError(prev, cur *Error) bool {
+	if cur == nil {
+		return true
+	}
+	return prev != nil && prev.HTTPStatus == cur.HTTPStatus && prev.Code == cur.Code && prev.Message == cur.Message
 }

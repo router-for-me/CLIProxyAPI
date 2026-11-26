@@ -54,11 +54,12 @@ func TestClaudeQuotaReconciliationHTTP(t *testing.T) {
 				}
 				calls++
 				if r.Method != "GET" || r.URL.String() != claudeUsageURL || r.Header.Get("anthropic-beta") != "oauth-2025-04-20" {
-					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL)
 				}
 				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Request: r}, nil
 			}})
 			m.reconcileClaudeQuota(context.Background())
+			m.claudeQuotaProbes.wait()
 			if calls != 1 {
 				t.Fatalf("usage requests=%d", calls)
 			}
@@ -68,6 +69,7 @@ func TestClaudeQuotaReconciliationHTTP(t *testing.T) {
 			}
 			if tc.recover {
 				m.reconcileClaudeQuota(context.Background())
+				m.claudeQuotaProbes.wait()
 				if calls != 1 {
 					t.Fatal("healthy credential was probed")
 				}

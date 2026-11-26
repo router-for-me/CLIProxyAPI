@@ -229,6 +229,8 @@ type Manager struct {
 	homePluginExecutors HomePluginExecutorResolver
 	// continuityClock overrides time.Now and timer waiting in unit tests.
 	continuityClock continuityClock
+	// claudeQuotaProbes tracks in-flight Claude usage probes per auth.
+	claudeQuotaProbes claudeQuotaProbeSet
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
 	homeRuntimeAuths map[string]map[string]*Auth
 	// homeRuntimeAuthOwners prevents a stale selection from clearing a replacement auth.

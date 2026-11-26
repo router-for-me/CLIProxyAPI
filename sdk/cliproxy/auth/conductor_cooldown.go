@@ -1153,10 +1153,13 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
-	return m.resetQuota(ctx, authID, nil)
+	return m.resetQuota(ctx, authID, nil, false)
 }
 
-func (m *Manager) resetQuota(ctx context.Context, authID string, guard func(*Auth) bool) (*Auth, []string, error) {
+// resetQuota clears quota state under the auth mutation lock. A guard that
+// returns false leaves the auth unchanged. With preserveDisabled, model states
+// with StatusDisabled keep their status, so the selector does not route to them.
+func (m *Manager) resetQuota(ctx context.Context, authID string, guard func(*Auth) bool, preserveDisabled bool) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -1196,7 +1199,7 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, guard func(*Aut
 			continue
 		}
 		models = append(models, modelKey)
-		if state != nil {
+		if state != nil && !(preserveDisabled && state.Status == StatusDisabled) {
 			resetModelState(state, now)
 		}
 	}
