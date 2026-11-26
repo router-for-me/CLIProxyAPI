@@ -89,6 +89,12 @@ func claudeQuotaCandidate(a *Auth) bool {
 	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests {
 		return false
 	}
+	// These deadlines come from failures other than quota, so usage data
+	// cannot clear them.
+	// A forced cooldown from the config also stays until its deadline.
+	if a.credentialRetryAfter.After(now) || a.nonAuthCredentialRetryAfter.After(now) || a.nonQuotaCooldownUntil.After(now) || a.forceCooldownUntil.After(now) || a.quotaForceCooldownUntil.After(now) || a.credQuotaForceUntil.After(now) {
+		return false
+	}
 	// Usage does not establish recovery from unrelated model/transport failures.
 	for _, s := range a.ModelStates {
 		if s == nil {
@@ -97,7 +103,7 @@ func claudeQuotaCandidate(a *Auth) bool {
 		if s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests {
 			return false
 		}
-		if isModelStateActiveCooldown(s.credentialQuotaShadow, now) {
+		if isModelStateActiveCooldown(s.credentialQuotaShadow, now) || s.nonQuotaCooldownUntil.After(now) || s.nonCapacityCooldownUntil.After(now) || s.forceCooldownUntil.After(now) || s.quotaForceCooldownUntil.After(now) {
 			return false
 		}
 		if (s.Unavailable || s.Status == StatusError) && (!s.Quota.Exceeded || (s.Quota.Reason != "quota" && s.Quota.Reason != "credential_quota")) {
@@ -241,56 +247,10 @@ func (m *Manager) restoreClaudeQuota(ctx context.Context, snapshot *Auth) error 
 		return ctx.Err()
 	}
 	_, _, err := m.resetQuota(ctx, snapshot.ID, func(current *Auth) bool {
-		return ctx.Err() == nil && !m.HomeEnabled() && current.RegistrationEpoch == snapshot.RegistrationEpoch && authMetadataString(current, "access_token") == authMetadataString(snapshot, "access_token") && claudeQuotaNoNewerFailure(snapshot, current) && claudeQuotaCandidate(current)
+		return ctx.Err() == nil && !m.HomeEnabled() && current.RegistrationEpoch == snapshot.RegistrationEpoch && authMetadataString(current, "access_token") == authMetadataString(snapshot, "access_token") && current.failureSeq == snapshot.failureSeq && claudeQuotaCandidate(current)
 	}, true)
 	if err != nil {
 		return fmt.Errorf("restore Claude quota: %w", err)
 	}
 	return nil
-}
-
-// claudeQuotaNoNewerFailure reports whether every failure on current already
-// existed in snapshot. Successes clear failures, so they do not stop a
-// recovery. A failure recorded after the probe started does.
-func claudeQuotaNoNewerFailure(snapshot, current *Auth) bool {
-	if current.Unavailable && !snapshot.Unavailable {
-		return false
-	}
-	if !current.NextRetryAfter.IsZero() && !current.NextRetryAfter.Equal(snapshot.NextRetryAfter) {
-		return false
-	}
-	if !sameQuotaFailure(snapshot.Quota, current.Quota) || !sameFailureError(snapshot.LastError, current.LastError) {
-		return false
-	}
-	for model, cur := range current.ModelStates {
-		if cur == nil || !modelStateHasFailure(cur) {
-			continue
-		}
-		prev := snapshot.ModelStates[model]
-		if prev == nil || cur.Status != prev.Status || cur.Unavailable != prev.Unavailable || !cur.NextRetryAfter.Equal(prev.NextRetryAfter) || cur.cooldownRecordedSeq != prev.cooldownRecordedSeq {
-			return false
-		}
-		if !sameQuotaFailure(prev.Quota, cur.Quota) || !sameFailureError(prev.LastError, cur.LastError) {
-			return false
-		}
-	}
-	return true
-}
-
-func modelStateHasFailure(s *ModelState) bool {
-	return s.LastError != nil || s.Unavailable || s.Quota.Exceeded || !s.NextRetryAfter.IsZero() || s.Status == StatusError
-}
-
-func sameQuotaFailure(prev, cur QuotaState) bool {
-	if !cur.Exceeded {
-		return true
-	}
-	return prev.Exceeded && prev.Reason == cur.Reason && prev.NextRecoverAt.Equal(cur.NextRecoverAt) && prev.BackoffLevel == cur.BackoffLevel
-}
-
-func sameFailureError(prev, cur *Error) bool {
-	if cur == nil {
-		return true
-	}
-	return prev != nil && prev.HTTPStatus == cur.HTTPStatus && prev.Code == cur.Code && prev.Message == cur.Message
 }

@@ -504,6 +504,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		auth.forceCooldownSeeded = true
 		auth.Generation++
+		auth.failureSeq++
 		if liveNewer {
 			auth.UpdatedAt = prevUpdatedAt
 			if prevStatusMsg != "" {
@@ -659,6 +660,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 	auth.forceCooldownSeeded = true
 	auth.Generation++
+	auth.failureSeq++
 	if updatedAt.After(auth.UpdatedAt) {
 		auth.UpdatedAt = updatedAt
 	}
@@ -1746,6 +1748,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Success++
 		} else {
 			auth.Failed++
+			auth.failureSeq++
 		}
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
 
@@ -2555,6 +2558,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 			auth.Success++
 		} else {
 			auth.Failed++
+			auth.failureSeq++
 		}
 		auth.Generation++
 		auth.UpdatedAt = now

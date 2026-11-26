@@ -146,3 +146,103 @@ func TestClaudeQuotaCheckProbesEveryCandidate(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeQuotaRecoveryKeepsNonQuotaCooldown(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
+	if _, err := m.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	outage := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", RetryAfter: &outage, Error: &Error{HTTPStatus: 503, Message: "overloaded"}})
+	quota := 5 * 24 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+	snapshot, _ := m.GetByID(a.ID)
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(a.ID)
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); !blocked {
+		t.Fatal("recovery cleared a live 503 cooldown")
+	}
+}
+
+func TestClaudeQuotaRecoveryKeepsRepeatedFailure(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
+	if _, err := m.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	fail := Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", Error: &Error{HTTPStatus: 429, Message: "rate limited"}}
+	m.MarkResult(context.Background(), fail)
+	snapshot, _ := m.GetByID(a.ID)
+	// Without a retry hint, a second 429 reuses the live deadline and backoff.
+	m.MarkResult(context.Background(), fail)
+	if again, _ := m.GetByID(a.ID); !again.ModelStates["claude-fable-5-2"].NextRetryAfter.Equal(snapshot.ModelStates["claude-fable-5-2"].NextRetryAfter) {
+		t.Fatal("fixture: the second 429 changed the deadline")
+	}
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(t.Name())
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); !blocked {
+		t.Fatal("an old usage response cleared a repeated failure")
+	}
+}
+
+func TestClaudeQuotaRecoveryIgnoresSuccessThatClearsQuota(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	newModelBlockedClaudeAuth(t, m, t.Name())
+	now := time.Now()
+	m.mu.Lock()
+	cur := m.auths[t.Name()]
+	cur.ModelStates["claude-haiku"] = &ModelState{Status: StatusActive, Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(-time.Minute), BackoffLevel: 3}}
+	updateAggregatedAvailability(cur, now)
+	m.mu.Unlock()
+	snapshot, _ := m.GetByID(t.Name())
+	m.MarkResult(context.Background(), Result{AuthID: t.Name(), Provider: "claude", Model: "claude-haiku", Success: true})
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(t.Name())
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); blocked {
+		t.Fatal("a success that cleared an expired quota discarded a valid recovery")
+	}
+}
+
+func TestClaudeQuotaRecoveryKeepsRestoredCooldown(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	snapshot := newModelBlockedClaudeAuth(t, m, t.Name())
+	now := time.Now()
+	later := now.Add(6 * 24 * time.Hour)
+	m.mu.Lock()
+	restored := m.restoreCooldownRecordLocked(CooldownStateRecord{AuthID: t.Name(), Provider: "claude", Model: "claude-other", NextRetryAfter: later, Reason: "quota", Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: later}, LastError: &Error{HTTPStatus: 429, Message: "weekly quota"}, UpdatedAt: now}, now)
+	m.mu.Unlock()
+	if !restored {
+		t.Fatal("fixture: the store record was not restored")
+	}
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(t.Name())
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-other", time.Now()); !blocked {
+		t.Fatal("an old usage response cleared a cooldown restored from the store")
+	}
+}
+
+func TestClaudeQuotaCandidateKeepsForcedCooldown(t *testing.T) {
+	now := time.Now()
+	for _, forced := range []bool{false, true} {
+		a := &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "test"}, ModelStates: map[string]*ModelState{"fable": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(time.Hour), Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)}}}}
+		if forced {
+			a.ModelStates["fable"].quotaForceCooldownUntil = now.Add(time.Hour)
+		}
+		if got := claudeQuotaCandidate(a); got == forced {
+			t.Errorf("candidate=%v with forced cooldown=%v", got, forced)
+		}
+	}
+}
