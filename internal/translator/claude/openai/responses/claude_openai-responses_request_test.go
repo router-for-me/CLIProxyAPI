@@ -3873,3 +3873,249 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolOutputCacheControl(t *testing
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolChoiceNone(t *testing.T) {
+	tools := `[{"type":"function","name":"ping","parameters":{"type":"object"}}]`
+	cases := []struct {
+		name           string
+		request        string
+		wantToolChoice string
+		wantToolsCount int
+	}{
+		{
+			name:           "string none with tools emits claude none",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","tools":` + tools + `,"tool_choice":"none"}`,
+			wantToolChoice: `{"type":"none"}`,
+			wantToolsCount: 1,
+		},
+		{
+			name:           "object none with tools emits claude none",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","tools":` + tools + `,"tool_choice":{"type":"none"}}`,
+			wantToolChoice: `{"type":"none"}`,
+			wantToolsCount: 1,
+		},
+		{
+			name:           "string none with parallel_tool_calls false omits disable_parallel_tool_use",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","parallel_tool_calls":false,"tools":` + tools + `,"tool_choice":"none"}`,
+			wantToolChoice: `{"type":"none"}`,
+			wantToolsCount: 1,
+		},
+		{
+			name:           "string none without tools omits tool_choice",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","tool_choice":"none"}`,
+			wantToolChoice: "",
+			wantToolsCount: 0,
+		},
+		{
+			name:           "string auto without tools omits tool_choice",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","tool_choice":"auto"}`,
+			wantToolChoice: "",
+			wantToolsCount: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errTranslate := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(tc.request), false)
+			if errTranslate != nil {
+				t.Fatalf("unexpected translation error: %v", errTranslate)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tool_choice").Raw; got != tc.wantToolChoice {
+				t.Fatalf("tool_choice = %q, want %q; out=%s", got, tc.wantToolChoice, string(out))
+			}
+			if got := len(ojson.GetBytesNoCopy(out, "tools").Array()); got != tc.wantToolsCount {
+				t.Fatalf("tools count = %d, want %d; out=%s", got, tc.wantToolsCount, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolChoiceAllowedTools(t *testing.T) {
+	declaredTools := `[
+		{"type":"function","name":"get_weather","parameters":{"type":"object"}},
+		{"type":"function","name":"delete_db","parameters":{"type":"object"}},
+		{"type":"custom","name":"exec","description":"Run shell"},
+		{"type":"namespace","name":"mcp__node_repl","tools":[{"type":"function","name":"js","parameters":{"type":"object"}}]},
+		{"type":"web_search"}
+	]`
+
+	cases := []struct {
+		name           string
+		request        string
+		toolSearch     bool
+		wantToolChoice string
+		wantTools      []string
+	}{
+		{
+			name:           "flat required filters tools and sets any",
+			request:        `{"model":"claude-sonnet-4-5","input":"Check weather","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"get_weather"}]}}`,
+			wantToolChoice: `{"type":"any"}`,
+			wantTools:      []string{"get_weather"},
+		},
+		{
+			name:           "flat auto filters tools and sets auto",
+			request:        `{"model":"claude-sonnet-4-5","input":"Check weather","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"get_weather"}]}}`,
+			wantToolChoice: `{"type":"auto"}`,
+			wantTools:      []string{"get_weather"},
+		},
+		{
+			name:           "flat omitted mode defaults to auto",
+			request:        `{"model":"claude-sonnet-4-5","input":"Check weather","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"get_weather"}]}}`,
+			wantToolChoice: `{"type":"auto"}`,
+			wantTools:      []string{"get_weather"},
+		},
+		{
+			name:           "flat any mode maps to any and honors parallel_tool_calls false",
+			request:        `{"model":"claude-sonnet-4-5","input":"Check weather","parallel_tool_calls":false,"tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"any","tools":[{"type":"function","name":"get_weather"}]}}`,
+			wantToolChoice: `{"type":"any","disable_parallel_tool_use":true}`,
+			wantTools:      []string{"get_weather"},
+		},
+		{
+			name:           "flat none mode emits claude none without disable_parallel_tool_use",
+			request:        `{"model":"claude-sonnet-4-5","input":"Check weather","parallel_tool_calls":false,"tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"none","tools":[{"type":"function","name":"get_weather"}]}}`,
+			wantToolChoice: `{"type":"none"}`,
+			wantTools:      []string{"get_weather"},
+		},
+		{
+			name:           "nested allowed_tools shape works",
+			request:        `{"model":"claude-sonnet-4-5","input":"Check weather","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"get_weather"}}]}}}`,
+			wantToolChoice: `{"type":"any"}`,
+			wantTools:      []string{"get_weather"},
+		},
+		{
+			name:           "namespace custom and web_search entries match accurately",
+			request:        `{"model":"claude-sonnet-4-5","input":"Run","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"custom","name":"exec"},{"type":"function","name":"js","namespace":"mcp__node_repl"},{"type":"web_search"}]}}`,
+			wantToolChoice: `{"type":"auto"}`,
+			wantTools:      []string{"exec", "mcp__node_repl__js", "web_search"},
+		},
+		{
+			name:           "namespace type allows all tools in namespace",
+			request:        `{"model":"claude-sonnet-4-5","input":"Run","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"namespace","name":"mcp__node_repl"}]}}`,
+			wantToolChoice: `{"type":"auto"}`,
+			wantTools:      []string{"mcp__node_repl__js"},
+		},
+		{
+			name:           "empty allowed_tools fails closed",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","parallel_tool_calls":false,"tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"required","tools":[]}}`,
+			wantToolChoice: "",
+			wantTools:      nil,
+		},
+		{
+			name:           "undeclared allowed_tools fails closed",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","parallel_tool_calls":false,"tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"missing_tool"}]}}`,
+			wantToolChoice: "",
+			wantTools:      nil,
+		},
+		{
+			name:           "kind mismatch in allowed_tools fails closed",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"custom","name":"get_weather"}]}}`,
+			wantToolChoice: "",
+			wantTools:      nil,
+		},
+		{
+			name:           "unknown mode fails closed",
+			request:        `{"model":"claude-sonnet-4-5","input":"Hello","parallel_tool_calls":false,"tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"bogus","tools":[{"type":"function","name":"get_weather"}]}}`,
+			wantToolChoice: "",
+			wantTools:      nil,
+		},
+		{
+			name:           "client tool_search entry matches when enabled",
+			request:        `{"model":"claude-sonnet-4-5","input":"Search","tools":[{"type":"tool_search","execution":"client"},{"type":"function","name":"get_weather","parameters":{"type":"object"}}],"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"tool_search"}]}}`,
+			toolSearch:     true,
+			wantToolChoice: `{"type":"any"}`,
+			wantTools:      []string{"tool_search"},
+		},
+		{
+			name:           "known web_search_preview alias matches web_search",
+			request:        `{"model":"claude-sonnet-4-5","input":"Search","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search_preview_2025_03_11"}]}}`,
+			wantToolChoice: `{"type":"auto"}`,
+			wantTools:      []string{"web_search"},
+		},
+		{
+			name:           "unknown web_search_preview typo fails closed",
+			request:        `{"model":"claude-sonnet-4-5","input":"Search","tools":` + declaredTools + `,"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search_preview_typo"}]}}`,
+			wantToolChoice: "",
+			wantTools:      nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := WithClientToolSearch(context.Background(), tc.toolSearch)
+			out, errTranslate := ConvertOpenAIResponsesRequestToClaudeWithCompatContext(ctx, "claude-sonnet-4-5", []byte(tc.request), false)
+			if errTranslate != nil {
+				t.Fatalf("unexpected translation error: %v", errTranslate)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tool_choice").Raw; got != tc.wantToolChoice {
+				t.Fatalf("tool_choice = %q, want %q; out=%s", got, tc.wantToolChoice, string(out))
+			}
+			var gotNames []string
+			for _, item := range ojson.GetBytesNoCopy(out, "tools").Array() {
+				gotNames = append(gotNames, item.Get("name").String())
+			}
+			if strings.Join(gotNames, ",") != strings.Join(tc.wantTools, ",") {
+				t.Fatalf("tools = %v, want %v; out=%s", gotNames, tc.wantTools, string(out))
+			}
+		})
+	}
+
+	t.Run("allowed_tools filters historical tool_search_output tool_references consistently with tools", func(t *testing.T) {
+		req := []byte(`{
+			"model": "claude-sonnet-4-5",
+			"tools": [
+				{"type": "tool_search", "execution": "client"},
+				{"type": "function", "name": "tool_a", "defer_loading": true, "parameters": {"type": "object"}},
+				{"type": "function", "name": "tool_b", "defer_loading": true, "parameters": {"type": "object"}}
+			],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "auto",
+				"tools": [
+					{"type": "tool_search"},
+					{"type": "function", "name": "tool_a"}
+				]
+			},
+			"input": [
+				{"role": "user", "content": "Find tools"},
+				{"type": "tool_search_call", "call_id": "call_ts_1", "execution": "client", "arguments": {"query": "tool"}},
+				{
+					"type": "tool_search_output",
+					"call_id": "call_ts_1",
+					"execution": "client",
+					"tools": [
+						{"type": "function", "name": "tool_a", "parameters": {"type": "object"}},
+						{"type": "function", "name": "tool_b", "parameters": {"type": "object"}}
+					]
+				}
+			]
+		}`)
+		ctx := WithClientToolSearch(context.Background(), true)
+		out, errTranslate := ConvertOpenAIResponsesRequestToClaudeWithCompatContext(ctx, "claude-sonnet-4-5", req, false)
+		if errTranslate != nil {
+			t.Fatalf("unexpected translation error: %v", errTranslate)
+		}
+		var gotTools []string
+		for _, item := range ojson.GetBytesNoCopy(out, "tools").Array() {
+			gotTools = append(gotTools, item.Get("name").String())
+		}
+		if strings.Join(gotTools, ",") != "tool_search,tool_search_deferred_anchor,tool_a" {
+			t.Fatalf("tools = %v, want [tool_search tool_search_deferred_anchor tool_a]; out=%s", gotTools, string(out))
+		}
+		var tr ojson.Result
+		foundTR := false
+		for _, msg := range ojson.GetBytesNoCopy(out, "messages").Array() {
+			for _, blk := range msg.Get("content").Array() {
+				if blk.Get("type").String() == "tool_result" && blk.Get("tool_use_id").String() == "call_ts_1" {
+					tr = blk
+					foundTR = true
+				}
+			}
+		}
+		if !foundTR {
+			t.Fatalf("expected tool_result for call_ts_1; out=%s", string(out))
+		}
+		refs := tr.Get("content").Array()
+		if len(refs) != 1 || refs[0].Get("type").String() != "tool_reference" || refs[0].Get("tool_name").String() != "tool_a" {
+			t.Fatalf("tool_search_output tool_result content = %s, want single tool_reference for tool_a", tr.Get("content").Raw)
+		}
+	})
+}

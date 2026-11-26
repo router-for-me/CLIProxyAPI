@@ -145,8 +145,10 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	// Cache the finish reason - do NOT set it in output yet (will be set on final chunk)
-	if finishReasonResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		params.UpstreamFinishReason = strings.Clone(strings.ToUpper(finishReasonResult.String()))
+	if finishReasonResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Type == ojson.String {
+		if reason := strings.TrimSpace(finishReasonResult.String()); reason != "" {
+			params.UpstreamFinishReason = strings.Clone(strings.ToUpper(reason))
+		}
 	}
 
 	// Extract usage metadata (token counts). FilterSSEUsageMetadata renames

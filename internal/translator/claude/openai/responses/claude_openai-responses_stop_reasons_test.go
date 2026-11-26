@@ -358,7 +358,7 @@ func TestResponsesParallelToolCallsFalseMapsToDisableParallelToolUse(t *testing.
 		{"auto", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":"auto","tools":` + tools + `,"input":"hi"}`, `{"type":"auto","disable_parallel_tool_use":true}`},
 		{"required", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":"required","tools":` + tools + `,"input":"hi"}`, `{"type":"any","disable_parallel_tool_use":true}`},
 		{"forced tool", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":{"type":"function","name":"shell"},"tools":` + tools + `,"input":"hi"}`, `{"name":"shell","type":"tool","disable_parallel_tool_use":true}`},
-		{"none", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":"none","tools":` + tools + `,"input":"hi"}`, ``},
+		{"none", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":"none","tools":` + tools + `,"input":"hi"}`, `{"type":"none"}`},
 		{"no tools", `{"model":"claude-test","parallel_tool_calls":false,"input":"hi"}`, ``},
 		{"forced tool filtered out", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":{"type":"function","name":"missing"},"tools":` + tools + `,"input":"hi"}`, ``},
 		{"builtin web_search present", `{"model":"claude-test","parallel_tool_calls":false,"tool_choice":{"type":"web_search"},"tools":[{"type":"web_search"}],"input":"hi"}`, `{"type":"auto","disable_parallel_tool_use":true}`},
