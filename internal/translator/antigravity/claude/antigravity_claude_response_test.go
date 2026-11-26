@@ -3000,3 +3000,164 @@ func TestConvertAntigravityResponseToClaudeNonStream_EmptyGroundingMetadataFalls
 		}
 	})
 }
+
+func extractStreamClaudeToolUseIDs(stream []byte) []string {
+	var ids []string
+	for _, line := range strings.Split(string(stream), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if ojson.Get(payload, "type").String() == "content_block_start" &&
+			ojson.Get(payload, "content_block.type").String() == "tool_use" {
+			ids = append(ids, ojson.Get(payload, "content_block.id").String())
+		}
+	}
+	return ids
+}
+
+func TestConvertAntigravityResponseToClaude_PreservesUpstreamClaudeToolUseID(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-sonnet-4-6"}`)
+	resp1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"toolu_vrtx_01AAA","name":"read_file","args":{"path":"a.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"claude-sonnet-4-6","responseId":"resp-claude-1"}}`)
+	resp2 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"toolu_vrtx_01BBB","name":"read_file","args":{"path":"b.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"claude-sonnet-4-6","responseId":"resp-claude-2"}}`)
+	respSanitized := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"toolu.vrtx:01/CCC","name":"read_file","args":{"path":"c.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"claude-sonnet-4-6","responseId":"resp-claude-3"}}`)
+	reservedGeminiID := util.GeminiClaudeToolUseID("native-call-1", "read_file", `{"path":"d.go"}`)
+	respReserved := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"` + reservedGeminiID + `","name":"read_file","args":{"path":"d.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"claude-sonnet-4-6","responseId":"resp-claude-4"}}`)
+
+	ctx := context.Background()
+
+	nonStream1 := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, resp1, nil)
+	nonStream2 := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, resp2, nil)
+	if got1, got2 := ojson.GetBytesNoCopy(nonStream1, "content.0.id").String(), ojson.GetBytesNoCopy(nonStream2, "content.0.id").String(); got1 != "toolu_vrtx_01AAA" || got2 != "toolu_vrtx_01BBB" {
+		t.Fatalf("non-stream Claude tool_use IDs = (%q, %q), want (%q, %q)", got1, got2, "toolu_vrtx_01AAA", "toolu_vrtx_01BBB")
+	}
+
+	nonStreamSanitized := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, respSanitized, nil)
+	if got := ojson.GetBytesNoCopy(nonStreamSanitized, "content.0.id").String(); !strings.HasPrefix(got, "toolu_vrtx_01_CCC-") || got == "toolu_vrtx_01_CCC" || util.SanitizeClaudeToolID(got) != got {
+		t.Fatalf("non-stream sanitized Claude tool_use ID = %q, want unique disambiguated valid ID with prefix %q", got, "toolu_vrtx_01_CCC-")
+	}
+
+	respCollisionPair := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call:a","name":"read_file","args":{"path":"1.go"}}},{"functionCall":{"id":"call_a","name":"write_file","args":{"path":"2.go"}}},{"functionCall":{"id":"call/a","name":"edit_file","args":{"path":"3.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"claude-sonnet-4-6","responseId":"resp-claude-collision"}}`)
+	nonStreamCollision := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, respCollisionPair, nil)
+	collisionBlocks := ojson.GetBytesNoCopy(nonStreamCollision, "content").Array()
+	if len(collisionBlocks) != 3 {
+		t.Fatalf("non-stream collision blocks = %d, want 3; output=%s", len(collisionBlocks), nonStreamCollision)
+	}
+	nsColonID := collisionBlocks[0].Get("id").String()
+	nsUnderscoreID := collisionBlocks[1].Get("id").String()
+	nsSlashID := collisionBlocks[2].Get("id").String()
+	if nsUnderscoreID != "call_a" {
+		t.Fatalf("non-stream valid Claude tool_use ID = %q, want %q", nsUnderscoreID, "call_a")
+	}
+	if nsColonID == "" || nsSlashID == "" || nsColonID == nsUnderscoreID || nsSlashID == nsUnderscoreID || nsColonID == nsSlashID {
+		t.Fatalf("non-stream sanitized Claude tool_use IDs collided: call:a=%q call_a=%q call/a=%q", nsColonID, nsUnderscoreID, nsSlashID)
+	}
+	if util.SanitizeClaudeToolID(nsColonID) != nsColonID || util.SanitizeClaudeToolID(nsSlashID) != nsSlashID {
+		t.Fatalf("non-stream disambiguated Claude tool_use IDs are not valid Claude IDs: %q, %q", nsColonID, nsSlashID)
+	}
+
+	nonStreamReserved := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, respReserved, nil)
+	if got := ojson.GetBytesNoCopy(nonStreamReserved, "content.0.id").String(); got == "" || got == reservedGeminiID || util.IsGeminiClaudeToolUseID(got) {
+		t.Fatalf("non-stream Claude tool_use ID leaked reserved Gemini namespace: %q", got)
+	}
+
+	var param1 any
+	stream1 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, resp1, &param1), nil)
+	stream1 = append(stream1, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, []byte("[DONE]"), &param1), nil)...)
+	var param2 any
+	stream2 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, resp2, &param2), nil)
+	stream2 = append(stream2, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, []byte("[DONE]"), &param2), nil)...)
+	streamIDs1 := extractStreamClaudeToolUseIDs(stream1)
+	streamIDs2 := extractStreamClaudeToolUseIDs(stream2)
+	if len(streamIDs1) != 1 || streamIDs1[0] != "toolu_vrtx_01AAA" || len(streamIDs2) != 1 || streamIDs2[0] != "toolu_vrtx_01BBB" {
+		t.Fatalf("stream Claude tool_use IDs = (%v, %v), want ([toolu_vrtx_01AAA], [toolu_vrtx_01BBB])", streamIDs1, streamIDs2)
+	}
+
+	var paramCollision any
+	streamCollision := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, respCollisionPair, &paramCollision), nil)
+	streamCollision = append(streamCollision, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, []byte("[DONE]"), &paramCollision), nil)...)
+	streamCollisionIDs := extractStreamClaudeToolUseIDs(streamCollision)
+	if len(streamCollisionIDs) != 3 {
+		t.Fatalf("stream collision tool_use IDs = %v, want 3 IDs", streamCollisionIDs)
+	}
+	stColonID, stUnderscoreID, stSlashID := streamCollisionIDs[0], streamCollisionIDs[1], streamCollisionIDs[2]
+	if stUnderscoreID != "call_a" {
+		t.Fatalf("stream valid Claude tool_use ID = %q, want %q", stUnderscoreID, "call_a")
+	}
+	if stColonID == "" || stSlashID == "" || stColonID == stUnderscoreID || stSlashID == stUnderscoreID || stColonID == stSlashID {
+		t.Fatalf("stream sanitized Claude tool_use IDs collided: call:a=%q call_a=%q call/a=%q", stColonID, stUnderscoreID, stSlashID)
+	}
+	if util.SanitizeClaudeToolID(stColonID) != stColonID || util.SanitizeClaudeToolID(stSlashID) != stSlashID {
+		t.Fatalf("stream disambiguated Claude tool_use IDs are not valid Claude IDs: %q, %q", stColonID, stSlashID)
+	}
+
+	var paramReserved any
+	streamReserved := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, respReserved, &paramReserved), nil)
+	streamReserved = append(streamReserved, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-6", requestJSON, requestJSON, []byte("[DONE]"), &paramReserved), nil)...)
+	streamReservedIDs := extractStreamClaudeToolUseIDs(streamReserved)
+	if len(streamReservedIDs) != 1 || streamReservedIDs[0] == "" || streamReservedIDs[0] == reservedGeminiID || util.IsGeminiClaudeToolUseID(streamReservedIDs[0]) {
+		t.Fatalf("stream Claude tool_use ID leaked reserved Gemini namespace: %v", streamReservedIDs)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_UniqueFallbackToolUseIDsAcrossTurns(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name      string
+		modelName string
+		rawJSON   []byte
+	}{
+		{
+			name:      "claude_missing_id",
+			modelName: "claude-sonnet-4-6",
+			rawJSON:   []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}},{"functionCall":{"id":"   ","name":"Read","args":{"path":"a.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"claude-sonnet-4-6","responseId":"resp-fallback-claude"}}`),
+		},
+		{
+			name:      "gemini_missing_id",
+			modelName: "gemini-3.6-flash-high",
+			rawJSON:   []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}},{"functionCall":{"name":"Read","args":{"path":"a.go"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"gemini-3.6-flash","responseId":"resp-fallback-gemini"}}`),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requestJSON := []byte(`{"model":"` + tc.modelName + `"}`)
+			seen := make(map[string]struct{})
+
+			var param any
+			streamBytes := bytes.Join(ConvertAntigravityResponseToClaude(ctx, tc.modelName, requestJSON, requestJSON, tc.rawJSON, &param), nil)
+			streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(ctx, tc.modelName, requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+			streamIDs := extractStreamClaudeToolUseIDs(streamBytes)
+			if len(streamIDs) != 2 {
+				t.Fatalf("expected 2 streamed tool_use IDs, got %v", streamIDs)
+			}
+			for _, id := range streamIDs {
+				if id == "" {
+					t.Fatalf("empty streamed tool_use ID in %v", streamIDs)
+				}
+				if _, dup := seen[id]; dup {
+					t.Fatalf("duplicate streamed tool_use ID %q", id)
+				}
+				seen[id] = struct{}{}
+			}
+
+			for turn := 1; turn <= 2; turn++ {
+				nonStream := ConvertAntigravityResponseToClaudeNonStream(ctx, tc.modelName, requestJSON, requestJSON, tc.rawJSON, nil)
+				content := ojson.GetBytesNoCopy(nonStream, "content").Array()
+				if len(content) != 2 {
+					t.Fatalf("turn %d: expected 2 tool_use blocks, got %d (%s)", turn, len(content), nonStream)
+				}
+				for idx, block := range content {
+					id := block.Get("id").String()
+					if id == "" {
+						t.Fatalf("turn %d block %d: empty tool_use ID", turn, idx)
+					}
+					if _, dup := seen[id]; dup {
+						t.Fatalf("turn %d block %d: repeated fallback tool_use ID %q", turn, idx, id)
+					}
+					seen[id] = struct{}{}
+				}
+			}
+		})
+	}
+}
