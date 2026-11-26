@@ -66,7 +66,7 @@ func inferCodexWebsocketErrorStatus(payload []byte) int {
 	if !ok {
 		return 0
 	}
-	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+	if isCodexUsageLimitError(body) || isCodexAPIBillingError(body) || isCodexTransientCapacityError(body) {
 		return http.StatusTooManyRequests
 	}
 	if codexTerminalErrorIsContextLength(body) {
@@ -99,13 +99,17 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		return nil, false
 	}
 
+	isBillingLimit := isCodexAPIBillingError(payload)
+	if isBillingLimit {
+		status = http.StatusTooManyRequests
+	}
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	isUsageLimit := isCodexUsageLimitError(out)
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
+	transientCapacity := !isBillingLimit && !isUsageLimit && isCodexTransientCapacityError(out)
 	statusError := statusErr{
 		code:               status,
 		msg:                string(out),
-		credentialScoped:   isUsageLimit && !modelLevelCooling,
+		credentialScoped:   isBillingLimit || (isUsageLimit && !modelLevelCooling),
 		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
 	}
 	// Hint precedence: the quota body reset wins, then the connection-limit

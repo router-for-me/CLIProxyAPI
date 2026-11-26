@@ -476,14 +476,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return nil, wsErr
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
-				// A transient capacity or usage-limit rejection during bootstrap is retried on
+				// A capacity or quota rejection during bootstrap is retried on
 				// another credential, so the downstream websocket session must survive this
 				// upstream teardown. Notifying the disconnect here (or when no buffered payload
 				// chunk precedes the error) would close the client connection before the retry
 				// can deliver anything.
 				overloadFailover := isCodexOverloadBootstrapFailure(terminalBody)
-				usageLimitFailover := isCodexUsageLimitError(terminalBody)
-				failoverPending := overloadFailover || usageLimitFailover
+				quotaFailover := isCodexUsageLimitError(terminalBody) || isCodexAPIBillingError(terminalBody)
+				failoverPending := overloadFailover || quotaFailover
 				if failoverPending && timeoutReached {
 					failoverPending = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
@@ -519,7 +519,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					// conductor can transparently retry on another credential, and report the
 					// status the upstream refused to put on the wire.
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read, failing over", bufferedFrames)
-					if overloadFailover {
+					if !quotaFailover {
 						if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
 							return nil, streamErr
 						}

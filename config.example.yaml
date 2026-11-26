@@ -472,9 +472,9 @@ upstream:
     # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
     # right after those handshake events, instead of returning 503 on the wire. Buffering them
     # keeps the downstream response headers uncommitted long enough to transparently retry on
-    # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
-    # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
-    # knowing, because this option makes the window it lives in much longer: if the stream ends while
+    # another credential. OpenAI API billing rejections during this window also fail over and cool
+    # the exhausted credential across its models. Request errors still reach the client.
+    # One pre-existing behaviour is worth knowing: if the stream ends while
     # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
     # whether another credential is then tried depends on how it ended. A clean end with no terminal
     # event is request-scoped on SSE, so nothing else is tried; a websocket close, or a transport error

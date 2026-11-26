@@ -250,7 +250,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	streamStarted := false
 	immediateTerminal := false
 	immediateIncomplete := false
-	// bootstrapTerminalErr holds a non-overload terminal failure seen while buffering. It is
+	// bootstrapTerminalErr holds a terminal failure that cannot fail over while buffering. It is
 	// delivered as an in-stream chunk after the buffered handshake so downstream behaviour stays
 	// identical to the unbuffered path instead of silently turning into a credential failover.
 	var bootstrapTerminalErr error
@@ -293,21 +293,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					if isCodexOverloadBootstrapFailure(terminalBody) {
+					billingFailover := isCodexAPIBillingError(terminalBody)
+					if billingFailover || isCodexOverloadBootstrapFailure(terminalBody) {
 						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 						timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
 						if !timeoutReached {
-							// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
+							// Credential rejection delivered inside an HTTP 200 stream. Fail the
 							// attempt before the downstream headers are committed so the conductor can
 							// transparently retry on another credential, and report the status the
 							// upstream refused to put on the wire.
-							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
-							if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
+							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap rejection after %d buffered lines, failing over", bufferedFrames)
+							if billingFailover || (streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil) {
 								return nil, streamErr
 							}
 							return nil, newCodexBootstrapOverloadErrWithRetryAfter(terminalBody, streamErr.RetryAfter())
 						}
-						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
+						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}
 					bootstrapTerminalErr = streamErr
 					break
