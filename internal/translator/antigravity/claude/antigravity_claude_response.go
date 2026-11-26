@@ -366,7 +366,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	handledWebSearchGrounding := false
 	if webSearchStreamMode && !params.HasWebSearchTool {
 		root := util.ParseGJSONBytesNoCopy(rawJSON)
-		if groundingMetadata := antigravityGroundingMetadata(root); groundingMetadata.Exists() {
+		if groundingMetadata := antigravityGroundingMetadata(root); hasValidAntigravityWebGrounding(groundingMetadata) {
 			toolUseID := newClaudeWebSearchToolUseID()
 			textContent := params.WebSearchTextBuffer.String() + antigravityTextContent(root)
 			params.WebSearchTextBuffer.Reset()
@@ -661,6 +661,9 @@ func appendBufferedWebSearchTextBlock(params *Params, appendEvent func(string, s
 	appendEvent("content_block_delta", string(data))
 	params.ResponseType = 1
 	params.HasContent = true
+	if strings.TrimSpace(text) != "" {
+		params.HasVisibleOutput = true
+	}
 }
 
 func appendFinalEvents(params *Params, output *[]byte, force bool) {
@@ -796,7 +799,7 @@ func ConvertAntigravityResponseToClaudeNonStream(ctx context.Context, _ string, 
 	}
 
 	if shouldTranslateWebSearchGrounding(originalRequestRawJSON, requestRawJSON) {
-		if groundingMetadata := antigravityGroundingMetadata(root); groundingMetadata.Exists() {
+		if groundingMetadata := antigravityGroundingMetadata(root); hasValidAntigravityWebGrounding(groundingMetadata) {
 			toolUseID := newClaudeWebSearchToolUseID()
 			_ = responseDoc.SetRawBytes("content", buildClaudeWebSearchContent(toolUseID, antigravityTextContent(root), groundingMetadata))
 			stopReason := resolveAntigravityClaudeStopReason(root.Get("response.candidates.0.finishReason").String(), false)

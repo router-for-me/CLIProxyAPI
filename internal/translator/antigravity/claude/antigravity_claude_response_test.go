@@ -2742,3 +2742,261 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchGroundingSkipsThought
 		})
 	}
 }
+
+func TestConvertAntigravityResponseToClaudeStream_EmptyGroundingMetadataIgnoredUntilValidGrounding(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+
+	t.Run("empty_chunk1_then_real_chunk2", func(t *testing.T) {
+		chunk1 := []byte(`{
+			"response": {
+				"modelVersion": "gemini-3.1-flash-lite",
+				"responseId": "resp-empty-grounding-stream-1",
+				"candidates": [{
+					"content": {"parts": [{"text": "Beijing weather "}]},
+					"groundingMetadata": {}
+				}]
+			}
+		}`)
+		chunk2 := []byte(`{
+			"response": {
+				"modelVersion": "gemini-3.1-flash-lite",
+				"responseId": "resp-empty-grounding-stream-1",
+				"candidates": [{
+					"content": {"parts": [{"text": "is clear today."}]},
+					"groundingMetadata": {
+						"webSearchQueries": ["Beijing weather"],
+						"groundingChunks": [{"web": {"uri": "https://example.com/weather", "title": "Beijing Weather"}}],
+						"groundingSupports": [{
+							"segment": {"startIndex": 0, "endIndex": 31, "text": "Beijing weather is clear today."},
+							"groundingChunkIndices": [0]
+						}]
+					},
+					"finishReason": "STOP"
+				}],
+				"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 6, "totalTokenCount": 16}
+			}
+		}`)
+
+		var param any
+		out1 := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk1, &param), nil)
+		if strings.Contains(string(out1), `"type":"server_tool_use"`) || strings.Contains(string(out1), `"type":"web_search_tool_result"`) {
+			t.Fatalf("empty groundingMetadata:{} in chunk 1 must not synthesize web search blocks:\n%s", string(out1))
+		}
+
+		out2 := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk2, &param), nil)
+		outDone := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)
+		fullOut := string(out1) + string(out2) + string(outDone)
+
+		if got := strings.Count(fullOut, `"type":"server_tool_use"`); got != 1 {
+			t.Fatalf("server_tool_use count = %d, want 1:\n%s", got, fullOut)
+		}
+		for _, needle := range []string{
+			`"type":"web_search_tool_result"`,
+			`https://example.com/weather`,
+			`"type":"citations_delta"`,
+			`"web_search_requests":1`,
+		} {
+			if !strings.Contains(fullOut, needle) {
+				t.Fatalf("stream output missing %s:\n%s", needle, fullOut)
+			}
+		}
+
+		var emittedText strings.Builder
+		var citedTexts []string
+		var toolInput strings.Builder
+		for _, line := range strings.Split(fullOut, "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			switch ojson.Get(payload, "delta.type").String() {
+			case "text_delta":
+				emittedText.WriteString(ojson.Get(payload, "delta.text").String())
+			case "citations_delta":
+				citedTexts = append(citedTexts, ojson.Get(payload, "delta.citation.cited_text").String())
+			case "input_json_delta":
+				toolInput.WriteString(ojson.Get(payload, "delta.partial_json").String())
+			}
+		}
+		if emittedText.String() != "Beijing weather is clear today." {
+			t.Fatalf("emitted text = %q, want %q\n%s", emittedText.String(), "Beijing weather is clear today.", fullOut)
+		}
+		if len(citedTexts) != 1 || citedTexts[0] != "Beijing weather is clear today." {
+			t.Fatalf("citedTexts = %#v, want [%q]\n%s", citedTexts, "Beijing weather is clear today.", fullOut)
+		}
+		if got := ojson.Get(toolInput.String(), "query").String(); got != "Beijing weather" {
+			t.Fatalf("server_tool_use query = %q, want %q\n%s", got, "Beijing weather", fullOut)
+		}
+	})
+
+	noSearchCases := []struct {
+		name      string
+		grounding string
+	}{
+		{name: "empty_object_only", grounding: `{}`},
+		{name: "blank_queries_and_empty_uri", grounding: `{"webSearchQueries":["  "],"groundingChunks":[{"web":{"uri":"  "}}]}`},
+	}
+	for _, tc := range noSearchCases {
+		t.Run(tc.name, func(t *testing.T) {
+			chunk := []byte(`{
+				"response": {
+					"modelVersion": "gemini-3.1-flash-lite",
+					"responseId": "resp-empty-grounding-only",
+					"candidates": [{
+						"content": {"parts": [{"text": "Plain answer without search."}]},
+						"groundingMetadata": ` + tc.grounding + `,
+						"finishReason": "STOP"
+					}],
+					"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}
+				}
+			}`)
+
+			var param any
+			out := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk, &param), nil)
+			out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+			outText := string(out)
+
+			for _, forbidden := range []string{`"type":"server_tool_use"`, `"type":"web_search_tool_result"`, `"web_search_requests"`} {
+				if strings.Contains(outText, forbidden) {
+					t.Fatalf("stream output unexpectedly contained %s:\n%s", forbidden, outText)
+				}
+			}
+			if !strings.Contains(outText, "Plain answer without search.") {
+				t.Fatalf("stream output missing plain text fallback:\n%s", outText)
+			}
+		})
+	}
+
+	t.Run("empty_chunk1_text_then_malformed_function_call_finishes_normally", func(t *testing.T) {
+		chunk1 := []byte(`{
+			"response": {
+				"modelVersion": "gemini-3.1-flash-lite",
+				"responseId": "resp-empty-grounding-malformed",
+				"candidates": [{
+					"content": {"parts": [{"text": "Plain answer before malformed finish."}]},
+					"groundingMetadata": {}
+				}]
+			}
+		}`)
+		chunk2 := []byte(`{
+			"response": {
+				"modelVersion": "gemini-3.1-flash-lite",
+				"responseId": "resp-empty-grounding-malformed",
+				"candidates": [{
+					"content": {"parts": []},
+					"finishReason": "MALFORMED_FUNCTION_CALL"
+				}],
+				"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}
+			}
+		}`)
+
+		var param any
+		out := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk1, &param), nil)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk2, &param), nil)...)
+		out = append(out, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+		outText := string(out)
+
+		for _, forbidden := range []string{`"type":"error"`, `"type":"server_tool_use"`, `"type":"web_search_tool_result"`, `"web_search_requests"`} {
+			if strings.Contains(outText, forbidden) {
+				t.Fatalf("stream output unexpectedly contained %s:\n%s", forbidden, outText)
+			}
+		}
+		for _, required := range []string{"Plain answer before malformed finish.", `"type":"message_delta"`, `event: message_stop`} {
+			if !strings.Contains(outText, required) {
+				t.Fatalf("stream output missing %s:\n%s", required, outText)
+			}
+		}
+	})
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_EmptyGroundingMetadataFallsBackToNormalParts(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+
+	cases := []struct {
+		name      string
+		grounding string
+	}{
+		{name: "empty_object", grounding: `{}`},
+		{name: "null_value", grounding: `null`},
+		{name: "blank_queries_and_empty_uri", grounding: `{"webSearchQueries":[" "],"groundingChunks":[{"web":{"uri":""}}]}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"_thinking_and_text", func(t *testing.T) {
+			responseJSON := []byte(`{
+				"response": {
+					"responseId": "resp-nonstream-empty-grounding",
+					"modelVersion": "gemini-3.1-flash-lite",
+					"candidates": [{
+						"content": {
+							"parts": [
+								{"text": "Internal reasoning.", "thought": true},
+								{"text": "Plain answer."}
+							]
+						},
+						"groundingMetadata": ` + tc.grounding + `,
+						"finishReason": "STOP"
+					}],
+					"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "thoughtsTokenCount": 3, "totalTokenCount": 17}
+				}
+			}`)
+
+			output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, responseJSON, nil)
+
+			if ojson.GetBytesNoCopy(output, "usage.server_tool_use.web_search_requests").Exists() {
+				t.Fatalf("empty groundingMetadata must not emit web_search_requests: %s", string(output))
+			}
+			if got := ojson.GetBytesNoCopy(output, "content.#").Int(); got != 2 {
+				t.Fatalf("content block count = %d, want 2: %s", got, string(output))
+			}
+			if got := ojson.GetBytesNoCopy(output, "content.0.type").String(); got != "thinking" {
+				t.Fatalf("content.0.type = %q, want thinking: %s", got, string(output))
+			}
+			if got := ojson.GetBytesNoCopy(output, "content.1.type").String(); got != "text" {
+				t.Fatalf("content.1.type = %q, want text: %s", got, string(output))
+			}
+			if got := ojson.GetBytesNoCopy(output, "content.1.text").String(); got != "Plain answer." {
+				t.Fatalf("content.1.text = %q, want %q: %s", got, "Plain answer.", string(output))
+			}
+			if got := ojson.GetBytesNoCopy(output, "stop_reason").String(); got != "end_turn" {
+				t.Fatalf("stop_reason = %q, want end_turn: %s", got, string(output))
+			}
+		})
+	}
+
+	t.Run("empty_object_preserves_function_call", func(t *testing.T) {
+		responseJSON := []byte(`{
+			"response": {
+				"responseId": "resp-nonstream-empty-grounding-tool",
+				"modelVersion": "gemini-3.1-flash-lite",
+				"candidates": [{
+					"content": {
+						"parts": [
+							{"functionCall": {"name": "get_weather", "args": {"city": "Beijing"}}}
+						]
+					},
+					"groundingMetadata": {},
+					"finishReason": "STOP"
+				}],
+				"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14}
+			}
+		}`)
+
+		output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, responseJSON, nil)
+
+		if got := ojson.GetBytesNoCopy(output, "content.0.type").String(); got != "tool_use" {
+			t.Fatalf("content.0.type = %q, want tool_use: %s", got, string(output))
+		}
+		if got := ojson.GetBytesNoCopy(output, "stop_reason").String(); got != "tool_use" {
+			t.Fatalf("stop_reason = %q, want tool_use: %s", got, string(output))
+		}
+	})
+}
