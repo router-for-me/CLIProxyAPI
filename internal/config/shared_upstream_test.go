@@ -13,7 +13,7 @@ func TestSharedUpstreamConfigSurvivesMigrationAndSnapshots(t *testing.T) {
 	legacy := []byte(`auth-dir: client-auth
 auth-auto-refresh-workers: 3
 codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true}
-claude: {model-level-cooling: true}
+claude: {model-level-cooling: true, stream-bootstrap-buffering: true}
 claude-code: {disable-cloaking-model-list: true}
 disable-claude-cloak-mode: true
 claude-header-defaults: {user-agent: client-agent, package-version: 1.2.3, runtime-version: v22.1.0, os: Linux, arch: arm64, timeout: '123', timezone: Asia/Shanghai, stabilize-device-profile: true}
@@ -25,6 +25,7 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
   codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true}
   claude:
     model-level-cooling: true
+    stream-bootstrap-buffering: true
     disable-cloaking-model-list: true
     disable-claude-cloak-mode: true
     header-defaults: {user-agent: client-agent, package-version: 1.2.3, runtime-version: v22.1.0, os: Linux, arch: arm64, timeout: '123', timezone: Asia/Shanghai, stabilize-device-profile: true}
@@ -39,13 +40,14 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
     codex: {disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true, header-defaults: {user-agent: oauth-agent, beta-features: oauth-beta}}
     claude:
       model-level-cooling: true
+      stream-bootstrap-buffering: true
       claude-code: {disable-cloaking-model-list: true}
       disable-claude-cloak-mode: true
       header-defaults: {user-agent: client-agent, package-version: 1.2.3, runtime-version: v22.1.0, os: Linux, arch: arm64, timeout: '123', timezone: Asia/Shanghai, stabilize-device-profile: true}
     xai: {inject-x-search: true}
 api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key, disable-codex-cloaking: false}]}]}
 `)
-	expected := []any{"client-auth", 3, true, true, "10s", true, true, true, true, true, true, "client-agent", "1.2.3", "v22.1.0", "Linux", "arm64", "123", "Asia/Shanghai", true, true}
+	expected := []any{"client-auth", 3, true, true, "10s", true, true, true, true, true, true, "client-agent", "1.2.3", "v22.1.0", "Linux", "arm64", "123", "Asia/Shanghai", true, true, true}
 	for _, tc := range []struct {
 		name string
 		raw  []byte
@@ -106,7 +108,7 @@ api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key
 							scoped.ClaudeHeaderDefaults.UserAgent, scoped.ClaudeHeaderDefaults.PackageVersion, scoped.ClaudeHeaderDefaults.RuntimeVersion,
 							scoped.ClaudeHeaderDefaults.OS, scoped.ClaudeHeaderDefaults.Arch, scoped.ClaudeHeaderDefaults.Timeout, scoped.ClaudeHeaderDefaults.Timezone,
 							scoped.ClaudeHeaderDefaults.StabilizeDeviceProfile != nil && *scoped.ClaudeHeaderDefaults.StabilizeDeviceProfile,
-							scoped.XAI.InjectXSearch,
+							scoped.XAI.InjectXSearch, scoped.Claude.StreamBootstrapBuffering,
 						}
 						if !reflect.DeepEqual(actual, expected) {
 							t.Fatalf("%s changed shared configuration: got %#v, want %#v", name, actual, expected)

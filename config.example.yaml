@@ -567,6 +567,13 @@ upstream:
     # permanently and session-date-pin-days is ignored.
     session-date-pin-days: 7
 
+    # Hold message_start, ping and empty block starts until the first generating event, so a
+    # rate_limit_error Anthropic sends inside a 200 stream fails over to another credential before
+    # the client sees a byte. Bounded by 48 lines and 1 MiB, not by time. Trade-off: response
+    # headers wait for the first generating event.
+    # Default: false
+    stream-bootstrap-buffering: false
+
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.
     # Credential attributes and explicit per-key cloak modes override this shared default.

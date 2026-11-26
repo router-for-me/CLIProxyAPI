@@ -45,6 +45,7 @@ var v8SharedPaths = []configPath{
 	{"oauth.providers.codex.upstream-request-compression-min-bytes", "upstream.codex.upstream-request-compression-min-bytes"},
 	{"oauth.providers.codex.websocket-compression", "upstream.codex.websocket-compression"},
 	{"oauth.providers.claude.model-level-cooling", "upstream.claude.model-level-cooling"},
+	{"oauth.providers.claude.stream-bootstrap-buffering", "upstream.claude.stream-bootstrap-buffering"},
 	{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "upstream.claude.disable-cloaking-model-list"},
 	{"oauth.providers.claude.disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
 	{"oauth.providers.claude.header-defaults.user-agent", "upstream.claude.header-defaults.user-agent"},

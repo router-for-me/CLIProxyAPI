@@ -141,6 +141,14 @@ type ClaudeConfig struct {
 	// URLs request the org:create_api_key scope in addition to ClaudeOAuthScope.
 	// Nil defaults to true to match native Claude Code.
 	OAuthIncludeCreateAPIKey *bool `yaml:"oauth-include-create-api-key,omitempty" json:"oauth-include-create-api-key,omitempty"`
+	// StreamBootstrapBuffering holds back the stream events that carry no output yet
+	// (message_start, ping, an empty text or thinking block start) until the first
+	// generating event. Anthropic can answer a 200 stream with a rate_limit_error event
+	// right after message_start; while nothing has reached the client, that becomes the
+	// credential's 429 and the request fails over. The hold is bounded by a line and a
+	// byte budget, not by wall-clock time. Trade-off: the response headers wait for the
+	// first generating event. Default is false.
+	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 }
 
 // OAuthIncludeCreateAPIKeyEnabled reports whether Claude OAuth authorization
