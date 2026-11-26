@@ -3058,6 +3058,7 @@ type antigravityReasoningReplayAccumulator struct {
 	pendingSignatures       []antigravityPendingThoughtSignature
 	activeStreamingFC       *antigravityStreamingReplayToolCall
 	hasIncompleteFC         bool
+	observedOutput          bool
 	itemBytes               int
 	overflow                bool
 	terminal                bool
@@ -3311,6 +3312,7 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 			return true
 		}
 		if hasSemanticText {
+			a.observedOutput = true
 			if targetKind != "thought" {
 				targetKind = "text"
 			}
@@ -3352,6 +3354,8 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 				a.visibleText.WriteString(text.String())
 			}
 			a.lastResponseKind = targetKind
+		} else if antigravityReplayPartHasNonTextOutput(part) {
+			a.observedOutput = true
 		}
 		acceptedSignature := false
 		if signature != "" && !a.seenSignatures[signature] {
@@ -3545,6 +3549,7 @@ func (a *antigravityReasoningReplayAccumulator) recordCompletedFunctionCall(pi i
 			a.seenSignatures[signature] = true
 		}
 	}
+	a.observedOutput = true
 	a.lastResponseKind = "function_call"
 }
 
@@ -3638,6 +3643,44 @@ func (a *antigravityReasoningReplayAccumulator) observeFunctionCallPart(pi int, 
 	}
 	resolvedSig := a.resolveFunctionCallSignature(signature)
 	a.recordCompletedFunctionCall(pi, fc, resolvedSig)
+}
+
+func antigravityReplayPartHasNonTextOutput(part ojson.Result) bool {
+	for _, key := range []string{"inlineData", "inline_data"} {
+		if d := part.Get(key); d.IsObject() && strings.TrimSpace(d.Get("data").String()) != "" {
+			return true
+		}
+	}
+	for _, key := range []string{"fileData", "file_data"} {
+		if fd := part.Get(key); fd.IsObject() && (strings.TrimSpace(fd.Get("fileUri").String()) != "" || strings.TrimSpace(fd.Get("file_uri").String()) != "") {
+			return true
+		}
+	}
+	for _, key := range []string{"executableCode", "executable_code"} {
+		if ec := part.Get(key); ec.IsObject() && strings.TrimSpace(ec.Get("code").String()) != "" {
+			return true
+		}
+	}
+	for _, key := range []string{"codeExecutionResult", "code_execution_result"} {
+		if cer := part.Get(key); cer.IsObject() && (strings.TrimSpace(cer.Get("output").String()) != "" || strings.TrimSpace(cer.Get("outcome").String()) != "") {
+			return true
+		}
+	}
+	for _, key := range []string{"audioTranscription", "audio_transcription"} {
+		if at := part.Get(key); at.IsObject() && at.Get("text").Type == ojson.String && strings.TrimSpace(at.Get("text").String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkCleanEOF marks an accumulator as terminal when an upstream stream ends
+// cleanly without a finishReason after delivering candidate output.
+func (a *antigravityReasoningReplayAccumulator) MarkCleanEOF() {
+	if a == nil || a.terminal || !a.observedOutput || a.activeStreamingFC != nil || a.hasIncompleteFC {
+		return
+	}
+	a.terminal = true
 }
 
 func (a *antigravityReasoningReplayAccumulator) Commit(ctx context.Context) {

@@ -448,6 +448,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return cliproxyexecutor.Response{}, err
 	}
 	if replayAccumulator != nil {
+		if ctx.Err() == nil && !sseJSON.HasPending() {
+			replayAccumulator.MarkCleanEOF()
+		}
 		replayAccumulator.Commit(ctx)
 	}
 	if useCredits {
