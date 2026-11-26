@@ -167,6 +167,177 @@ func TestConvertResponsesToolChoiceToGemini(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesToolChoiceToGemini_AllowedTools(t *testing.T) {
+	buildForwardMap := func(toolsJSON string) map[string]string {
+		_, fm, _ := BuildGeminiFunctionDeclarations(ojson.Parse(toolsJSON))
+		return fm
+	}
+
+	weatherForwardMap := buildForwardMap(`{"tools":[{"type":"function","name":"get_weather"}]}`)
+
+	tests := []struct {
+		name       string
+		choiceJSON string
+		forwardMap map[string]string
+		wantMode   string
+		wantNames  []string
+	}{
+		{
+			name:       "required mode with function and deduplication",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"get_weather"},{"type":"function","function":{"name":"get_weather"}},{"type":"custom","name":"exec","namespace":"functions"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"function","name":"get_weather"},{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}]}`),
+			wantMode:   "ANY",
+			wantNames:  []string{"get_weather", "functions__exec"},
+		},
+		{
+			name:       "any mode with tool_search and real namespace identity from BuildGeminiFunctionDeclarations",
+			choiceJSON: `{"type":"allowed_tools","mode":"any","tools":[{"type":"tool_search"},{"type":"namespace","name":"codex_app"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"tool_search","execution":"client"},{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"read"},{"type":"function","name":"write"}]},{"type":"function","name":"other"}]}`),
+			wantMode:   "ANY",
+			wantNames:  []string{"tool_search", "codex_app__read", "codex_app__write"},
+		},
+		{
+			name:       "namespace entry authorizes real namespace member via 2-arg call",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"namespace","name":"ops"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"function","name":"read"}]}]}`),
+			wantMode:   "ANY",
+			wantNames:  []string{"ops__read"},
+		},
+		{
+			name:       "plain map without declaration identity metadata fails closed to NONE",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"custom","name":"run"}]}`,
+			forwardMap: map[string]string{"run": "run"},
+			wantMode:   "NONE",
+		},
+		{
+			name:       "namespace entry does not match top-level prefix without identity metadata",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"namespace","name":"ops"}]}`,
+			forwardMap: map[string]string{"ops__delete": "ops__delete"},
+			wantMode:   "NONE",
+		},
+		{
+			name:       "namespace entry does not match top-level prefix with BuildGeminiFunctionDeclarations",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"namespace","name":"ops"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"function","name":"ops__delete"}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "namespaced choice does not authorize colliding top-level winner",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","namespace":"ops","name":"read"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"function","name":"ops__read"},{"type":"namespace","name":"ops","tools":[{"type":"function","name":"read"}]}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "top-level choice does not authorize colliding namespace winner",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"ops__read"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"function","name":"read"}]}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"ops__read"}]}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "namespaced choice does not authorize same-namespace local-name collision winner",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","namespace":"ops","name":"read"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"function","name":"ops__read"},{"type":"function","name":"read"}]}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "custom choice does not authorize function tool with same name",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"custom","name":"run"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"function","name":"run"}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "untyped custom wrapper does not authorize function tool with same name",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"custom":{"name":"run"}}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"function","name":"run"}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "untyped function wrapper does not authorize custom tool with same name",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"function":{"name":"exec"}}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"custom","name":"exec"}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "tool type without custom wrapper does not authorize custom tool",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[{"type":"tool","name":"exec"}]}`,
+			forwardMap: buildForwardMap(`{"tools":[{"type":"custom","name":"exec"}]}`),
+			wantMode:   "NONE",
+		},
+		{
+			name:       "auto mode omits allowedFunctionNames",
+			choiceJSON: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"get_weather"}]}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "AUTO",
+		},
+		{
+			name:       "omitted mode defaults to AUTO without allowedFunctionNames",
+			choiceJSON: `{"type":"allowed_tools","tools":[{"type":"function","name":"get_weather"}]}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "AUTO",
+		},
+		{
+			name:       "none mode sets NONE without allowedFunctionNames",
+			choiceJSON: `{"type":"allowed_tools","mode":"none","tools":[{"type":"function","name":"get_weather"}]}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "NONE",
+		},
+		{
+			name:       "empty tools under required fails closed to NONE",
+			choiceJSON: `{"type":"allowed_tools","mode":"required","tools":[]}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "NONE",
+		},
+		{
+			name:       "empty tools under auto fails closed to NONE",
+			choiceJSON: `{"type":"allowed_tools","mode":"auto","tools":[]}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "NONE",
+		},
+		{
+			name:       "unknown mode fails closed to NONE",
+			choiceJSON: `{"type":"allowed_tools","mode":"bogus","tools":[{"type":"function","name":"get_weather"}]}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "NONE",
+		},
+		{
+			name:       "nested allowed_tools shape supported",
+			choiceJSON: `{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"get_weather"}}]}}`,
+			forwardMap: weatherForwardMap,
+			wantMode:   "ANY",
+			wantNames:  []string{"get_weather"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			choice := ojson.Parse(tt.choiceJSON)
+			out, ok := ConvertResponsesToolChoiceToGemini(choice, tt.forwardMap)
+			if !ok {
+				t.Fatalf("ConvertResponsesToolChoiceToGemini returned false for %s", tt.choiceJSON)
+			}
+			if mode := ojson.GetBytes(out, "mode").String(); mode != tt.wantMode {
+				t.Fatalf("mode = %q, want %q; out=%s", mode, tt.wantMode, out)
+			}
+			namesRes := ojson.GetBytes(out, "allowedFunctionNames")
+			if len(tt.wantNames) == 0 {
+				if namesRes.Exists() {
+					t.Fatalf("expected no allowedFunctionNames, got %s", out)
+				}
+				return
+			}
+			names := namesRes.Array()
+			if len(names) != len(tt.wantNames) {
+				t.Fatalf("allowedFunctionNames count = %d, want %d; out=%s", len(names), len(tt.wantNames), out)
+			}
+			for i, want := range tt.wantNames {
+				if names[i].String() != want {
+					t.Fatalf("allowedFunctionNames[%d] = %q, want %q; out=%s", i, names[i].String(), want, out)
+				}
+			}
+		})
+	}
+}
+
 func TestUnwrapResponsesCustomToolInput(t *testing.T) {
 	tests := []struct {
 		input string
