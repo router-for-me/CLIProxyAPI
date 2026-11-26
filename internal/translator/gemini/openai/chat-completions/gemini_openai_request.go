@@ -599,11 +599,18 @@ func mergeGeminiOpenAIToolResponseUserContents(contents [][]byte, canMerge []boo
 			continue
 		}
 
+		// Place follow-up user parts before functionResponse parts so Vertex AI
+		// does not reject the turn with HTTP 400 "Requests ending with a model
+		// turn are not supported." while preserving relative part order within
+		// both groups.
 		parts := make([][]byte, 0, partCount)
-		for _, current := range contents[i:j] {
+		for _, current := range contents[i+1 : j] {
 			for _, part := range ojson.GetBytesNoCopy(current, "parts").Array() {
 				parts = append(parts, []byte(part.Raw))
 			}
+		}
+		for _, part := range ojson.GetBytesNoCopy(content, "parts").Array() {
+			parts = append(parts, []byte(part.Raw))
 		}
 		contentDoc := ojson.NewDoc(content)
 		if errSet := contentDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(parts)); errSet != nil {

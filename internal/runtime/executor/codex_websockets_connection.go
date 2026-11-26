@@ -198,12 +198,26 @@ func frameCodexWebsocketRequestBody(body []byte) []byte {
 	return body
 }
 
+// extendCodexWebsocketReadDeadline updates the underlying net.Conn read deadline directly.
+// Using net.Conn.SetReadDeadline (which is documented safe for concurrent calls with active reads)
+// avoids invoking gorilla/websocket.Conn reader methods concurrently across goroutines.
+func extendCodexWebsocketReadDeadline(conn *websocket.Conn) {
+	if conn == nil {
+		return
+	}
+	underlying := conn.UnderlyingConn()
+	if underlying == nil {
+		return
+	}
+	_ = underlying.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+}
+
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
 	if sess == nil {
 		if conn == nil {
 			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		extendCodexWebsocketReadDeadline(conn)
 		msgType, payload, errRead := conn.ReadMessage()
 		return msgType, payload, errRead
 	}

@@ -30,6 +30,7 @@ type modelExecutionOptions struct {
 	Path                    string
 	CallerScope             string
 	AllowSpeechModel        bool
+	homeLocalExecutor       *homeLocalExecution
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.

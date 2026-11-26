@@ -245,6 +245,44 @@ func normalizeModelRegistrationResponse(resp pluginapi.ModelRegistrationResponse
 	}}
 }
 
+// StaticExecutorModels reads the registered models from the selected plugin.
+func (h *Host) StaticExecutorModels(ctx context.Context, id, version string) ([]pluginapi.ModelInfo, error) {
+	for _, record := range h.activeRecords() {
+		if record.id != id || record.version != version || h.isPluginFused(record.id) {
+			continue
+		}
+		caps := record.plugin.Capabilities
+		if caps.Executor == nil || !executorScopeAllowsStaticModels(caps) {
+			return nil, fmt.Errorf("plugin %q has no static executor", id)
+		}
+		var response pluginapi.ModelRegistrationResponse
+		switch {
+		case caps.ModelProvider != nil:
+			result, errModels := h.callModelProviderStaticModels(ctx, record, caps.ModelProvider)
+			if errModels != nil {
+				return nil, errModels
+			}
+			response = pluginapi.ModelRegistrationResponse{
+				Provider: result.Provider, Models: result.Models, Registrations: result.Registrations,
+			}
+		case caps.ModelRegistrar != nil:
+			var errModels error
+			response, errModels = h.callModelRegistrar(ctx, record, caps.ModelRegistrar)
+			if errModels != nil {
+				return nil, errModels
+			}
+		default:
+			return nil, fmt.Errorf("plugin %q has no static model catalog", id)
+		}
+		var models []pluginapi.ModelInfo
+		for _, entry := range normalizeModelRegistrationResponse(response) {
+			models = append(models, entry.Models...)
+		}
+		return models, nil
+	}
+	return nil, fmt.Errorf("plugin %q version %q is unavailable", id, version)
+}
+
 // RegisterModels collects static catalogs for executor and per-auth registration.
 // Catalog-only plugins must not advertise availability independently of credentials.
 func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) {
