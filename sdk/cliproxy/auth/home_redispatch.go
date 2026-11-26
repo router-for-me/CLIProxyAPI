@@ -18,11 +18,13 @@ import (
 const homeReleaseAckTimeoutMessage = "Home did not acknowledge credential release: "
 
 // homeDispatcherHonoursExclusions reports whether the next pick sends
-// excluded_auth_ids. It mirrors the dispatcher switch in pickHomeDispatchSelection;
-// the plain RPopAuth and RPopAuthWithPolicy variants carry no exclusions.
+// excluded_auth_ids and Home applies them. Sending mirrors the dispatcher switch in
+// pickHomeDispatchSelection; the plain RPopAuth and RPopAuthWithPolicy variants
+// carry no exclusions. Home negotiates no capability for applying them, so a Home
+// that has handed back an excluded credential is treated as one that ignores them.
 func (m *Manager) homeDispatcherHonoursExclusions(ctx context.Context) bool {
 	bundle := m.HomeDispatchBundle()
-	if bundle == nil || bundle.client == nil {
+	if bundle == nil || bundle.client == nil || bundle.ignoresExclusions.Load() {
 		return false
 	}
 	client := bundle.client

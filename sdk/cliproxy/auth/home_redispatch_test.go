@@ -25,13 +25,15 @@ const (
 )
 
 // redispatchTestDispatcher hands out accounted credentials in order, honours
-// excluded_auth_ids like a current Home, and can fail chosen dispatch calls.
+// excluded_auth_ids like a current Home unless legacy, and can fail chosen dispatch calls.
 type redispatchTestDispatcher struct {
 	mu       sync.Mutex
 	authIDs  []string
 	calls    int
 	excluded [][]string
 	fail     func(call int) error
+	// legacy ignores excluded_auth_ids like an older Home server.
+	legacy bool
 }
 
 func (*redispatchTestDispatcher) HeartbeatOK() bool { return true }
@@ -53,7 +55,9 @@ func (d *redispatchTestDispatcher) RPopAuthWithConstraints(_ context.Context, mo
 	}
 	excluded := make(map[string]struct{}, len(excludedAuthIDs))
 	for _, authID := range excludedAuthIDs {
-		excluded[authID] = struct{}{}
+		if !d.legacy {
+			excluded[authID] = struct{}{}
+		}
 	}
 	for _, authID := range d.authIDs {
 		if _, skip := excluded[authID]; skip {
@@ -211,6 +215,36 @@ func TestHomeRedispatchSkipsAckWaitForExcludedCredential(t *testing.T) {
 				t.Fatalf("execution scopes leaked: %v", active)
 			}
 		})
+	}
+}
+
+// An older Home ignores excluded_auth_ids and hands a back. CPA learns that from the
+// pick, and later redispatches wait for the release as they did before.
+func TestHomeRedispatchStopsSkippingAckWaitOnceHomeIgnoresExclusions(t *testing.T) {
+	var blocked atomic.Int32
+	dispatcher := &redispatchTestDispatcher{authIDs: []string{redispatchTestAccountA, redispatchTestAccountB}, legacy: true}
+	manager, _ := newRedispatchTestManager(dispatcher, newRedispatchTestRateLimitedExecutor(false), redispatchTestReleaseSink(redispatchTestAccountA, nil, &blocked))
+	ctx := context.Background()
+	if !manager.homeDispatcherHonoursExclusions(ctx) {
+		t.Fatal("a constraints dispatcher should count as honouring exclusions until Home shows otherwise")
+	}
+	excluded := map[string]struct{}{redispatchTestAccountA: {}}
+	opts := withHomeExcludedAuthIDs(cliproxyexecutor.Options{Metadata: map[string]any{}}, excluded)
+	selection, errPick := manager.pickHomeDispatchSelection(ctx, "gpt", opts)
+	if errPick != nil || selection == nil || selection.CloneAuth().ID != redispatchTestAccountA {
+		t.Fatalf("legacy pick = %v, %v; want a handed back", selection, errPick)
+	}
+	if manager.homeDispatcherHonoursExclusions(ctx) {
+		t.Fatal("Home handed back an excluded credential, but CPA still treats it as honouring exclusions")
+	}
+	if sent := dispatcher.Excluded(); len(sent) != 1 || !reflect.DeepEqual(sent[0], []string{redispatchTestAccountA}) {
+		t.Fatalf("dispatch exclusions = %v, want a sent and ignored", sent)
+	}
+	if errEnd := manager.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "stream_start_failed", excluded); !redispatchTestIsHomeUnavailable(errEnd) {
+		t.Fatalf("end on a Home that ignores exclusions = %v, want the release wait's home_unavailable", errEnd)
+	}
+	if got := blocked.Load(); got != 1 {
+		t.Fatalf("unacknowledged releases of a = %d, want the one that was waited on", got)
 	}
 }
 

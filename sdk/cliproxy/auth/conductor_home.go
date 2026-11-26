@@ -42,6 +42,9 @@ type HomeDispatchBundle struct {
 	client     homeAuthDispatcher
 	registry   *executionregistry.Registry
 	generation uint64
+	// ignoresExclusions is set once this Home returned a credential the pick
+	// excluded: an older Home server that ignores excluded_auth_ids.
+	ignoresExclusions atomic.Bool
 }
 
 // PublishHomeDispatch publishes the selectable Home lifetime as one atomic bundle.
@@ -1186,6 +1189,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
+	sentExclusions := true
 	if hierarchyClient, okHierarchy := client.(homeDispatchSessionHierarchyDispatcher); okHierarchy {
 		var retryRoundPtr *int
 		if retryRound >= 0 {
@@ -1198,6 +1202,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		} else if constrainedClient, okConstraints := client.(homeDispatchConstraintsDispatcher); okConstraints {
 			raw, errRPop = constrainedClient.RPopAuthWithConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), excludedAuthIDList, pinnedAuthID)
 		} else {
+			sentExclusions = false
 			raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 		}
 	} else if retryRoundPolicyClient, okRetryRound := client.(homeCredentialPolicyRetryRoundConstraintsDispatcher); okRetryRound {
@@ -1206,6 +1211,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		if constrainedClient, okConstraints := client.(homeCredentialPolicyConstraintsDispatcher); okConstraints {
 			raw, errRPop = constrainedClient.RPopAuthWithPolicyAndConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, excludedAuthIDList, pinnedAuthID)
 		} else {
+			sentExclusions = false
 			raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
 		}
 	} else {
@@ -1317,6 +1323,9 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if strings.TrimSpace(auth.ID) == "" {
 		endScope()
 		return nil, &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+	}
+	if _, excluded := excludedAuthIDs[strings.TrimSpace(auth.ID)]; excluded && sentExclusions {
+		bundle.ignoresExclusions.Store(true)
 	}
 	if pinnedAuthID != "" && strings.TrimSpace(auth.ID) != pinnedAuthID {
 		endScope()
