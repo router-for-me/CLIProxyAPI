@@ -141,7 +141,7 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		return
 	}
 	action := strings.Split(strings.TrimPrefix(request.Action, "/"), ":")
-	if len(action) != 2 {
+	if len(action) != 2 || action[1] == "" {
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("%s not found.", c.Request.URL.Path),
@@ -170,6 +170,13 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		h.handleStreamGenerateContent(c, action[0], rawJSON)
 	case "countTokens":
 		h.handleCountTokens(c, action[0], rawJSON)
+	default:
+		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Unsupported method: %s", method),
+				Type:    "invalid_request_error",
+			},
+		})
 	}
 }
 

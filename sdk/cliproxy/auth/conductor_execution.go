@@ -4039,10 +4039,14 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		return auth, &Error{Code: "sign_in_required", Message: "credential requires sign-in before inference verification", HTTPStatus: http.StatusConflict}
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	executorKey := executorKeyFromAuth(auth)
+	if executorKey == "" {
+		executorKey = provider
+	}
 	m.mu.RLock()
-	executor := m.executors[provider]
+	executor, okExec := m.executorLocked(executorKey)
 	m.mu.RUnlock()
-	if executor == nil {
+	if !okExec || executor == nil {
 		return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
 	}
 

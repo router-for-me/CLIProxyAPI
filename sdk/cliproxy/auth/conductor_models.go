@@ -92,8 +92,12 @@ func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
 	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + openAICompatProviderKey(auth) + "|" + strings.ToLower(base)
 }
 
-func (m *Manager) nextModelPoolOffset(key string, size int) int {
-	if m == nil || size <= 1 {
+func (m *Manager) nextModelPoolOffset(auth *Auth, key string, size int) int {
+	if m == nil || auth == nil || size <= 1 {
+		return 0
+	}
+	authID := auth.ID
+	if strings.TrimSpace(authID) == "" {
 		return 0
 	}
 	key = strings.TrimSpace(key)
@@ -102,17 +106,27 @@ func (m *Manager) nextModelPoolOffset(key string, size int) int {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.modelPoolOffsets == nil {
-		m.modelPoolOffsets = make(map[string]int)
+	if auth.RegistrationEpoch != 0 {
+		current := m.auths[authID]
+		if current == nil || current.RegistrationEpoch != auth.RegistrationEpoch {
+			return 0
+		}
+	} else if m.auths[authID] == nil && m.authEpochs != nil && m.authEpochs[authID] > 0 {
+		return 0
 	}
-	offset := m.modelPoolOffsets[key]
+	if m.modelPoolOffsets == nil {
+		m.modelPoolOffsets = make(map[string]map[string]int)
+	}
+	authOffsets := m.modelPoolOffsets[authID]
+	if authOffsets == nil {
+		authOffsets = make(map[string]int)
+		m.modelPoolOffsets[authID] = authOffsets
+	}
+	offset := authOffsets[key]
 	if offset >= 2_147_483_640 {
 		offset = 0
 	}
-	m.modelPoolOffsets[key] = offset + 1
-	if size <= 0 {
-		return 0
-	}
+	authOffsets[key] = offset + 1
 	return offset % size
 }
 
@@ -251,7 +265,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		offset := m.nextModelPoolOffset(auth, openAICompatModelPoolKey(auth, requestedModel), len(pool))
 		return rotateStrings(pool, offset)
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
@@ -533,7 +547,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 			if len(pool) == 1 {
 				candidates = pool
 			} else {
-				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
+				offset := m.nextModelPoolOffset(auth, openAICompatModelPoolKey(auth, upstreamModel), len(pool))
 				candidates = rotateStrings(pool, offset)
 			}
 		} else {
@@ -728,13 +742,13 @@ func rewriteForceMappedStreamChunk(rewriter *StreamRewriter, payload []byte) []b
 	if len(rewritten) > 0 {
 		return rewritten
 	}
+	if len(rewriter.pendingBuf) > 0 {
+		return nil
+	}
 	if bytes.Contains(payload, []byte("data:")) {
 		if lineWise := rewriteSSEPayloadLines(payload, rewriter.options.RewriteModel); len(lineWise) > 0 {
 			return lineWise
 		}
-	}
-	if len(rewriter.pendingBuf) > 0 {
-		return nil
 	}
 	return nil
 }
