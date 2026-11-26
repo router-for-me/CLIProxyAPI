@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestResponsesWebsocketSessionTeardownWaitsForAnInFlightTerminalFrame(t *tes
 		w.writeMu.Lock()
 		go func() { _, _ = w.closeWithPayload(payload) }()
 		for !w.closing.Load() {
-			time.Sleep(time.Millisecond)
+			runtime.Gosched()
 		}
 		time.AfterFunc(20*time.Millisecond, w.writeMu.Unlock)
 		_, _ = w.closeWithoutError()

@@ -131,14 +131,9 @@ type responsesWebsocketWriter struct {
 	closeMu sync.Mutex
 }
 
-const (
-	// A terminal close waits this long for a write in flight to finish, so its frame is not
-	// dropped behind a writer that is only finishing. A writer still blocked after it is cut off.
-	responsesWebsocketCloseLockWait = 250 * time.Millisecond
-	// The terminal frame's own write gives up after this, so a client that stopped reading
-	// cannot hold the session open.
-	responsesWebsocketCloseWriteTimeout = time.Second
-)
+// A terminal close waits this long for a write in flight to finish, so its frame is not
+// dropped behind a writer that is only finishing. A writer still blocked after it is cut off.
+const responsesWebsocketCloseLockWait = 250 * time.Millisecond
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
 	return &responsesWebsocketWriter{conn: conn}
@@ -177,7 +172,7 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 	}
 	defer w.writeMu.Unlock()
 
-	errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, time.Now().Add(responsesWebsocketCloseWriteTimeout))
+	errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, time.Time{})
 	errClose := w.conn.Close()
 	if errWrite != nil {
 		return true, errWrite
@@ -317,7 +312,6 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	}
 	defer w.writeMu.Unlock()
 
-	_ = w.conn.SetWriteDeadline(time.Now().Add(responsesWebsocketCloseWriteTimeout))
 	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
 	errClose := w.conn.Close()
 	if errWrite != nil {
