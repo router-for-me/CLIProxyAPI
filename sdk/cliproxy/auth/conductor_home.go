@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,6 +68,30 @@ func (m *Manager) HomeDispatchBundle() *HomeDispatchBundle {
 		return nil
 	}
 	return m.homeDispatchBundle.Load()
+}
+
+// AuthorizeHomeLocalExecutor uses the currently attached Home lifetime for the
+// authorization and returns its validity check for the executor.
+func (m *Manager) AuthorizeHomeLocalExecutor(ctx context.Context, model string, headers http.Header, query url.Values) (home.LocalExecutorDecision, func() bool, error) {
+	bundle := m.HomeDispatchBundle()
+	if bundle == nil || !bundle.client.HeartbeatOK() {
+		return home.LocalExecutorDecision{}, nil, errors.New("home control center unavailable")
+	}
+	valid := func() bool { return m.HomeEnabled() && m.HomeDispatchBundle() == bundle && bundle.client.HeartbeatOK() }
+	client, ok := bundle.client.(interface {
+		AuthorizeLocalExecutor(context.Context, string, http.Header, url.Values) (home.LocalExecutorDecision, error)
+	})
+	if !ok {
+		return home.LocalExecutorDecision{Kind: "credential"}, valid, nil
+	}
+	decision, errAuthorize := client.AuthorizeLocalExecutor(ctx, model, headers, query)
+	if !valid() {
+		return home.LocalExecutorDecision{}, nil, errors.New("home control center unavailable")
+	}
+	if errAuthorize == nil && decision.Kind == home.LocalExecutorDispatchKind && decision.Error == nil {
+		setHomeUserAPIKeyOnGinContext(ctx, decision.Principal)
+	}
+	return decision, valid, errAuthorize
 }
 
 // SetHomeExecutionRegistry preserves the legacy registry API for callers that also install the current dispatcher.

@@ -4298,7 +4298,7 @@ func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 func TestMapExecutorStreamChunksExitsWhenContextCanceledWithoutDownstreamConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	in := make(chan pluginapi.ExecutorStreamChunk)
-	out := mapExecutorStreamChunks(ctx, in)
+	out := (&executorAdapter{}).mapExecutorStreamChunks(ctx, in)
 	sent := make(chan struct{})
 
 	go func() {

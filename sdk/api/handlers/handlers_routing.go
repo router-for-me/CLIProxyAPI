@@ -390,6 +390,9 @@ func (h *BaseAPIHandler) applyModelRouter(ctx context.Context, handlerType, mode
 	switch resp.TargetKind {
 	case pluginapi.ModelRouteTargetSelf, pluginapi.ModelRouteTargetExecutor:
 		decision.ExecutorPluginID = strings.TrimSpace(resp.Target)
+		if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+			return modelRouteDecision{}
+		}
 	case pluginapi.ModelRouteTargetProvider:
 		decision.Provider = strings.ToLower(strings.TrimSpace(resp.Target))
 		decision.Model = strings.TrimSpace(resp.TargetModel)
