@@ -105,33 +105,34 @@ func TestServiceShutdown_ClosesListenerBeforeWaitingForRefreshSave(t *testing.T)
 	}
 
 	service := &Service{server: server, cfg: cfg, coreManager: manager}
+	shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
+	defer cancelShutdown()
 	shutdownDone := make(chan error, 1)
 	go func() {
-		shutdownDone <- service.Shutdown(context.Background())
+		shutdownDone <- service.Shutdown(shutdownCtx)
 	}()
 
 	select {
 	case <-serverStopped:
 	case errShutdown := <-shutdownDone:
-		t.Fatalf("Shutdown returned (err %v) while the refresh save was still held", errShutdown)
+		t.Fatalf("Shutdown returned (err %v) before closing the API listener", errShutdown)
 	case <-hangGuard.C:
 		t.Fatal("API listener still open while Shutdown waits for a refresh save")
 	}
-	select {
-	case errShutdown := <-shutdownDone:
-		t.Fatalf("Shutdown returned (err %v) while the refresh save was still held", errShutdown)
-	default:
-	}
 
-	releaseSave()
+	// The listener is closed and the save is still held. Ending ctx now makes a
+	// Shutdown that is still waiting for the save return context.Canceled; one
+	// that skipped the wait has returned nil already. No scheduling assumption.
+	cancelShutdown()
 	select {
 	case errShutdown := <-shutdownDone:
-		if errShutdown != nil {
-			t.Fatalf("Shutdown error = %v, want nil", errShutdown)
+		if !errors.Is(errShutdown, context.Canceled) {
+			t.Fatalf("Shutdown error = %v, want context.Canceled from the refresh wait", errShutdown)
 		}
 	case <-hangGuard.C:
-		t.Fatal("Shutdown did not return after the refresh save was released")
+		t.Fatal("Shutdown did not return after its ctx ended")
 	}
+	releaseSave()
 }
 
 // countingStopSelector counts Stop calls; StoppableSelector.Stop need not be
