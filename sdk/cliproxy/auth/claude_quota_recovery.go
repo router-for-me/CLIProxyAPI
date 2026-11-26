@@ -105,10 +105,10 @@ func claudeQuotaCandidate(a *Auth) bool {
 		if s == nil || s.Status == StatusDisabled {
 			continue
 		}
-		if isModelStateActiveCooldown(s.credentialQuotaShadow, now) || s.nonQuotaCooldownUntil.After(now) || s.nonCapacityCooldownUntil.After(now) || s.forceCooldownUntil.After(now) || s.quotaForceCooldownUntil.After(now) {
+		if hasLiveNonQuotaBlock(s, now) || hasLiveNonQuotaBlock(s.credentialQuotaShadow, now) {
 			return false
 		}
-		quota := s.Quota.Exceeded && (s.Quota.Reason == "quota" || s.Quota.Reason == "credential_quota")
+		quota := isQuotaModelState(s)
 		// A quota state can keep an old error from before the quota. The live
 		// deadlines above show whether that error still blocks the model.
 		if !quota && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
@@ -119,6 +119,22 @@ func claudeQuotaCandidate(a *Auth) bool {
 		}
 	}
 	return blocked
+}
+
+// hasLiveNonQuotaBlock reports whether s has a live cooldown that a usage
+// report cannot clear: a non-quota or forced deadline, or a block without quota.
+func hasLiveNonQuotaBlock(s *ModelState, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	if s.nonQuotaCooldownUntil.After(now) || s.nonCapacityCooldownUntil.After(now) || s.forceCooldownUntil.After(now) || s.quotaForceCooldownUntil.After(now) {
+		return true
+	}
+	return !isQuotaModelState(s) && isModelStateActiveCooldown(s, now)
+}
+
+func isQuotaModelState(s *ModelState) bool {
+	return s.Quota.Exceeded && (s.Quota.Reason == "quota" || s.Quota.Reason == "credential_quota")
 }
 
 func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
@@ -137,15 +153,32 @@ func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
 		if !m.claudeQuotaProbes.tryStart(a.ID) {
 			continue
 		}
-		go func(a *Auth) {
-			defer m.claudeQuotaProbes.finish(a.ID)
-			if !m.claudeQuotaProbes.acquire(ctx) {
-				return
-			}
-			defer m.claudeQuotaProbes.release()
-			m.probeClaudeQuota(ctx, a)
-		}(a)
+		// Subscribe before the goroutine starts, so no change is missed.
+		changes, stopWatch := m.WatchAuthChanges(a.ID)
+		go m.runClaudeQuotaProbe(ctx, a, changes, stopWatch)
 	}
+}
+
+// runClaudeQuotaProbe runs one reserved probe. A change of the auth, such as
+// a new token or proxy, cancels it, so the reservation does not outlive the
+// credential that it probes.
+func (m *Manager) runClaudeQuotaProbe(ctx context.Context, a *Auth, changes <-chan struct{}, stopWatch func()) {
+	defer m.claudeQuotaProbes.finish(a.ID)
+	defer stopWatch()
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-changes:
+			cancel()
+		case <-probeCtx.Done():
+		}
+	}()
+	if !m.claudeQuotaProbes.acquire(probeCtx) {
+		return
+	}
+	defer m.claudeQuotaProbes.release()
+	m.probeClaudeQuota(probeCtx, a)
 }
 
 func (m *Manager) probeClaudeQuota(ctx context.Context, a *Auth) {

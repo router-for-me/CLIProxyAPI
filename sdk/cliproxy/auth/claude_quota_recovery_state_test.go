@@ -370,3 +370,59 @@ func TestClaudeQuotaRecoveryIgnoresUnavailableDisabledModel(t *testing.T) {
 		t.Fatalf("recovery re-enabled a disabled model: %+v", s)
 	}
 }
+
+func TestClaudeQuotaRecoveryAcceptsQuotaShadow(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	newModelBlockedClaudeAuth(t, m, t.Name())
+	quota := 2 * 24 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: t.Name(), Provider: "claude", Model: "claude-haiku", CredentialScope: true, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+	snapshot, _ := m.GetByID(t.Name())
+	if shadow := snapshot.ModelStates["claude-fable-5-2"].credentialQuotaShadow; !isModelStateActiveCooldown(shadow, time.Now()) {
+		t.Fatalf("fixture: no live quota shadow on the first model: %+v", shadow)
+	}
+	if err := m.restoreClaudeQuota(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := m.GetByID(t.Name())
+	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); blocked {
+		t.Fatal("a quota-only shadow kept the account blocked")
+	}
+}
+
+func TestClaudeQuotaProbeStopsWhenCredentialChanges(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	newModelBlockedClaudeAuth(t, m, t.Name())
+	var mu sync.Mutex
+	calls := 0
+	m.RegisterExecutor(&claudeQuotaExecutor{request: func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	}})
+	m.reconcileClaudeQuota(context.Background())
+	current, _ := m.GetByID(t.Name())
+	replacement := current.Clone()
+	replacement.Metadata["access_token"] = "test-oauth-replaced"
+	if _, err := m.Update(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		m.claudeQuotaProbes.wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a stalled probe kept its reservation after the credential changed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("usage requests=%d, want 1", calls)
+	}
+}
