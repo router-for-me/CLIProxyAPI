@@ -209,6 +209,11 @@ GET /v8/management/oauth/auth-url?provider=codex
 Authorization: Bearer <management-key>
 ```
 
+For Codex, add `flow=device` (query parameter or POST JSON field) to use device
+login instead of the browser callback. The response includes `flow: "device"`,
+the verification `url`, `user_code`, and `expires_in`; poll the session `state`
+as usual.
+
 Keep any provider-specific login parameters in the query string. To target recovery
 at a specific existing credential, pass `name` (or `auth_index`) via query parameter
 or POST JSON body; authenticating a different account will be rejected rather than

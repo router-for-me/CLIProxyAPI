@@ -145,6 +145,7 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 	targetAuthIndex := strings.TrimSpace(c.Query("auth_index"))
 	verifyAfterLogin := strings.EqualFold(strings.TrimSpace(c.Query("verify")), "true") || strings.TrimSpace(c.Query("verify")) == "1"
 	verifyModel := strings.TrimSpace(c.Query("verify_model"))
+	flow := strings.TrimSpace(c.Query("flow"))
 	if c.Request != nil && c.Request.Body != nil {
 		rawBody, errRead := io.ReadAll(c.Request.Body)
 		if errRead != nil {
@@ -198,6 +199,10 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 				if trimmed := strings.TrimSpace(idxStr); trimmed != "" && targetAuthIndex == "" {
 					targetAuthIndex = trimmed
 				}
+			}
+
+			if flowStr, ok := bodyMap["flow"].(string); ok && flow == "" {
+				flow = strings.TrimSpace(flowStr)
 			}
 
 			var rawProxySnake, rawProxyKebab string
@@ -406,7 +411,14 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 	case "claude":
 		h.RequestAnthropicToken(c)
 	case "codex":
-		h.RequestCodexToken(c)
+		switch strings.ToLower(flow) {
+		case "":
+			h.RequestCodexToken(c)
+		case "device":
+			h.requestCodexDeviceToken(c)
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid flow"})
+		}
 	case "antigravity":
 		h.RequestAntigravityToken(c)
 	case "kimi":

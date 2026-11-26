@@ -74,6 +74,7 @@ func TestBuildAuthRecord_PlanTypeExtractedWhenPresent(t *testing.T) {
 			IDToken:      idTokenWithPlan,
 			AccessToken:  "mock-access-token",
 			RefreshToken: "mock-refresh-token",
+			AccountID:    "acc-12345",
 			Email:        "user@example.com",
 			PlanType:     "plus",
 		},
@@ -86,6 +87,9 @@ func TestBuildAuthRecord_PlanTypeExtractedWhenPresent(t *testing.T) {
 
 	if got := auth.Attributes["plan_type"]; got != "plus" {
 		t.Errorf("auth.Attributes[plan_type] = %q, want plus", got)
+	}
+	if got := auth.Metadata["account_id"]; got != "acc-12345" {
+		t.Errorf("auth.Metadata[account_id] = %v, want acc-12345", got)
 	}
 	if got := auth.Metadata["plan_type"]; got != "plus" {
 		t.Errorf("auth.Metadata[plan_type] = %q, want plus", got)
