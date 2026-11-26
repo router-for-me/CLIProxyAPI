@@ -25,6 +25,10 @@ type delegatedInterceptorHost struct {
 	pluginHost *pluginhost.Host
 }
 
+func (h *delegatedInterceptorHost) HomeLocalExecutorFence() func() bool {
+	return h.pluginHost.HomeLocalExecutorFence()
+}
+
 var (
 	_ handlers.PluginInterceptorHost = (*delegatedInterceptorHost)(nil)
 	_ handlers.PluginExecutorHost    = (*delegatedInterceptorHost)(nil)
