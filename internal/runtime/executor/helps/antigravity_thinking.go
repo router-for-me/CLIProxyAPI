@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -59,12 +60,15 @@ func CapAntigravityMaxOutputTokensDoc(doc *ojson.Doc, limit int, isClaudeModel b
 	for _, path := range []string{
 		"request.generationConfig.maxOutputTokens",
 		"request.generationConfig.max_output_tokens",
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
 	} {
 		value := doc.Get(path)
 		if value.Exists() && value.Type == ojson.Number && value.Int() > 0 && value.Int() < effectiveMaxOutputTokens {
 			effectiveMaxOutputTokens = value.Int()
 		}
 	}
+	CanonicalizeAntigravityGenerationConfigDoc(doc)
 	_ = doc.Delete("request.generationConfig.max_output_tokens")
 	_ = doc.Set("request.generationConfig.maxOutputTokens", effectiveMaxOutputTokens)
 	if !isClaudeModel {
@@ -96,6 +100,93 @@ func CapAntigravityMaxOutputTokensDoc(doc *ojson.Doc, limit int, isClaudeModel b
 			_ = doc.Set(budgetPath, budgetVal)
 		}
 	}
+}
+
+// CanonicalizeAntigravityGenerationConfigDoc merges snake_case generation_config
+// into camelCase generationConfig and removes generation_config so outbound
+// payloads never emit duplicate proto-JSON containers.
+func CanonicalizeAntigravityGenerationConfigDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	snakeGen := doc.Get("request.generation_config")
+	if !snakeGen.Exists() {
+		return
+	}
+	if snakeGen.IsObject() {
+		MergeAntigravityProtoObjectDoc(doc, "request.generationConfig", snakeGen, "maxoutputtokens")
+	}
+	_ = doc.Delete("request.generation_config")
+}
+
+// MergeAntigravityProtoObjectDoc merges non-conflicting fields from src into the
+// JSON object at dstPath, matching keys by proto-JSON canonical form (case- and
+// underscore-insensitive) so existing destination fields take precedence without
+// introducing duplicate proto-JSON aliases.
+func MergeAntigravityProtoObjectDoc(doc *ojson.Doc, dstPath string, src ojson.Result, skipNormalizedKeys ...string) {
+	if doc == nil || !src.IsObject() {
+		return
+	}
+	dst := doc.Get(dstPath)
+	if !dst.IsObject() {
+		if len(skipNormalizedKeys) == 0 {
+			_ = doc.SetRaw(dstPath, src.Raw)
+			return
+		}
+		if dst.Exists() {
+			_ = doc.Delete(dstPath)
+		}
+	}
+	existing := make(map[string]struct{}, len(skipNormalizedKeys))
+	for _, skip := range skipNormalizedKeys {
+		existing[normalizeAntigravityProtoKey(skip)] = struct{}{}
+	}
+	if dst.IsObject() {
+		dst.ForEach(func(key, _ ojson.Result) bool {
+			existing[normalizeAntigravityProtoKey(key.String())] = struct{}{}
+			return true
+		})
+	}
+	src.ForEach(func(key, value ojson.Result) bool {
+		k := key.String()
+		norm := normalizeAntigravityProtoKey(k)
+		if _, exists := existing[norm]; exists {
+			return true
+		}
+		_ = doc.SetRaw(dstPath+"."+escapeAntigravityOJSONKey(k), value.Raw)
+		existing[norm] = struct{}{}
+		return true
+	})
+}
+
+func normalizeAntigravityProtoKey(key string) string {
+	var b strings.Builder
+	b.Grow(len(key))
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if c == '_' {
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func escapeAntigravityOJSONKey(key string) string {
+	var b strings.Builder
+	b.Grow(len(key))
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if (i == 0 && (c == ':' || c == '[' || c == '{' || c == '!')) ||
+			c == '.' || c == '\\' || c == '|' || c == '#' || c == '*' || c == '?' || c == '@' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // ApplyAntigravityRequestThinkingDoc formats a selected level with the canonical

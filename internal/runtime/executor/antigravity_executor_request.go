@@ -195,10 +195,11 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	}
 	if isClaudeModel {
 		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
+			canonicalizeAntigravityToolConfigForValidatedDoc(doc)
 			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
 	} else if selection.MaxOutputTokens == 0 {
-		_ = doc.Delete("request.generationConfig.maxOutputTokens")
+		stripAntigravityMaxOutputTokensDoc(doc)
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
@@ -279,6 +280,77 @@ func antigravityToolChoiceModeIsNoneDoc(doc *ojson.Doc) bool {
 		}
 	}
 	return false
+}
+
+// canonicalizeAntigravityToolConfigForValidatedDoc merges snake_case tool_config
+// and function_calling_config containers into their camelCase canonical paths before
+// setting VALIDATED mode, preserving non-conflicting fields while preventing
+// duplicate proto-JSON keys on upstream requests.
+func canonicalizeAntigravityToolConfigForValidatedDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	canonicalizeAntigravityFunctionCallingConfigDoc(doc)
+	if snakeToolConfig := doc.Get("request.tool_config"); snakeToolConfig.Exists() {
+		if snakeToolConfig.IsObject() {
+			if !doc.Get("request.toolConfig").IsObject() {
+				_ = doc.SetRaw("request.toolConfig", snakeToolConfig.Raw)
+				canonicalizeAntigravityFunctionCallingConfigDoc(doc)
+			} else {
+				helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig", snakeToolConfig, "functioncallingconfig")
+				if fcc := snakeToolConfig.Get("functionCallingConfig"); fcc.IsObject() {
+					helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", fcc)
+				}
+				if fccSnake := snakeToolConfig.Get("function_calling_config"); fccSnake.IsObject() {
+					helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", fccSnake)
+				}
+			}
+		}
+		_ = doc.Delete("request.tool_config")
+	}
+}
+
+func canonicalizeAntigravityFunctionCallingConfigDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	snakeFCC := doc.Get("request.toolConfig.function_calling_config")
+	if !snakeFCC.Exists() {
+		return
+	}
+	if snakeFCC.IsObject() {
+		helps.MergeAntigravityProtoObjectDoc(doc, "request.toolConfig.functionCallingConfig", snakeFCC)
+	}
+	_ = doc.Delete("request.toolConfig.function_calling_config")
+}
+
+// stripAntigravityMaxOutputTokensDoc removes maxOutputTokens and its snake_case
+// aliases under both generationConfig and generation_config containers, pruning
+// an emptied generation_config container and merging mixed containers when both
+// generationConfig and generation_config remain present.
+func stripAntigravityMaxOutputTokensDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	_ = doc.Delete("request.generationConfig.maxOutputTokens")
+	_ = doc.Delete("request.generationConfig.max_output_tokens")
+	deletedSnakeGenConfig := false
+	for _, path := range []string{
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
+	} {
+		if doc.Get(path).Exists() && doc.Delete(path) == nil {
+			deletedSnakeGenConfig = true
+		}
+	}
+	if deletedSnakeGenConfig {
+		if gc := doc.Get("request.generation_config"); gc.Exists() && gc.IsObject() && len(gc.Map()) == 0 {
+			_ = doc.Delete("request.generation_config")
+		}
+	}
+	if doc.Get("request.generation_config").Exists() && doc.Get("request.generationConfig").Exists() {
+		helps.CanonicalizeAntigravityGenerationConfigDoc(doc)
+	}
 }
 
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
@@ -1152,6 +1224,8 @@ func antigravityRequestedMaxOutputTokensDoc(doc *ojson.Doc) (int, bool) {
 	for _, path := range []string{
 		"request.generationConfig.maxOutputTokens",
 		"request.generationConfig.max_output_tokens",
+		"request.generation_config.maxOutputTokens",
+		"request.generation_config.max_output_tokens",
 	} {
 		val := doc.Get(path)
 		if val.Exists() && val.Type == ojson.Number {

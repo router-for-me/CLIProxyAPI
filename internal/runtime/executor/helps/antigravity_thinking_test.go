@@ -121,4 +121,48 @@ func TestCapAntigravityMaxOutputTokensDoc_ClaudeMinBudget(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("canonicalizes_snake_case_generation_config_without_duplication", func(t *testing.T) {
+		t.Run("claude_sub_1024_strips_thinking_and_deduplicates", func(t *testing.T) {
+			doc := ojson.NewDocString(`{"request":{"generation_config":{"max_output_tokens":512,"temperature":0.2,"thinking_config":{"thinking_budget":2048,"include_thoughts":true}}}}`)
+			CapAntigravityMaxOutputTokensDoc(doc, 64000, true)
+
+			if doc.Get("request.generation_config").Exists() {
+				t.Fatalf("expected request.generation_config to be canonicalized away; body=%s", doc.String())
+			}
+			if doc.Get("request.generationConfig.max_output_tokens").Exists() {
+				t.Fatalf("expected max_output_tokens to be deleted; body=%s", doc.String())
+			}
+			if got := doc.Get("request.generationConfig.maxOutputTokens").Int(); got != 512 {
+				t.Fatalf("maxOutputTokens = %d, want 512; body=%s", got, doc.String())
+			}
+			if got := doc.Get("request.generationConfig.temperature").Float(); got != 0.2 {
+				t.Fatalf("temperature = %v, want 0.2; body=%s", got, doc.String())
+			}
+			if doc.Get("request.generationConfig.thinkingConfig").Exists() || doc.Get("request.generationConfig.thinking_config").Exists() {
+				t.Fatalf("expected thinking config stripped when budget < 1024; body=%s", doc.String())
+			}
+		})
+
+		t.Run("merges_both_containers_without_duplication", func(t *testing.T) {
+			doc := ojson.NewDocString(`{"request":{"generationConfig":{"temperature":0.4},"generation_config":{"max_output_tokens":2048,"top_p":0.9,"thinking_config":{"thinking_budget":4096}}}}`)
+			CapAntigravityMaxOutputTokensDoc(doc, 64000, true)
+
+			if doc.Get("request.generation_config").Exists() {
+				t.Fatalf("expected request.generation_config to be merged and deleted; body=%s", doc.String())
+			}
+			if got := doc.Get("request.generationConfig.maxOutputTokens").Int(); got != 2048 {
+				t.Fatalf("maxOutputTokens = %d, want 2048; body=%s", got, doc.String())
+			}
+			if got := doc.Get("request.generationConfig.temperature").Float(); got != 0.4 {
+				t.Fatalf("temperature = %v, want 0.4; body=%s", got, doc.String())
+			}
+			if got := doc.Get("request.generationConfig.top_p").Float(); got != 0.9 {
+				t.Fatalf("top_p = %v, want 0.9; body=%s", got, doc.String())
+			}
+			if got := doc.Get("request.generationConfig.thinking_config.thinking_budget").Int(); got != 2047 {
+				t.Fatalf("thinking_budget = %d, want 2047; body=%s", got, doc.String())
+			}
+		})
+	})
 }
