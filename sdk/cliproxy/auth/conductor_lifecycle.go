@@ -511,6 +511,7 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 	}
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
+	auth.failureSeq = existing.failureSeq
 	auth.recentRequests = existing.recentRequests
 	auth.antigravityEnumRegistration = existing.antigravityEnumRegistration
 	if existing.CopilotCatalog != nil || auth.CopilotCatalog != nil {

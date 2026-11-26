@@ -100,16 +100,16 @@ func claudeQuotaCandidate(a *Auth) bool {
 		if s == nil {
 			continue
 		}
-		if s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests {
-			return false
-		}
 		if isModelStateActiveCooldown(s.credentialQuotaShadow, now) || s.nonQuotaCooldownUntil.After(now) || s.nonCapacityCooldownUntil.After(now) || s.forceCooldownUntil.After(now) || s.quotaForceCooldownUntil.After(now) {
 			return false
 		}
-		if (s.Unavailable || s.Status == StatusError) && (!s.Quota.Exceeded || (s.Quota.Reason != "quota" && s.Quota.Reason != "credential_quota")) {
+		quota := s.Quota.Exceeded && (s.Quota.Reason == "quota" || s.Quota.Reason == "credential_quota")
+		// A quota state can keep an old error from before the quota. The live
+		// deadlines above show whether that error still blocks the model.
+		if !quota && ((s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests) || s.Unavailable || s.Status == StatusError) {
 			return false
 		}
-		if s.Quota.Exceeded && (s.Quota.Reason == "quota" || s.Quota.Reason == "credential_quota") && isModelStateActiveCooldown(s, now) {
+		if quota && isModelStateActiveCooldown(s, now) {
 			blocked = true
 		}
 	}
