@@ -675,7 +675,7 @@ func TestScheduler_ReadyAuthDemotedWhenTokenExpires(t *testing.T) {
 
 	registerSchedulerModels(t, "codex", "gpt-5-short-test", "short-lived-auth")
 
-	futureExpiry := time.Now().Add(10 * time.Minute).Format(time.RFC3339)
+	futureExpiry := time.Now().Add(10 * time.Minute)
 	auth := &Auth{
 		ID:       "short-lived-auth",
 		Provider: "codex",
@@ -683,7 +683,7 @@ func TestScheduler_ReadyAuthDemotedWhenTokenExpires(t *testing.T) {
 		Metadata: map[string]any{
 			"email":        "short@example.com",
 			"access_token": "short-lived-access-token",
-			"expired":      futureExpiry,
+			"expired":      futureExpiry.Format(time.RFC3339),
 		},
 	}
 	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
@@ -699,25 +699,11 @@ func TestScheduler_ReadyAuthDemotedWhenTokenExpires(t *testing.T) {
 		t.Fatalf("pickSingle() got = %v, want %q", got, auth.ID)
 	}
 
-	// Explicitly mutate the internal auth metadata timestamp to the past without re-upserting
-	pastExpiry := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-	manager.mu.Lock()
-	if current := manager.auths[auth.ID]; current != nil {
-		current.Metadata["expired"] = pastExpiry
-	}
+	// Advance the shard's expiry check without changing the published snapshot.
 	manager.scheduler.mu.Lock()
-	if p := manager.scheduler.providers["codex"]; p != nil {
-		if meta := p.auths[auth.ID]; meta != nil && meta.auth != nil {
-			meta.auth.Metadata["expired"] = pastExpiry
-		}
-		for _, shard := range p.modelShards {
-			if entry := shard.entries[auth.ID]; entry != nil && entry.auth != nil {
-				entry.auth.Metadata["expired"] = pastExpiry
-			}
-		}
-	}
+	shard := manager.scheduler.providers["codex"].modelShards["gpt-5-short-test"]
+	shard.promoteExpiredLocked(futureExpiry)
 	manager.scheduler.mu.Unlock()
-	manager.mu.Unlock()
 
 	// Second pick: scheduler dynamic check must demote the expired token and reject pick
 	gotAfter, errPickAfter := manager.scheduler.pickSingle(ctx, "codex", "gpt-5-short-test", cliproxyexecutor.Options{}, nil)

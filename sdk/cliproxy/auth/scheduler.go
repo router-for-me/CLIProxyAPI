@@ -78,6 +78,7 @@ type modelScheduler struct {
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
 	blocked         cooldownQueue
+	nextTokenExpiry time.Time
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
@@ -1365,6 +1366,8 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	switch {
 	case !blocked:
 		entry.state = scheduledStateReady
+		exp, _ := entry.auth.AccessTokenExpirationTime()
+		m.trackTokenExpiry(exp)
 	case reason == blockReasonCooldown:
 		entry.state = scheduledStateCooldown
 		entry.nextRetryAt = next
@@ -1393,24 +1396,32 @@ func (m *modelScheduler) removeEntryLocked(authID string) {
 	m.rebuildIndexesLocked()
 }
 
-// demoteExpiredTokensLocked checks ready auths and demotes any whose access token has expired.
+// A refreshed or removed token may leave an earlier deadline that triggers one extra scan.
+func (m *modelScheduler) trackTokenExpiry(exp time.Time) {
+	if !exp.IsZero() && (m.nextTokenExpiry.IsZero() || exp.Before(m.nextTokenExpiry)) {
+		m.nextTokenExpiry = exp
+	}
+}
+
 func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
-	if m == nil || len(m.entries) == 0 {
+	if m.nextTokenExpiry.IsZero() || m.nextTokenExpiry.After(now) {
 		return false
 	}
+	m.nextTokenExpiry = time.Time{}
 	changed := false
 	for _, entry := range m.entries {
 		if entry == nil || entry.auth == nil || entry.state != scheduledStateReady {
 			continue
 		}
-		if exp, ok := entry.auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		exp, ok := entry.auth.AccessTokenExpirationTime()
+		if ok && !exp.IsZero() && !exp.After(now) {
 			blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
 			if blocked {
-				switch {
-				case reason == blockReasonCooldown:
+				switch reason {
+				case blockReasonCooldown:
 					entry.state = scheduledStateCooldown
 					entry.nextRetryAt = next
-				case reason == blockReasonDisabled:
+				case blockReasonDisabled:
 					entry.state = scheduledStateDisabled
 					entry.nextRetryAt = time.Time{}
 				default:
@@ -1418,8 +1429,10 @@ func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
 					entry.nextRetryAt = next
 				}
 				changed = true
+				continue
 			}
 		}
+		m.trackTokenExpiry(exp)
 	}
 	return changed
 }
@@ -1443,6 +1456,8 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 		case !blocked:
 			entry.state = scheduledStateReady
 			entry.nextRetryAt = time.Time{}
+			exp, _ := entry.auth.AccessTokenExpirationTime()
+			m.trackTokenExpiry(exp)
 		case reason == blockReasonCooldown:
 			entry.state = scheduledStateCooldown
 			entry.nextRetryAt = next
