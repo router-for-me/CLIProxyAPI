@@ -374,12 +374,17 @@ func (m *Manager) updateInternalWithStatus(ctx context.Context, base, auth *Auth
 	if auth == nil || auth.ID == "" {
 		return nil, false, false, nil
 	}
+	var onPersistDone func()
+	ctx, onPersistDone = detachAutoRefreshPersistDone(ctx)
 	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
 	if errMutation != nil {
 		return nil, false, false, errMutation
 	}
 	committedAuth, didCommit, baseSuperseded, persistCooldown, err := m.updateInternalLockedWithOptions(ctx, base, auth, mode, strictPrepareVersion)
 	releaseMutation()
+	if mode == updateModeRefresh && onPersistDone != nil {
+		onPersistDone()
+	}
 	if err == nil && didCommit && committedAuth != nil {
 		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
 	}

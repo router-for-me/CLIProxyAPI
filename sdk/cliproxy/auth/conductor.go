@@ -268,6 +268,9 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
 	refreshJobs map[string]*authRefreshJob
+	// autoRefreshInFlight counts auto-refresh workers still refreshing or persisting under m.mu.
+	autoRefreshInFlight int
+	autoRefreshIdleCh   chan struct{}
 
 	// refreshLocks serializes credential refresh and request-auth preparation
 	// per auth ID so concurrent refreshes, 401 recoveries, and preparations do
