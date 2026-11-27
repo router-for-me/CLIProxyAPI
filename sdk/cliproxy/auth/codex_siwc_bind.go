@@ -158,6 +158,7 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 		updated.CredentialVersion = max(current.CredentialVersion, 1) + 1
 		updated.UpdatedAt = now
 		updated.ClearFileSnapshot()
+		m.sequenceCoolingDisabledClearsLocked(updated)
 		m.auths[id] = updated
 		m.notifyAuthChangeLocked(id)
 		committed = updated.Clone()

@@ -1047,7 +1047,10 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 		// targets (no shadow) fully release. Deadline or status heuristics
 		// cannot recover this provenance reliably.
 		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
+			outerReset := state.cloneShallow()
 			*state = *shadow.cloneShallow()
+			// The outer state may hold a reset written after the shadow's.
+			keepLaterCoolingDisabledReset(state, outerReset)
 			state.UpdatedAt = now
 			continue
 		}

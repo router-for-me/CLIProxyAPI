@@ -436,6 +436,13 @@ type ModelState struct {
 	// watermarks tie, as they do for direct MarkResult callers. Zero means no
 	// reset was ever written. Runtime only.
 	coolingDisabledRetryStamp uint64 `json:"-"`
+	// coolingDisabledClearPending marks a live reset cleared by resetModelState,
+	// which has no manager to read the dispatch sequence from. The manager
+	// method that ran the clear sets coolingDisabledRetrySeq to the current
+	// dispatch sequence before it commits the auth
+	// (sequenceCoolingDisabledClearsLocked), so a 429 dispatched before the clear
+	// cannot reinstall the reset. Runtime only.
+	coolingDisabledClearPending bool `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
 	// cooldown layer while the outer fields present the auth-level
 	// credential quota propagated over it, so quota restoration can drop

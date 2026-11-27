@@ -1222,6 +1222,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
 		cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 	}
+	m.sequenceCoolingDisabledClearsLocked(auth)
 	errPersist := m.persistLocked(ctx, auth)
 	m.mu.Unlock()
 	releaseMutation()
@@ -1836,12 +1837,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// provenance so a future window snapshots fresh state.
 					if (state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota") &&
 						!(auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) {
+						// Normalizing cooldown layers is not a reset event for the
+						// model's cooling-disabled reset: keep it.
+						savedReset := state.cloneShallow()
 						if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
 							preservedSeq := shadow.cooldownRecordedSeq
 							*state = *shadow.cloneShallow()
 							state.cooldownRecordedSeq = preservedSeq
+							keepLaterCoolingDisabledReset(state, savedReset)
 						} else {
 							resetModelState(state, now)
+							restoreCoolingDisabledReset(state, savedReset)
 						}
 					}
 					// Two-layer handling (issue #6690): while an auth-level
@@ -2480,6 +2486,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		m.sequenceCoolingDisabledClearsLocked(auth)
 		_ = m.persistLocked(ctx, auth)
 		authSnapshot = auth.Clone()
 		if trackCooldownState {
@@ -2618,6 +2625,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 		}
 		auth.Generation++
 		auth.UpdatedAt = now
+		m.sequenceCoolingDisabledClearsLocked(auth)
 		_ = m.persistLocked(ctx, auth)
 		authSnapshot = auth.Clone()
 	}
@@ -2752,6 +2760,43 @@ func (m *Manager) writeCoolingDisabledReset(state *ModelState, until time.Time) 
 	state.coolingDisabledRetryAt = until
 	state.coolingDisabledRetrySeq = m.currentExecutionSeq()
 	state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
+	state.coolingDisabledClearPending = false
+}
+
+// sequenceCoolingDisabledClearsLocked gives every reset that resetModelState
+// cleared on auth (coolingDisabledClearPending) the current dispatch sequence as
+// its watermark. Manager methods call it under m.mu before committing auth.
+func (m *Manager) sequenceCoolingDisabledClearsLocked(auth *Auth) {
+	if m == nil || auth == nil {
+		return
+	}
+	seq := m.currentExecutionSeq()
+	sequence := func(state *ModelState) {
+		if state == nil || !state.coolingDisabledClearPending {
+			return
+		}
+		if seq > state.coolingDisabledRetrySeq {
+			state.coolingDisabledRetrySeq = seq
+		}
+		state.coolingDisabledClearPending = false
+	}
+	for _, state := range auth.ModelStates {
+		sequence(state)
+		if state != nil {
+			sequence(state.credentialQuotaShadow)
+		}
+	}
+}
+
+// restoreCoolingDisabledReset puts saved's reset, watermark and write stamp back
+// on state, for a step that resets cooldown layers but must not touch the reset.
+func restoreCoolingDisabledReset(state, saved *ModelState) {
+	if state == nil || saved == nil {
+		return
+	}
+	state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq, state.coolingDisabledRetryStamp =
+		saved.coolingDisabledRetryAt, saved.coolingDisabledRetrySeq, saved.coolingDisabledRetryStamp
+	state.coolingDisabledClearPending = saved.coolingDisabledClearPending
 }
 
 // keepLaterCoolingDisabledReset copies source's cooling-disabled reset, watermark
@@ -2762,6 +2807,7 @@ func keepLaterCoolingDisabledReset(target, source *ModelState) {
 	}
 	target.coolingDisabledRetryAt, target.coolingDisabledRetrySeq, target.coolingDisabledRetryStamp =
 		source.coolingDisabledRetryAt, source.coolingDisabledRetrySeq, source.coolingDisabledRetryStamp
+	target.coolingDisabledClearPending = source.coolingDisabledClearPending
 }
 
 // coolingDisabledResetWrittenLater reports whether source's cooling-disabled reset
@@ -2919,6 +2965,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	// its stamp.
 	if state.coolingDisabledRetryAt.After(now) {
 		state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
+		state.coolingDisabledClearPending = true
 	}
 	state.coolingDisabledRetryAt = time.Time{}
 	state.forceCooldownUntil = time.Time{}

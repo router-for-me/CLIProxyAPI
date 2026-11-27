@@ -3838,3 +3838,72 @@ func TestClearDisabledCooldownState_ShadowRestoreKeepsLaterResetClear(t *testing
 			state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq, state.coolingDisabledRetryStamp)
 	}
 }
+
+// Once a credential quota that wrapped the credential has expired, the next
+// failure normalizes the expired wrap. That normalization is about cooldown
+// layers; it must not drop the model's live cooling-disabled reset, or the
+// request handling that failure could retry the credential before the
+// upstream's earlier Retry-After.
+func TestManager_MarkResult_DisableCooling_ResetSurvivesExpiredWrapNormalization(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reset-expired-wrap", "test-model-reset-expired-wrap"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(), Success: true})
+	m.mu.Lock()
+	m.auths[id].Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: time.Now().Add(time.Minute)}
+	m.mu.Unlock()
+	retryAfter := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+
+	// The credential quota expires; then the model fails with a 500.
+	m.mu.Lock()
+	m.auths[id].Quota.NextRecoverAt = time.Now().Add(-time.Second)
+	m.mu.Unlock()
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream error"}})
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if got := coolingDisabledRetryAt(m.auths[id], model); !got.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("reset after the expired wrap was normalized = %v, want the 2h hint kept", got)
+	}
+}
+
+// A manager-owned state reset outside the success path (here ResetQuota) clears
+// a live reset. The clear must advance the watermark: a 429 dispatched before
+// the clear, but after the reset was first recorded, must not reinstall it.
+func TestManager_ResetQuota_DisableCooling_ClearAdvancesWatermark(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reset-quota-watermark", "test-model-reset-quota-watermark"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	retryAfter := 2 * time.Hour
+	m.executionSeq.Store(2)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 2,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+
+	// Call 3 is dispatched, then the operator resets the quota.
+	m.executionSeq.Store(3)
+	if _, _, errReset := m.ResetQuota(context.Background(), id); errReset != nil {
+		t.Fatalf("ResetQuota: %v", errReset)
+	}
+	m.mu.RLock()
+	cleared := coolingDisabledRetryAt(m.auths[id], model)
+	m.mu.RUnlock()
+	if !cleared.IsZero() {
+		t.Fatalf("reset = %v, want it cleared by ResetQuota", cleared)
+	}
+
+	// Call 3's 429 completes after the reset.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 3,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if revived := coolingDisabledRetryAt(m.auths[id], model); !revived.IsZero() {
+		t.Fatalf("reset = %v after a 429 dispatched before ResetQuota, want it to stay cleared", revived)
+	}
+}

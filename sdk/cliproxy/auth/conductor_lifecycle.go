@@ -246,6 +246,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	// Serialize this credential, but release the manager lock during store I/O.
 	// Persist failures stay non-fatal, but must not be silent: a restart would
 	// lose the credential that only exists in memory.
+	m.sequenceCoolingDisabledClearsLocked(auth)
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist registered auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
 	}
@@ -762,6 +763,7 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+	m.sequenceCoolingDisabledClearsLocked(auth)
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {
