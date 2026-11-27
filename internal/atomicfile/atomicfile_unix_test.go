@@ -218,6 +218,36 @@ func TestWriteFileWritesInPlaceWhenChmodIsRejected(t *testing.T) {
 	assertNoTempFiles(t, filepath.Dir(path))
 }
 
+// An I/O error from the temp file's stat means a failing device: the save must
+// fail with the target untouched, even when the chmod that follows would report
+// a compatibility error that normally leads to the in-place fallback.
+func TestWriteFileReturnsTempStatIOErrorBeforeInPlaceFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+	originalStat, originalChmod := statTemp, chmodTemp
+	t.Cleanup(func() { statTemp, chmodTemp = originalStat, originalChmod })
+	statTemp = func(*os.File) (os.FileInfo, error) { return nil, syscall.EIO }
+	var chmodCalls int
+	chmodTemp = func(*os.File, os.FileMode) error { chmodCalls++; return syscall.EPERM }
+
+	err := WriteFile(path, []byte("new"), 0o600)
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("WriteFile() error = %v, want EIO", err)
+	}
+	if chmodCalls != 0 {
+		t.Fatalf("chmod calls = %d, want 0 after a temp stat I/O error", chmodCalls)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "old" {
+		t.Fatalf("content = %q, want the old content kept", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}
+
 // A temp that already has the target's mode needs no chmod, so such a mount keeps
 // the atomic replacement.
 func TestWriteFileSkipsChmodWhenModeMatches(t *testing.T) {

@@ -22,6 +22,7 @@ var (
 	exchangeAvailable = exchangeSupported
 	matchOwner        = keepOwner
 	statTarget        = os.Stat
+	statTemp          = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
 	chmodTemp         = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 	syncTemp          = func(file *os.File) error { return file.Sync() }
 	removeFile        = os.Remove
@@ -189,7 +190,14 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		// refuses one of the special bits), write in place as for an owner that
 		// cannot be kept, as the previous writers did.
 		wantMode := existing.Mode() & keptModeBits
-		if info, errInfo := tmp.Stat(); errInfo != nil || info.Mode()&keptModeBits != wantMode {
+		info, errInfo := statTemp(tmp)
+		if errInfo != nil && capacityError(errInfo) {
+			// A failing device must not reach the in-place fallback below, which
+			// truncates the only valid copy.
+			_ = tmp.Close()
+			return fmt.Errorf("atomicfile: stat temp file next to %s: %w", target, errInfo)
+		}
+		if errInfo != nil || info.Mode()&keptModeBits != wantMode {
 			if errChmod := chmodTemp(tmp, wantMode); errChmod != nil {
 				_ = tmp.Close()
 				if capacityError(errChmod) {
