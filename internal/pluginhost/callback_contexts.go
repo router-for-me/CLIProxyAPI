@@ -19,6 +19,7 @@ type callbackContextEntry struct {
 	ctx      context.Context
 	pluginID string
 	instance *hostCallbackInstance
+	closed   chan struct{}
 	cleanup  []callbackContextCleanup
 }
 
@@ -40,44 +41,112 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, ins
 	}
 	pluginID = strings.TrimSpace(pluginID)
 	ctx = withHostCallbackIdentity(ctx, pluginID, instance)
-	id := strconv.FormatUint(r.next.Add(1), 10)
 	r.mu.Lock()
-	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID, instance: instance}
+	if instance != nil && instance.closed.Load() {
+		r.mu.Unlock()
+		return "", func() {}
+	}
+	id := strconv.FormatUint(r.next.Add(1), 10)
+	closed := make(chan struct{})
+	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID, instance: instance, closed: closed}
 	r.mu.Unlock()
 
 	var once sync.Once
 	return id, func() {
 		once.Do(func() {
-			var cleanup []callbackContextCleanup
 			r.mu.Lock()
-			entry := r.contexts[id]
-			delete(r.contexts, id)
+			entry, exists := r.contexts[id]
+			if exists {
+				delete(r.contexts, id)
+			}
 			r.mu.Unlock()
-			cleanup = entry.cleanup
-			for _, item := range cleanup {
-				if item.fn != nil {
-					item.fn()
-				}
+			if exists {
+				finishCallbackContextEntry(entry)
 			}
 		})
 	}
 }
 
-func (r *callbackContextRegistry) lookup(id string) (context.Context, string, *hostCallbackInstance, bool) {
+func finishCallbackContextEntry(entry callbackContextEntry) {
+	if entry.closed != nil {
+		close(entry.closed)
+	}
+	for _, item := range entry.cleanup {
+		if item.fn != nil {
+			item.fn()
+		}
+	}
+}
+
+func (r *callbackContextRegistry) closeInstance(pluginID string, instance *hostCallbackInstance) {
+	if instance != nil {
+		instance.closed.Store(true)
+	}
 	if r == nil {
-		return nil, "", nil, false
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	r.mu.Lock()
+	entries := make([]callbackContextEntry, 0)
+	for id, entry := range r.contexts {
+		if entry.pluginID != pluginID {
+			continue
+		}
+		if instance != nil && entry.instance != instance {
+			continue
+		}
+		delete(r.contexts, id)
+		entries = append(entries, entry)
+	}
+	r.mu.Unlock()
+	for _, entry := range entries {
+		finishCallbackContextEntry(entry)
+	}
+}
+
+func (r *callbackContextRegistry) closePlugin(pluginID string) {
+	r.closeInstance(pluginID, nil)
+}
+
+func (r *callbackContextRegistry) closeAll() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	entries := make([]callbackContextEntry, 0, len(r.contexts))
+	for id, entry := range r.contexts {
+		if entry.instance != nil {
+			entry.instance.closed.Store(true)
+		}
+		delete(r.contexts, id)
+		entries = append(entries, entry)
+	}
+	r.mu.Unlock()
+	for _, entry := range entries {
+		finishCallbackContextEntry(entry)
+	}
+}
+
+func (r *callbackContextRegistry) lookup(id string) (context.Context, string, *hostCallbackInstance, bool) {
+	ctx, pluginID, instance, _, ok := r.lookupWithClosed(id)
+	return ctx, pluginID, instance, ok
+}
+
+func (r *callbackContextRegistry) lookupWithClosed(id string) (context.Context, string, *hostCallbackInstance, <-chan struct{}, bool) {
+	if r == nil {
+		return nil, "", nil, nil, false
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return nil, "", nil, false
+		return nil, "", nil, nil, false
 	}
 	r.mu.RLock()
 	entry, exists := r.contexts[id]
 	r.mu.RUnlock()
 	if !exists || entry.ctx == nil {
-		return nil, "", nil, false
+		return nil, "", nil, nil, false
 	}
-	return entry.ctx, strings.TrimSpace(entry.pluginID), entry.instance, true
+	return entry.ctx, strings.TrimSpace(entry.pluginID), entry.instance, entry.closed, true
 }
 
 func (r *callbackContextRegistry) pluginID(id string) string {
@@ -193,6 +262,13 @@ func (h *Host) lookupCallbackContext(id string) (context.Context, string, *hostC
 		return nil, "", nil, false
 	}
 	return h.callbackContexts.lookup(id)
+}
+
+func (h *Host) lookupCallbackContextWithClosed(id string) (context.Context, string, *hostCallbackInstance, <-chan struct{}, bool) {
+	if h == nil || h.callbackContexts == nil {
+		return nil, "", nil, nil, false
+	}
+	return h.callbackContexts.lookupWithClosed(id)
 }
 
 func (h *Host) resolveCallbackContext(id string, fallback context.Context) context.Context {
