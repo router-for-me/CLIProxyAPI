@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"sync"
@@ -21,37 +23,69 @@ type retryRoundCallExecutor struct {
 	executeIDs []string
 	streamIDs  []string
 	countIDs   []string
+	failure    func(authID, model string) error
+	prepare    func(authID string) error
 }
 
 func (e *retryRoundCallExecutor) Identifier() string { return e.identifier }
 
-func (e *retryRoundCallExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *retryRoundCallExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.mu.Lock()
 	e.executeIDs = append(e.executeIDs, auth.ID)
 	e.mu.Unlock()
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusInternalServerError, Message: "retry-round test failure"}
+	if err := e.requestError(auth.ID, req.Model); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"status":"completed","output_text":"recovered"}`)}, nil
 }
 
-func (e *retryRoundCallExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *retryRoundCallExecutor) ExecuteStream(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.streamIDs = append(e.streamIDs, auth.ID)
 	e.mu.Unlock()
-	return nil, &Error{HTTPStatus: http.StatusInternalServerError, Message: "retry-round test failure"}
+	if err := e.requestError(auth.ID, req.Model); err != nil {
+		return nil, err
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"status":"completed","output_text":"recovered"}`)}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 func (*retryRoundCallExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
 	return auth, nil
 }
 
-func (e *retryRoundCallExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *retryRoundCallExecutor) CountTokens(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.mu.Lock()
 	e.countIDs = append(e.countIDs, auth.ID)
 	e.mu.Unlock()
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusInternalServerError, Message: "retry-round test failure"}
+	if err := e.requestError(auth.ID, req.Model); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"total_tokens":42}`)}, nil
 }
 
 func (*retryRoundCallExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+func (e *retryRoundCallExecutor) requestError(authID, model string) error {
+	if e.failure != nil {
+		return e.failure(authID, model)
+	}
+	return &Error{HTTPStatus: http.StatusInternalServerError, Message: "retry-round test failure"}
+}
+
+func (e *retryRoundCallExecutor) ShouldPrepareRequestAuth(_ *Auth) bool {
+	return e.prepare != nil
+}
+
+func (e *retryRoundCallExecutor) PrepareRequestAuth(_ context.Context, auth *Auth) (*Auth, error) {
+	if e.prepare != nil {
+		return auth, e.prepare(auth.ID)
+	}
+	return auth, nil
 }
 
 func (e *retryRoundCallExecutor) ids(kind string) []string {
@@ -178,6 +212,192 @@ func TestExecuteRetryRoundMaxCredentialsAgesSkippedAuths(t *testing.T) {
 	}
 	if calls[len(calls)-1] != "retry-cap-d" {
 		t.Fatalf("last retry call = %q, want retry-cap-d; calls=%v", calls[len(calls)-1], calls)
+	}
+}
+
+func executeMixedRetryRoundPath(ctx context.Context, manager *Manager, mode, provider, model string) ([]byte, error) {
+	req := cliproxyexecutor.Request{Model: model}
+	switch mode {
+	case "stream":
+		result, err := manager.ExecuteStream(ctx, []string{provider}, req, cliproxyexecutor.Options{Stream: true})
+		if err != nil {
+			return nil, err
+		}
+		var payload []byte
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				return nil, chunk.Err
+			}
+			payload = append(payload, chunk.Payload...)
+		}
+		return payload, nil
+	case "count":
+		result, err := manager.ExecuteCount(ctx, []string{provider}, req, cliproxyexecutor.Options{})
+		return result.Payload, err
+	default:
+		result, err := manager.Execute(ctx, []string{provider}, req, cliproxyexecutor.Options{})
+		return result.Payload, err
+	}
+}
+
+func TestExecuteRetryRoundMixedExclusions(t *testing.T) {
+	transient := &Error{Code: "local_unavailable", HTTPStatus: http.StatusServiceUnavailable, Message: "local executor temporarily unavailable"}
+	excluded := RejectAntigravityTarget(&Error{Code: "model_excluded", HTTPStatus: http.StatusServiceUnavailable, Message: "model excluded"})
+	miss := errors.New("local credential preparation unavailable")
+	cases := []struct {
+		name           string
+		failures       []error
+		recover        bool
+		wantErr        error
+		wantCounts     []int
+		maxCredentials int
+		localOnly      bool
+	}{
+		{name: "retryable then excluded", failures: []error{transient, excluded}, recover: true, wantCounts: []int{2, 1}},
+		{name: "excluded then retryable", failures: []error{excluded, transient}, recover: true, wantCounts: []int{2, 2}},
+		{name: "transport then excluded", failures: []error{dialRefusedError(), excluded}, recover: true, wantCounts: []int{2, 1}, localOnly: true},
+		{name: "retryable then miss then excluded", failures: []error{transient, miss, fmt.Errorf("policy: %w", excluded)}, recover: true, wantCounts: []int{2, 1, 1}, maxCredentials: 3},
+		{name: "retry budget exhausted", failures: []error{transient, excluded}, wantErr: transient, wantCounts: []int{4, 4}, maxCredentials: 2},
+		{name: "all excluded on exhaustion", failures: []error{excluded, excluded}, wantErr: excluded, wantCounts: []int{1, 1}},
+		{name: "all excluded at credential cap", failures: []error{excluded, excluded}, wantErr: excluded, wantCounts: []int{1, 1}, maxCredentials: 2},
+		{name: "same round recovery", failures: []error{excluded, nil}, wantCounts: []int{1, 1}},
+	}
+	for _, mode := range []string{"generate", "stream", "count"} {
+		for _, homeEnabled := range []bool{false, true} {
+			for _, phase := range []string{"execute", "prepare"} {
+				for _, tc := range cases {
+					if homeEnabled && tc.localOnly {
+						continue
+					}
+					t.Run(fmt.Sprintf("%s/home=%t/%s/%s", mode, homeEnabled, phase, tc.name), func(t *testing.T) {
+						const provider = "antigravity"
+						model := "mixed-retry-" + t.Name()
+						manager := NewManager(nil, &FillFirstSelector{}, nil)
+						manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: homeEnabled}})
+						manager.SetRetryConfig(3, 0, tc.maxCredentials)
+						limits := make(map[string]int, len(tc.failures))
+						failures := make(map[string]error, len(tc.failures))
+						ids := make([]string, len(tc.failures))
+						for i, failure := range tc.failures {
+							id := fmt.Sprintf("%s/%02d", t.Name(), i)
+							ids[i] = id
+							limits[id] = 3
+							failures[id] = failure
+						}
+						if homeEnabled {
+							manager.PublishHomeDispatch(&retryRoundHomeDispatcher{limits: limits, provider: provider}, executionregistry.New(), 1)
+						} else {
+							registerRetryRoundLocalAuths(t, manager, provider, model, limits)
+						}
+						counts := make(map[string]int, len(ids))
+						nextError := func(authID string) error {
+							failure, ok := failures[authID]
+							if !ok {
+								t.Fatalf("unexpected credential %q", authID)
+							}
+							counts[authID]++
+							if tc.recover && counts[authID] > 1 && isRequestRetryRoundError(failure) {
+								return nil
+							}
+							return failure
+						}
+						executor := &retryRoundCallExecutor{identifier: provider}
+						if phase == "prepare" {
+							executor.prepare = nextError
+							executor.failure = func(string, string) error { return nil }
+						} else {
+							executor.failure = func(authID, _ string) error { return nextError(authID) }
+						}
+						manager.RegisterExecutor(executor)
+						payload, err := executeMixedRetryRoundPath(t.Context(), manager, mode, provider, model)
+						if tc.wantErr != nil {
+							if !errors.Is(err, tc.wantErr) {
+								t.Fatalf("execution error = %v, want %v", err, tc.wantErr)
+							}
+						} else {
+							if err != nil {
+								t.Fatal(err)
+							}
+							want := `{"status":"completed","output_text":"recovered"}`
+							if mode == "count" {
+								want = `{"total_tokens":42}`
+							}
+							if string(payload) != want {
+								t.Fatalf("response = %s, want %s", payload, want)
+							}
+						}
+						for i, id := range ids {
+							if got := counts[id]; got != tc.wantCounts[i] {
+								t.Fatalf("credential %d attempts = %d, want %d; all attempts=%v", i, got, tc.wantCounts[i], counts)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestExecuteRetryRoundMixedModelPoolExclusions(t *testing.T) {
+	for _, mode := range []string{"generate", "stream", "count"} {
+		t.Run(mode, func(t *testing.T) {
+			const alias = "mixed-model-pool"
+			manager := NewManager(nil, &FillFirstSelector{}, nil)
+			manager.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+				Name: "pool",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "transient", Alias: alias},
+					{Name: "missing", Alias: alias},
+					{Name: "excluded", Alias: alias},
+				},
+			}}})
+			manager.SetRetryConfig(3, 0, 1)
+			auth := &Auth{
+				ID:         t.Name(),
+				Provider:   openAICompatPoolProviderKey,
+				Attributes: map[string]string{"api_key": "test-key", "compat_name": "pool", "provider_key": openAICompatPoolProviderKey},
+				Metadata:   map[string]any{"request_retry": 3, "disable_cooling": true},
+			}
+			if _, err := manager.Register(t.Context(), auth); err != nil {
+				t.Fatal(err)
+			}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: alias}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			counts := make(map[string]int)
+			executor := &retryRoundCallExecutor{
+				identifier: auth.Provider,
+				failure: func(_ string, model string) error {
+					counts[model]++
+					switch model {
+					case "transient":
+						if counts[model] == 1 {
+							return &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "local model temporarily unavailable"}
+						}
+						return nil
+					case "missing":
+						return errors.New("local model unavailable")
+					case "excluded":
+						return RejectAntigravityTarget(&Error{Code: "model_excluded", HTTPStatus: http.StatusServiceUnavailable, Message: "model excluded"})
+					default:
+						t.Fatalf("unexpected upstream model %q", model)
+						return nil
+					}
+				},
+			}
+			manager.RegisterExecutor(executor)
+			payload, err := executeMixedRetryRoundPath(t.Context(), manager, mode, auth.Provider, alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"status":"completed","output_text":"recovered"}`
+			if mode == "count" {
+				want = `{"total_tokens":42}`
+			}
+			if string(payload) != want || counts["transient"] != 2 || counts["missing"] == 0 || counts["excluded"] == 0 {
+				t.Fatalf("response = %s, attempts=%v; want recovery after transient, local miss, and exclusion failures", payload, counts)
+			}
+		})
 	}
 }
 
@@ -318,6 +538,7 @@ func TestExecuteSnapshotsDefaultRequestRetry(t *testing.T) {
 
 type retryRoundHomeDispatcher struct {
 	mu       sync.Mutex
+	provider string
 	limits   map[string]int
 	rounds   []int
 	newCalls int
@@ -361,9 +582,13 @@ func (d *retryRoundHomeDispatcher) RPopAuthWithRetryRoundConstraints(_ context.C
 		if _, okExcluded := excludedSet[id]; okExcluded || (pinned != "" && pinned != id) {
 			continue
 		}
+		provider := d.provider
+		if provider == "" {
+			provider = "retry-round-home"
+		}
 		return json.Marshal(homeAuthDispatchResponse{
 			RequestRetry: func() *int { value := maxRetry; return &value }(),
-			Auth:         Auth{ID: id, Provider: "retry-round-home", Status: StatusActive, Metadata: map[string]any{"request_retry": d.limits[id]}},
+			Auth:         Auth{ID: id, Provider: provider, Status: StatusActive, Metadata: map[string]any{"request_retry": d.limits[id]}},
 		})
 	}
 	return nil, home.ErrAuthNotFound

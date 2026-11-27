@@ -171,11 +171,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var retryableErr error
 	var roundTiming homeRetryRoundTiming
 	for homeAuthCount := 1; ; homeAuthCount++ {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+				preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 				if isCredentialTerminatedError(preferredErr) {
 					return cliproxyexecutor.Response{}, preferredErr
 				}
@@ -189,7 +190,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
 		if errSelection != nil {
-			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+			preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 			var homeCooldown *homeDispatchRetryAfterError
 			if lastErr != nil && errors.As(errSelection, &homeCooldown) && homeCooldown != nil {
 				observeHomeCooldownRetryLimit(homeCooldown, homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == "")
@@ -203,7 +204,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					return cliproxyexecutor.Response{}, preferredErr
 				}
 				if isSchedulerRejectError(errSelection) {
-					preferredErr = roundPickFailureError(lastErr, upstreamErr, errSelection)
+					preferredErr = roundPickFailureError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr, errSelection)
 				}
 				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), isHomeNextRoundImmediatelyAvailable(errSelection))
 			}
@@ -220,7 +221,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			if lastErr != nil {
-				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+				preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 				if isCredentialTerminatedError(preferredErr) {
 					return cliproxyexecutor.Response{}, preferredErr
 				}
@@ -321,6 +322,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+			if isRequestRetryRoundError(errPrepare) {
+				retryableErr = errPrepare
+			}
 			roundTiming.Observe(errPrepare)
 			continue
 		}
@@ -478,12 +482,18 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				errExecute = wrapRequestScopedContinueError(errExecute)
 				syncPreferredUpstreamError(&upstreamErr, errExecute)
 				lastErr = keepPreferredCandidateError(lastErr, errExecute)
+				if isRequestRetryRoundError(errExecute) {
+					retryableErr = errExecute
+				}
 				if result.CredentialScope || isRequestTerminatedError(errExecute) {
 					break
 				}
 				continue
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errExecute)
+			if isRequestRetryRoundError(errExecute) {
+				retryableErr = errExecute
+			}
 			if isRequestInvalidError(errExecute) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
