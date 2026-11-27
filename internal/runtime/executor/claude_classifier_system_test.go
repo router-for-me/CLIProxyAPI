@@ -332,3 +332,36 @@ func TestClaudeExecutor_ClassifierSanitizesCacheControlScope(t *testing.T) {
 		})
 	}
 }
+
+// count_tokens sends the fixed count profile without the
+// prompt-caching-scope beta, so a classifier marker scope must not reach it.
+// A scope does not change the count.
+func TestClaudeExecutor_CountTokensStripsClassifierCacheControlScope(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-5","max_tokens":64,"thinking":{"type":"disabled"},` +
+		`"system":[` +
+		`{"type":"text","text":"` + classifierSystemPrompt + `","cache_control":{"type":"ephemeral","ttl":"1h","scope":"global"}}],` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"<transcript>tool call 42</transcript>","cache_control":{"type":"ephemeral","scope":"global"}}]}]}`)
+	upstream := &midSystemUpstream{}
+	auth, cfg := classifierOAuth()
+	ex := NewClaudeExecutor(cfg)
+	ctx := upstream.context(t, nil)
+	if _, err := ex.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model: "claude-sonnet-5", Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}); err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if !upstream.called {
+		t.Fatal("expected the request to reach the upstream")
+	}
+	body := upstream.body
+
+	if got := ojson.GetBytes(body, "system.0.text").String(); got != classifierSystemPrompt {
+		t.Fatalf("system.0 = %q, want the classifier prompt; system=%s", got, ojson.GetBytes(body, "system").Raw)
+	}
+	if got := ojson.GetBytes(body, "system.0.cache_control").Raw; got != `{"type":"ephemeral"}` {
+		t.Fatalf("system.0 cache_control = %s, want a bare marker; system=%s", got, ojson.GetBytes(body, "system").Raw)
+	}
+	if strings.Contains(string(body), `"scope"`) {
+		t.Fatalf("count_tokens body carries a cache scope without the prompt-caching-scope beta: %s", body)
+	}
+}

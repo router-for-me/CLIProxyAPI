@@ -3217,6 +3217,27 @@ func stripClaudeCacheControlTTLDoc(doc *ojson.Doc) bool {
 	return changed
 }
 
+// stripClaudeCacheControlScopeDoc removes scope from every cache_control block.
+// The count_tokens beta profile carries no prompt-caching-scope beta, so a
+// scope there makes Anthropic reject the count. A scope does not change the
+// count.
+func stripClaudeCacheControlScopeDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	changed := false
+	forEachClaudeCacheControlPathDoc(doc, func(path string, cacheControl ojson.Result) bool {
+		if !cacheControl.IsObject() || !cacheControl.Get("scope").Exists() {
+			return true
+		}
+		if errDel := doc.Delete(claudeCacheControlPath(path) + ".scope"); errDel == nil {
+			changed = true
+		}
+		return true
+	})
+	return changed
+}
+
 var errStopClaudeScan = errors.New("stop claude scan")
 
 const (
