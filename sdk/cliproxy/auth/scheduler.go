@@ -1039,13 +1039,14 @@ func isCredentialBlocked(auth *Auth, supportedModelCount int, now time.Time) boo
 	if !auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) {
 		return true
 	}
+	effectiveUnavailable := auth.Unavailable && !isOrphanedAuthUnavailable(auth, now)
 	if len(auth.ModelStates) == 0 {
-		return auth.Unavailable || auth.Quota.Exceeded || (!auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now))
+		return effectiveUnavailable || auth.Quota.Exceeded || (!auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now))
 	}
 	if supportedModelCount > 0 && len(auth.ModelStates) < supportedModelCount {
 		return false
 	}
-	return auth.Unavailable
+	return effectiveUnavailable
 }
 
 // upsertAuthResultLocked updates one auth in-place after a request execution result,
