@@ -457,3 +457,55 @@ func TestWriteFileKeepsTargetWhenDiskIsFull(t *testing.T) {
 		}
 	}
 }
+
+// An I/O error while inspecting the target or matching its owner or mode means
+// the storage is failing, not that the file needs a compatibility fallback:
+// writing in place would truncate the only valid copy. The error must be
+// returned with the target untouched.
+func TestWriteFileKeepsTargetOnIOErrorBeforeFallbacks(t *testing.T) {
+	for _, step := range []string{"stat", "owner", "mode"} {
+		for _, replace := range []bool{false, true} {
+			t.Run(step+map[bool]string{false: " WriteFile", true: " ReplaceFile"}[replace], func(t *testing.T) {
+				originalStat, originalOwner, originalChmod := statTarget, matchOwner, chmodTemp
+				t.Cleanup(func() { statTarget, matchOwner, chmodTemp = originalStat, originalOwner, originalChmod })
+				switch step {
+				case "stat":
+					statTarget = func(name string) (os.FileInfo, error) {
+						return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.EIO}
+					}
+				case "owner":
+					matchOwner = func(*os.File, os.FileInfo) error {
+						return &os.PathError{Op: "fchown", Path: "tmp", Err: syscall.EIO}
+					}
+				case "mode":
+					chmodTemp = func(*os.File, os.FileMode) error {
+						return &os.PathError{Op: "fchmod", Path: "tmp", Err: syscall.EIO}
+					}
+				}
+
+				path := filepath.Join(t.TempDir(), "auth.json")
+				// 0o640 differs from the temp file's 0o600, so the mode step runs.
+				if err := os.WriteFile(path, []byte(`{"refresh_token":"old"}`), 0o640); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+				if err := os.Chmod(path, 0o640); err != nil {
+					t.Fatalf("chmod seed: %v", err)
+				}
+				var err error
+				if replace {
+					err = ReplaceFile(path, []byte(`{"refresh_token":"new"}`), 0o600)
+				} else {
+					err = WriteFile(path, []byte(`{"refresh_token":"new"}`), 0o600)
+				}
+				if !errors.Is(err, syscall.EIO) {
+					t.Fatalf("error = %v, want it to wrap EIO", err)
+				}
+				got, _ := os.ReadFile(path)
+				if string(got) != `{"refresh_token":"old"}` {
+					t.Fatalf("target = %q, want the old content untouched", got)
+				}
+				assertNoTempFiles(t, filepath.Dir(path))
+			})
+		}
+	}
+}

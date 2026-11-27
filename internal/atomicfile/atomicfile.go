@@ -47,8 +47,8 @@ var beforeCommit = func() {}
 // POSIX ACLs, SELinux labels, Windows DACLs) is not copied: the new file gets the
 // defaults for its directory.
 //
-// A full disk, an exhausted quota or an I/O error is returned with the target
-// untouched, never retried in place.
+// A full disk, an exhausted quota or an I/O error, from any step, is returned
+// with the target untouched, never retried in place.
 //
 // It writes in place, which is what os.WriteFile does, when a rename would change
 // what path refers to: a dangling symlink (the link would be replaced), a special
@@ -92,6 +92,11 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	}
 	existing, errStat := statTarget(target)
 	if errStat != nil && !errors.Is(errStat, os.ErrNotExist) {
+		if capacityError(errStat) {
+			// Failing storage, not a compatibility case: writing in place would
+			// truncate the only valid copy.
+			return fmt.Errorf("atomicfile: inspect %s: %w", target, errStat)
+		}
 		// The target exists but cannot be inspected (for example a Windows or ACL
 		// filesystem denying metadata access). A rename, authorized by the
 		// directory, could replace a file this process may not write. Write in
@@ -167,6 +172,9 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		// Owner before mode: a chown can clear mode bits.
 		if errOwner := matchOwner(tmp, existing); errOwner != nil {
 			_ = tmp.Close()
+			if capacityError(errOwner) {
+				return fmt.Errorf("atomicfile: keep the owner of %s: %w", target, errOwner)
+			}
 			log.WithError(errOwner).Debugf("atomicfile: cannot keep the owner of %s, writing in place", target)
 			return writeInPlace(target, data, perm, mustExist)
 		}
@@ -179,6 +187,9 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		if info, errInfo := tmp.Stat(); errInfo != nil || info.Mode()&keptModeBits != wantMode {
 			if errChmod := chmodTemp(tmp, wantMode); errChmod != nil {
 				_ = tmp.Close()
+				if capacityError(errChmod) {
+					return fmt.Errorf("atomicfile: keep the mode of %s: %w", target, errChmod)
+				}
 				log.WithError(errChmod).Debugf("atomicfile: cannot keep the mode of %s, writing in place", target)
 				return writeInPlace(target, data, perm, mustExist)
 			}
