@@ -31,11 +31,20 @@ func (w *Watcher) scheduleConfigReload() {
 	defer w.configReloadMu.Unlock()
 	if w.configReloadTimer != nil {
 		w.configReloadTimer.Stop()
+		w.configReloadTimer = nil
+	}
+	// Stop sets stopped before it cancels this timer under the same lock, so an
+	// event handled after Stop (a rename retry still running) arms nothing.
+	if w.stopped.Load() {
+		return
 	}
 	w.configReloadTimer = time.AfterFunc(configReloadDebounce, func() {
 		w.configReloadMu.Lock()
 		w.configReloadTimer = nil
 		w.configReloadMu.Unlock()
+		if w.stopped.Load() {
+			return
+		}
 		w.reloadConfigIfChanged()
 	})
 }

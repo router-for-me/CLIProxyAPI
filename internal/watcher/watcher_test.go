@@ -1775,6 +1775,33 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	}
 }
 
+// A config event handled after Stop (for example a rename whose retry loop was
+// still waiting for the replacement) must not arm a reload timer that would
+// call back into the service during shutdown.
+func TestScheduleConfigReloadArmsNothingAfterStop(t *testing.T) {
+	w := &Watcher{}
+
+	w.scheduleConfigReload()
+	w.configReloadMu.Lock()
+	armed := w.configReloadTimer != nil
+	w.configReloadMu.Unlock()
+	if !armed {
+		t.Fatal("expected a reload timer while the watcher runs")
+	}
+
+	// The part of Stop that concerns config reloads.
+	w.stopped.Store(true)
+	w.stopConfigReloadTimer()
+
+	w.scheduleConfigReload()
+	w.configReloadMu.Lock()
+	defer w.configReloadMu.Unlock()
+	if w.configReloadTimer != nil {
+		w.configReloadTimer.Stop()
+		t.Fatal("scheduleConfigReload armed a reload timer after Stop")
+	}
+}
+
 func TestPrepareAuthUpdatesLockedForceAndDelete(t *testing.T) {
 	w := &Watcher{
 		currentAuths: map[string]*coreauth.Auth{
