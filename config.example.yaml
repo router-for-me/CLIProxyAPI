@@ -582,6 +582,8 @@ upstream:
     # When true, native Claude Code main-conversation requests on Claude OAuth credentials use the
     # 1h prompt cache, as Claude Code does on a subscription login (through the proxy it sees an
     # API key and picks 5m). Subagents, probes, API-key credentials, and explicit ttls are untouched.
+    # Skipped when anthropic-beta-strip, or a credential Anthropic-Beta header on a custom gateway,
+    # removes extended-cache-ttl-2025-04-11.
     main-cache-ttl-1h: false
 
     # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching

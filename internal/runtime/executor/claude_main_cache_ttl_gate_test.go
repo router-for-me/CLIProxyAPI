@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -42,7 +43,7 @@ func TestClaudeNativeMainCacheTTL1hGate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := claudeNativeMainCacheTTL1h(tt.cfg, tt.fp, tt.detection, tt.subagent, tt.probe); got != tt.want {
+			if got := claudeNativeMainCacheTTL1h(context.Background(), tt.cfg, nil, "", nil, tt.fp, tt.detection, tt.subagent, tt.probe); got != tt.want {
 				t.Fatalf("claudeNativeMainCacheTTL1h() = %v, want %v", got, tt.want)
 			}
 		})
