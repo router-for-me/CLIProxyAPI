@@ -8,6 +8,11 @@ import (
 )
 
 // hookChain keeps the original SDK hook and independently removable observers.
+// Every callback first ends the save of an auto-refresh job running on ctx
+// (releaseRefreshSave), so a hook never waits on WaitAutoRefreshSaves for itself.
+// This holds for any hook reached with that ctx, even one an executor or store
+// triggers for another credential before the job saves: the wait may then end
+// early, which is preferred to a hook that can never return.
 // Callbacks run without the subscription lock and may subscribe or unsubscribe.
 type hookChain struct {
 	primary   Hook
@@ -51,6 +56,7 @@ func (m *Manager) AddHook(hook Hook) func() {
 }
 
 func (h *hookChain) OnAuthRegistered(ctx context.Context, auth *Auth) {
+	releaseRefreshSave(ctx)
 	observers := h.observers.Load()
 	if observers == nil {
 		h.primary.OnAuthRegistered(ctx, auth)
@@ -63,6 +69,7 @@ func (h *hookChain) OnAuthRegistered(ctx context.Context, auth *Auth) {
 }
 
 func (h *hookChain) OnAuthUpdated(ctx context.Context, auth *Auth) {
+	releaseRefreshSave(ctx)
 	observers := h.observers.Load()
 	if observers == nil {
 		h.primary.OnAuthUpdated(ctx, auth)
@@ -75,6 +82,7 @@ func (h *hookChain) OnAuthUpdated(ctx context.Context, auth *Auth) {
 }
 
 func (h *hookChain) OnResult(ctx context.Context, result Result) {
+	releaseRefreshSave(ctx)
 	observers := h.observers.Load()
 	h.primary.OnResult(ctx, result)
 	if observers != nil {

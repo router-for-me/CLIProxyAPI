@@ -266,6 +266,11 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+	// refreshSaving counts auto-refresh jobs that have started and not yet
+	// committed their result; refreshSaveIdle is closed when it drops to zero.
+	// Both are guarded by mu.
+	refreshSaving   int
+	refreshSaveIdle chan struct{}
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
 	refreshJobs map[string]*authRefreshJob
 

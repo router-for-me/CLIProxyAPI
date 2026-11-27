@@ -252,6 +252,15 @@ func (s *Service) Run(ctx context.Context) error {
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
 //
+// Shutdown waits, until ctx ends, for in-flight auto-refresh jobs to finish
+// saving their credentials, and returns an error wrapping ctx.Err() if one may
+// still be saving then. Refreshes started by requests are not waited for, nor
+// is work a hook does after the save. Only the first call tears the service
+// down; a later call waits for it to finish and returns nil. A hook running on
+// a refresh worker (such as OnAuthUpdated) may call Shutdown: its own refresh
+// has already saved. An executor or store must not call it from inside a
+// refresh or a save: that job is still counted, so the call waits until ctx ends.
+//
 // Parameters:
 //   - ctx: The context for controlling the shutdown timeout
 //
@@ -340,6 +349,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			watcherCancel()
 		}
 		if s.coreManager != nil {
+			// Cancel now; the wait for in-flight saves comes after the API server
+			// stops, so a slow save cannot keep it accepting requests.
 			s.coreManager.StopAutoRefresh()
 		}
 		if watcher := s.currentWatcher(); watcher != nil {
@@ -383,6 +394,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = errStop
 				}
+			}
+		}
+
+		if s.coreManager != nil {
+			// Wait for in-flight refreshes to save, within the shutdown deadline,
+			// before the plugin executors they may use are shut down. Report an
+			// unfinished wait even after an earlier step failed: later calls
+			// return nil, so only this call can tell the caller a save may still
+			// be running (errors.Is(err, context.DeadlineExceeded)).
+			if errWait := s.coreManager.WaitAutoRefreshSaves(ctx); errWait != nil {
+				log.WithError(errWait).Warn("auth auto-refresh did not finish saving before the shutdown deadline")
+				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("wait for auth refresh saves: %w", errWait))
 			}
 		}
 

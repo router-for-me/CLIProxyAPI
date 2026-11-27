@@ -100,8 +100,12 @@ func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 			if job == nil {
 				continue
 			}
-			if l.manager.beginRefreshJob(ctx, job) {
-				_, _ = l.manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch)
+			if release, ok := l.manager.beginAutoRefreshJob(ctx, job); ok {
+				func() {
+					// Also ends jobs that fail before committing anything.
+					defer release()
+					_, _ = l.manager.refreshAuthForRequestAtEpoch(withRefreshSaveRelease(ctx, release), job.id, "", job.registrationEpoch)
+				}()
 			}
 			l.manager.finishRefreshJob(job, time.Time{}, false)
 		}
