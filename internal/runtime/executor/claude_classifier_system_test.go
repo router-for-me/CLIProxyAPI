@@ -300,3 +300,35 @@ func TestClaudeExecutor_CountTokensKeepsClassifierSystemPrompt(t *testing.T) {
 		}
 	}
 }
+
+// A classifier system marker keeps only the fields Anthropic accepts: an
+// ephemeral type, a "5m" or "1h" ttl, and scope "global". An invalid scope or
+// an unknown field forwarded as is made the upstream reject the request with a
+// 400, while the ordinary cloaking path sends a bare valid marker.
+func TestClaudeExecutor_ClassifierSanitizesCacheControlScope(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-5","max_tokens":64,"thinking":{"type":"disabled"},` +
+		`"system":[` +
+		`{"type":"text","text":"` + classifierSystemPrompt + `","cache_control":{"type":"ephemeral","scope":"session"}},` +
+		`{"type":"text","text":"## Session Context","cache_control":{"type":"ephemeral","ttl":"1h","scope":"global","x_unknown":1}}],` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"<transcript>tool call 42</transcript>"}]}]}`)
+	for _, mode := range classifierModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			auth, cfg := classifierOAuth()
+			body := sendClassifierRequestWithAuth(t, mode.stream, payload, auth, cfg)
+			system := ojson.GetBytes(body, "system")
+
+			if got := system.Get("1.text").String(); got != classifierSystemPrompt {
+				t.Fatalf("system.1 = %q, want the classifier prompt; system=%s", got, system.Raw)
+			}
+			if got := system.Get("1.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("system.1 cache_control.type = %q, want the breakpoint kept; system=%s", got, system.Raw)
+			}
+			if scope := system.Get("1.cache_control.scope"); scope.Exists() {
+				t.Fatalf("system.1 cache scope = %s, want the invalid scope dropped; system=%s", scope.Raw, system.Raw)
+			}
+			if got := system.Get("2.cache_control").Raw; got != `{"type":"ephemeral","ttl":"1h","scope":"global"}` {
+				t.Fatalf("system.2 cache_control = %s, want the valid ttl and scope without the unknown field; system=%s", got, system.Raw)
+			}
+		})
+	}
+}

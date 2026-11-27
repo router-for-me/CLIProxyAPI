@@ -1225,12 +1225,37 @@ func keepClaudeClassifierSystemPromptDoc(doc *ojson.Doc, system ojson.Result, bi
 func claudeClassifierSystemBlocks(system ojson.Result) []string {
 	var blocks []string
 	for _, block := range collectForwardedClaudeSystemPromptBlocksWithCache(system) {
-		if ttl := ojson.Parse(block.RawCC).Get("ttl"); ttl.Exists() && (ttl.Type != ojson.String || (ttl.String() != "5m" && ttl.String() != "1h")) {
-			block.RawCC = ""
-		}
+		block.RawCC = sanitizeClaudeClassifierCacheControl(block.RawCC)
 		blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, true))
 	}
 	return blocks
+}
+
+// sanitizeClaudeClassifierCacheControl rebuilds a valid ephemeral marker in the
+// native {type, ttl, scope} shape. Anthropic accepts only scope "global" and
+// rejects unknown fields, so any other scope and every other field is dropped,
+// the same way the native constructor keeps scope only when it is "global".
+// A marker with an invalid ttl is dropped whole.
+func sanitizeClaudeClassifierCacheControl(rawCC string) string {
+	if rawCC == "" {
+		return ""
+	}
+	cc := ojson.Parse(rawCC)
+	sanitized := ojson.NewDocString(`{"type":"ephemeral"}`)
+	if ttl := cc.Get("ttl"); ttl.Exists() {
+		if ttl.Type != ojson.String || (ttl.String() != "5m" && ttl.String() != "1h") {
+			return ""
+		}
+		if errSet := sanitized.Set("ttl", ttl.String()); errSet != nil {
+			return ""
+		}
+	}
+	if scope := cc.Get("scope"); scope.Type == ojson.String && scope.String() == "global" {
+		if errSet := sanitized.Set("scope", "global"); errSet != nil {
+			return ""
+		}
+	}
+	return sanitized.String()
 }
 
 // claudeKeepsClassifierShapeDoc reports whether a cloaked request is the
