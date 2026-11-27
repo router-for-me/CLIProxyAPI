@@ -346,7 +346,10 @@ type CodexConfig struct {
 	// intervals rather than one, and can trip client or reverse-proxy read timeouts. The hold is
 	// bounded by a frame and a byte budget, not by wall-clock time, and neither budget is advanced
 	// by a websocket peer that sends only control frames or by an upstream that never terminates an
-	// SSE line. Only overload and rate-limit rejections fail over deliberately. A stream that ends
+	// SSE line. Only overload/rate-limit rejections and structured billing quota exhaustion
+	// (insufficient_quota / credit_balance_exhausted) fail over deliberately while the bootstrap
+	// window is uncommitted; once output or tool events commit the stream, errors are delivered
+	// in-stream with no replay. A stream that ends
 	// while the bootstrap is still holding ends the attempt rather than reaching the client, and
 	// what follows is pre-existing but now far more likely, since the hold can span the whole
 	// reasoning phase instead of ending at the first keepalive: a clean end with no terminal event
