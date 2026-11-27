@@ -78,6 +78,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
+	if action := strings.TrimSpace(execOptions.Action); action != "" {
+		reqMeta[coreexecutor.RequestActionMetadataKey] = action
+	}
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	setGenerateMetadata(reqMeta, rawJSON)
@@ -88,6 +91,10 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: payload,
+	}
+	if action := strings.TrimSpace(execOptions.Action); action != "" {
+		// Executors dispatch on req.Metadata, which the conductor never derives from opts.Metadata.
+		req.Metadata = reqMeta
 	}
 	originalRequest := rawJSON
 	if ctxOriginal := originalRequestFromContext(ctx); len(ctxOriginal) > 0 {
@@ -115,6 +122,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
 	}
+	req = reapplyRequestActionMetadata(req, execOptions.Action)
 	grant, errGrant := h.authorizeHomeLocalExecution(ctx, modelName, opts, execOptions.SkipRouterPluginID)
 	if errGrant != nil {
 		lifecycle.completeError(ctx, errGrant)
@@ -145,6 +153,31 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	body, responseHeaders := h.applyResponseInterceptors(ctx, pluginapi.ResponseInterceptKindExecution, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
+}
+
+// ExecuteGeminiActionWithAuthManager executes a non-streaming Gemini-compatible request for an
+// explicit model action such as embedContent or batchEmbedContents.
+func (h *BaseAPIHandler) ExecuteGeminiActionWithAuthManager(ctx context.Context, handlerType, modelName, action string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, false, modelExecutionOptions{Action: action})
+}
+
+// reapplyRequestActionMetadata restores the explicit model action after request interceptors,
+// which may rebuild the request and drop its metadata.
+func reapplyRequestActionMetadata(req coreexecutor.Request, action string) coreexecutor.Request {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return req
+	}
+	if current, _ := req.Metadata[coreexecutor.RequestActionMetadataKey].(string); strings.TrimSpace(current) == action {
+		return req
+	}
+	meta := make(map[string]any, len(req.Metadata)+1)
+	for k, v := range req.Metadata {
+		meta[k] = v
+	}
+	meta[coreexecutor.RequestActionMetadataKey] = action
+	req.Metadata = meta
+	return req
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -262,6 +295,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		lifecycle.completeError(execCtx, interceptErr)
 		return nil, nil, interceptErr
 	}
+	req = reapplyRequestActionMetadata(req, execOptions.Action)
 	execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
 	if grant != nil {
 		execCtx = grant.prepare(execCtx, &req, originalRequestedModel)
@@ -294,7 +328,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	if reporter != nil && !nestedTracker.hasNestedExecution() {
 		reporter.ApplyPluginExecutorAttribution(executorPluginID, attribution)
 		reporter.RecordFirstPacket()
-		detail := parsePluginExecutorResponseUsage(responseProtocol, resp.Payload)
+		detail := parsePluginExecutorActionResponseUsage(responseProtocol, execOptions.Action, resp.Payload)
 		reporter.Publish(execCtx, detail)
 		reporter.EnsurePublished(execCtx)
 	}
@@ -363,6 +397,12 @@ func (h *BaseAPIHandler) preparePluginExecutorRequest(ctx context.Context, entry
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
+	// Native model actions are carried in request metadata. Plugin executors see only the
+	// stored wildcard path, so the action must be forwarded to them as well, otherwise
+	// embedContent, batchEmbedContents, and decisions are indistinguishable.
+	if action := strings.TrimSpace(execOptions.Action); action != "" {
+		reqMeta[coreexecutor.RequestActionMetadataKey] = action
+	}
 	setReasoningEffortMetadata(reqMeta, entryProtocol, originalRequestedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	setGenerateMetadata(reqMeta, rawJSON)
@@ -375,6 +415,9 @@ func (h *BaseAPIHandler) preparePluginExecutorRequest(ctx context.Context, entry
 		originalRequest = ctxOriginal
 	}
 	req := coreexecutor.Request{Model: modelName, Payload: payload}
+	// Mirror the auth-execution path so plugin executors can read the same request
+	// metadata, including the native model action, from the request itself.
+	req.Metadata = reqMeta
 	opts := coreexecutor.Options{
 		Stream:                    stream,
 		Alt:                       alt,

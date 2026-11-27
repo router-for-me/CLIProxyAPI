@@ -151,6 +151,7 @@ func (s *Server) setupRoutes() {
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/interactions", geminiHandlers.Interactions)
+		v1beta.POST("/decisions", geminiHandlers.Decisions)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
@@ -1063,6 +1064,7 @@ type homeModelRoute struct {
 	hasInputModalities        bool
 	supportedOutputModalities []string
 	hasOutputModalities       bool
+	generationMethods         []string
 }
 
 type homeModelEntry struct {
@@ -1080,6 +1082,7 @@ type homeModelEntry struct {
 	thinking                  *registry.ThinkingSupport
 	supportedInputModalities  []string
 	supportedOutputModalities []string
+	generationMethods         []string
 	providers                 []string
 	nativeCapabilityRoutes    []registry.NativeCapabilityRoute
 	routes                    []homeModelRoute
@@ -1261,7 +1264,7 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 		"name":                       name,
 		"displayName":                displayName,
 		"description":                displayName,
-		"supportedGenerationMethods": []string{"generateContent"},
+		"supportedGenerationMethods": homeGeminiModelGenerationMethods(entry),
 	}
 	if entry.contextLength > 0 {
 		model["inputTokenLimit"] = entry.contextLength
@@ -1270,6 +1273,52 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 		model["outputTokenLimit"] = entry.maxCompletionTokens
 	}
 	return model
+}
+
+// homeGeminiModelGenerationMethods resolves the advertised generation methods for a Home
+// catalog entry. Home does not carry them today, so native actions (embeddings, decisions)
+// fall back to the local static catalog; chat models keep the historical generateContent.
+func homeGeminiModelGenerationMethods(entry homeModelEntry) []string {
+	if methods := registry.NativeModelGenerationMethods(entry.generationMethods); len(methods) > 0 {
+		return methods
+	}
+	// The static fallback only knows Gemini and AI Studio support these actions. If every
+	// recorded Home route belongs to another provider (Vertex answers 501 for native
+	// actions), advertising them would promise a call that cannot execute.
+	if !homeEntrySupportsNativeActions(entry) {
+		return []string{"generateContent"}
+	}
+	// Home entries may be aliases, so probe the alias ID, the canonical model name, and the
+	// metadata model ID before giving up on the local static catalog.
+	for _, candidate := range []string{entry.id, entry.modelName, entry.metadataModelID} {
+		modelID := strings.TrimPrefix(strings.TrimSpace(candidate), "models/")
+		if modelID == "" {
+			continue
+		}
+		for _, channel := range []string{"gemini", "gemini-interactions", "aistudio"} {
+			staticInfo := registry.LookupStaticModelInfoByChannel(modelID, channel)
+			if staticInfo == nil {
+				continue
+			}
+			if methods := registry.NativeModelGenerationMethods(staticInfo.SupportedGenerationMethods); len(methods) > 0 {
+				return methods
+			}
+		}
+	}
+	return []string{"generateContent"}
+}
+
+// homeEntrySupportsNativeActions reports whether every recorded Home provider can serve
+// native Gemini actions. An entry without provider information is left to the caller.
+func homeEntrySupportsNativeActions(entry homeModelEntry) bool {
+	for _, provider := range entry.providers {
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "", "gemini", "gemini-interactions", "aistudio":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
@@ -1419,6 +1468,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			thinking, hasThinking := homeModelThinkingSupport(model)
 			inputModalities, hasInputModalities := homeModelStringSlice(model, "supportedInputModalities", "supported_input_modalities")
 			outputModalities, hasOutputModalities := homeModelStringSlice(model, "supportedOutputModalities", "supported_output_modalities")
+			generationMethods, _ := homeModelStringSlice(model, "supportedGenerationMethods", "supported_generation_methods")
 			modelRoute := homeModelRoute{
 				provider:                  provider,
 				modelName:                 rawName,
@@ -1437,6 +1487,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				hasInputModalities:        hasInputModalities,
 				supportedOutputModalities: outputModalities,
 				hasOutputModalities:       hasOutputModalities,
+				generationMethods:         generationMethods,
 			}
 
 			if index, ok := indexByID[id]; ok {
@@ -1482,6 +1533,9 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				if len(out[index].supportedOutputModalities) == 0 && len(outputModalities) > 0 {
 					out[index].supportedOutputModalities = outputModalities
 				}
+				if len(out[index].generationMethods) == 0 && len(generationMethods) > 0 {
+					out[index].generationMethods = generationMethods
+				}
 				continue
 			}
 
@@ -1501,6 +1555,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				thinking:                  thinking,
 				supportedInputModalities:  inputModalities,
 				supportedOutputModalities: outputModalities,
+				generationMethods:         generationMethods,
 				providers:                 appendUniqueHomeProvider(nil, provider),
 				nativeCapabilityRoutes:    []registry.NativeCapabilityRoute{route},
 				routes:                    []homeModelRoute{modelRoute},

@@ -17,6 +17,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
@@ -177,6 +178,8 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		h.handleStreamGenerateContent(c, modelName, rawJSON)
 	case "countTokens":
 		h.handleCountTokens(c, modelName, rawJSON)
+	case helps.GeminiEmbedContentAction, helps.GeminiBatchEmbedContentsAction:
+		h.handleEmbedding(c, modelName, method, rawJSON)
 	default:
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
@@ -352,6 +355,30 @@ func (h *GeminiAPIHandler) handleCountTokens(c *gin.Context, modelName string, r
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+// handleEmbedding handles native embedding requests for Gemini models.
+// It forwards the upstream embedding response unchanged because embedding
+// payloads and responses are not chat-completions payloads.
+//
+// Parameters:
+//   - c: The Gin context for the request
+//   - modelName: The name of the Gemini embedding model to use
+//   - method: The embedding action (embedContent or batchEmbedContents)
+//   - rawJSON: The raw JSON request body containing the native embedding payload
+func (h *GeminiAPIHandler) handleEmbedding(c *gin.Context, modelName, method string, rawJSON []byte) {
+	c.Header("Content-Type", "application/json")
+	alt := h.GetAlt(c)
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	resp, upstreamHeaders, errMsg := h.ExecuteGeminiActionWithAuthManager(cliCtx, h.HandlerType(), modelName, method, rawJSON, alt)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)

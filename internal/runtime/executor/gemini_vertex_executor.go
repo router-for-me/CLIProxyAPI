@@ -298,6 +298,18 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	// Vertex embedding support is not uniform across models: some expose predict
+	// instances/predictions while others expose embedContent, and
+	// batchEmbedContents is unverified. Reject explicitly instead of silently
+	// degrading to generateContent.
+	if action := helps.GeminiEmbeddingAction(req); action != "" {
+		return resp, statusErr{code: http.StatusNotImplemented, msg: fmt.Sprintf("vertex: %s is not supported", action)}
+	}
+	// The Decisions API is only available on the Gemini Developer API, so Vertex must
+	// reject it instead of forwarding it to a chat endpoint.
+	if helps.GeminiDecisionAction(req) != "" {
+		return resp, statusErr{code: http.StatusNotImplemented, msg: "vertex: decisions is not supported"}
+	}
 	if helps.ShouldExecuteVertexOpenAPIForRequest(e.cfg, auth, req.Model, opts) {
 		return e.executeOpenAPI(ctx, auth, req, opts)
 	}
@@ -325,6 +337,12 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	if action := helps.GeminiEmbeddingAction(req); action != "" {
+		return nil, statusErr{code: http.StatusNotImplemented, msg: fmt.Sprintf("vertex: %s does not support streaming", action)}
+	}
+	if helps.GeminiDecisionAction(req) != "" {
+		return nil, statusErr{code: http.StatusNotImplemented, msg: "vertex: decisions is not supported"}
 	}
 	if helps.ShouldExecuteVertexOpenAPIForRequest(e.cfg, auth, req.Model, opts) {
 		return e.executeOpenAPIStream(ctx, auth, req, opts)

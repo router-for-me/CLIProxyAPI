@@ -31,9 +31,9 @@ func TestGeminiHandlerUnsupportedMethodReturnsError(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name:        "unsupported embedContent method",
-			path:        "/v1beta/models/gemini-2.5-pro:embedContent",
-			wantMessage: "Unsupported method: embedContent",
+			name:        "unsupported embedText method",
+			path:        "/v1beta/models/gemini-2.5-pro:embedText",
+			wantMessage: "Unsupported method: embedText",
 		},
 		{
 			name:        "misspelled method name",
@@ -210,8 +210,8 @@ func TestGeminiHandlerActionParsingEdgeCases(t *testing.T) {
 	}{
 		{
 			name:        "colon model with unsupported method",
-			path:        "/v1beta/models/qwen3:32b:embedContent",
-			wantMessage: "Unsupported method: embedContent",
+			path:        "/v1beta/models/qwen3:32b:embedText",
+			wantMessage: "Unsupported method: embedText",
 		},
 		{
 			name:        "colon model with trailing empty method",

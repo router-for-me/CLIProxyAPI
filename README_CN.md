@@ -150,6 +150,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Grok）
 - 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Grok）
 - 支持 Gemini AIStudio API 密钥
+- 支持 `/v1beta` 原生 Gemini 嵌入（`embedContent`/`batchEmbedContents`）与 Decisions API（见 `docs/gemini-native-api_CN.md`）
 - 支持 AI Studio Build 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询

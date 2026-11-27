@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,6 +32,9 @@ type modelExecutionOptions struct {
 	CallerScope             string
 	AllowSpeechModel        bool
 	homeLocalExecutor       *homeLocalExecution
+	// Action carries a Gemini-compatible model action (for example embedContent) that
+	// must reach the executor through req.Metadata, since executors dispatch on it.
+	Action string
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.
@@ -65,6 +69,8 @@ type ModelExecutionRequest struct {
 	ProxyURL                string
 	Path                    string
 	CallerScope             string
+	// Action carries a native model action so the inner execution keeps its native path.
+	Action string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -132,6 +138,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
 		CallerScope:             strings.TrimSpace(req.CallerScope),
+		Action:                  strings.TrimSpace(req.Action),
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -152,6 +159,14 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	ctx = coreauth.WithFreshRequestContinuitySession(usage.WithoutStreamDelivery(ctx))
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
+	}
+	// Native model actions (embeddings, decisions) are non-streaming: streaming would run
+	// the chat path and silently drop the action, so reject it instead of guessing.
+	if action := strings.TrimSpace(req.Action); action != "" {
+		return ModelExecutionStream{}, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("native model action %q is not supported on streaming host execution", action),
+		}
 	}
 	if errProxy := validateModelExecutionProxy(req.ProxyURL); errProxy != nil {
 		return ModelExecutionStream{}, errProxy

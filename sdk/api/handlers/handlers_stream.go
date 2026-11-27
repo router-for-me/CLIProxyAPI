@@ -115,6 +115,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		close(errChan)
 		return nil, nil, errChan
 	}
+	req = reapplyRequestActionMetadata(req, execOptions.Action)
 	execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
 	if grant != nil {
 		execCtx = grant.prepare(execCtx, &req, originalRequestedModel)

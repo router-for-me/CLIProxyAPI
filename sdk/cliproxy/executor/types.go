@@ -96,6 +96,9 @@ const (
 	SessionAffinityProviderMetadataKey = "session_affinity_provider"
 	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
 	SessionAffinityModelMetadataKey = "session_affinity_model"
+	// RequestActionMetadataKey carries an explicit model action (for example embedContent)
+	// that provider executors must honor instead of the default action.
+	RequestActionMetadataKey = "action"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
