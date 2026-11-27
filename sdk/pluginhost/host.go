@@ -256,6 +256,13 @@ func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.Sc
 	return h.inner.EvaluateSchedulerContinuity(ctx, req)
 }
 
+// SchedulerWantsQuotaSignals reports whether pick requests should carry each candidate's
+// passive quota snapshot. It is true while any scheduler is active; the host passes the
+// snapshots only to schedulers that opted in with Capabilities.SchedulerQuotaSignals.
+func (h *Host) SchedulerWantsQuotaSignals() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsQuotaSignals()
+}
+
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.
 func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	if h == nil || h.inner == nil {

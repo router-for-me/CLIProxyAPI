@@ -147,6 +147,15 @@ func (h *Host) callSchedulerContinuity(ctx context.Context, record capabilityRec
 	return resp, true, nil
 }
 
+// SchedulerWantsQuotaSignals reports whether pick requests should carry candidates' quota
+// snapshots. While any scheduler is active the answer is yes: buildSchedulerSubRequest
+// removes them for every scheduler that did not opt in, and attaching them up front keeps
+// them available when a pick waits for, or retries against, a hot-reloaded replacement
+// whose opt-in differs from the instance that was active when the request was built.
+func (h *Host) SchedulerWantsQuotaSignals() bool {
+	return h.HasScheduler()
+}
+
 func (h *Host) schedulerRecord() *capabilityRecord {
 	if h == nil {
 		return nil
@@ -204,7 +213,13 @@ func buildSchedulerSubRequest(record capabilityRecord, req pluginapi.SchedulerPi
 	if !schedulerWantsAcrossPriorities(record.plugin.Capabilities) {
 		offeredCandidates = highestPrioritySchedulerCandidates(remainingCandidates)
 	}
-	return cloneSchedulerPickRequest(req, offeredCandidates)
+	subReq := cloneSchedulerPickRequest(req, offeredCandidates)
+	if !schedulerWantsQuotaSignals(record.plugin.Capabilities) {
+		for index := range subReq.Candidates {
+			subReq.Candidates[index].Quota = nil
+		}
+	}
+	return subReq
 }
 
 func (h *Host) shouldRetrySchedulerAfterReload(ctx context.Context, record capabilityRecord, genBefore uint64, resp pluginapi.SchedulerPickResponse, called bool, errPick error, subReq pluginapi.SchedulerPickRequest) bool {
@@ -517,6 +532,11 @@ func cloneSchedulerAuthCandidates(in []pluginapi.SchedulerAuthCandidate) []plugi
 	for i, candidate := range in {
 		candidate.Attributes = cloneStringMap(candidate.Attributes)
 		candidate.Metadata = cloneInterceptorMetadata(candidate.Metadata)
+		if candidate.Quota != nil {
+			quota := *candidate.Quota
+			quota.Signals = cloneStringMap(quota.Signals)
+			candidate.Quota = &quota
+		}
 		out[i] = candidate
 	}
 	return out
