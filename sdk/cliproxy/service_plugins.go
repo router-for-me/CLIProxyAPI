@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	proxengine "github.com/router-for-me/CLIProxyAPI/v8/internal/prox/engine"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
@@ -116,7 +117,8 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 	if s.coreManager != nil {
-		s.coreManager.SetPluginScheduler(s.pluginHost)
+		proxengine.ApplyConfig(cfg, s.coreManager)                               // prox: apply plugins.configs.prox
+		s.coreManager.SetPluginScheduler(proxengine.WrapScheduler(s.pluginHost)) // prox: native scheduler in front of plugins
 	}
 	s.registerPluginAuthParser()
 	if s.pluginHost == nil {
