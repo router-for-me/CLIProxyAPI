@@ -2,7 +2,7 @@
 
 prox adds quota-aware routing, session affinity, and a quota dashboard to
 CLIProxyAPI. Everything is off until you enable it. See [ROADMAP.md](ROADMAP.md)
-for what is planned.
+for what is planned and [OPERATIONS.md](OPERATIONS.md) for the image, CI, and upstream merges.
 
 ## Enable
 

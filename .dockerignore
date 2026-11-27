@@ -39,3 +39,11 @@ bin
 .bmad
 _bmad
 _bmad-output
+
+# prox: local-only data and build output
+.env
+.env.*
+prox-data
+static
+web/panel/node_modules
+web/panel/dist

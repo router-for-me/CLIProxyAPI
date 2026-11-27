@@ -13,7 +13,7 @@
     "verify": "bun run test && bun run lint && bun run build",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,scss}\"",
     "type-check": "tsc --noEmit",
-    "build:prox": "bun run build && gzip -9 -n -c dist/index.html > ../../internal/prox/panel/dist/management.html.gz"
+    "build:prox": "VERSION=prox bun run build && gzip -9 -n -c dist/index.html > ../../internal/prox/panel/dist/management.html.gz"
   },
   "dependencies": {
     "@codemirror/lang-yaml": "^6.1.3",

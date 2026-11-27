@@ -1,0 +1,142 @@
+name: prox-upstream-sync
+
+# Weekly (or on demand): merge the newest CLIProxyAPI release tag and the
+# Management Center's main branch into a branch, build and test it, and open
+# a PR. Nothing reaches main without review. If a merge conflicts, an issue is
+# opened instead with the conflicting files.
+#
+# Requires Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests". PRs opened with GITHUB_TOKEN do not start prox-ci,
+# so this job runs the same build and tests itself. GITHUB_TOKEN cannot push
+# changes to .github/workflows; if upstream touches its workflows the push
+# fails and that sync has to be done locally.
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref to merge (default: newest v* tag)"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: prox-upstream-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch --quiet --tags upstream
+
+      - name: Pick upstream ref
+        id: pick
+        env:
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          ref="$REF_INPUT"
+          if [ -z "$ref" ]; then
+            ref="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$ref" HEAD; then
+            echo "core=current" >> "$GITHUB_OUTPUT"
+          else
+            echo "core=behind" >> "$GITHUB_OUTPUT"
+          fi
+          echo "branch=sync/upstream-$(echo "$ref" | tr '/' '-')-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Merge
+        id: merge
+        run: |
+          git switch -c "${{ steps.pick.outputs.branch }}"
+          changed=0
+          if [ "${{ steps.pick.outputs.core }}" = behind ]; then
+            if ! git merge --no-edit "${{ steps.pick.outputs.ref }}"; then
+              git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+              echo "conflict=core" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            changed=1
+          fi
+          before="$(cat web/panel/UPSTREAM)"
+          if ! scripts/prox/sync-panel.sh > /tmp/panel.log 2>&1; then
+            cat /tmp/panel.log
+            git checkout -- web/panel
+            echo "panel_conflict=1" >> "$GITHUB_OUTPUT"
+          elif [ "$before" != "$(cat web/panel/UPSTREAM)" ]; then
+            (cd web/panel && bun install && bun run build:prox)
+            git add -A web/panel internal/prox/panel/dist
+            git commit -m "chore(panel): sync Management Center to $(cut -d' ' -f1 web/panel/UPSTREAM)"
+            changed=1
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue on conflict
+        if: steps.merge.outputs.conflict == 'core'
+        run: |
+          {
+            echo "Merging \`${{ steps.pick.outputs.ref }}\` into \`main\` conflicts in:"
+            echo
+            sed 's/^/- `/; s/$/`/' /tmp/conflicts.txt
+            echo
+            echo "Resolve locally:"
+            echo
+            echo '```sh'
+            echo "git fetch upstream --tags && git switch -c ${{ steps.pick.outputs.branch }} origin/main"
+            echo "git merge ${{ steps.pick.outputs.ref }}"
+            echo '```'
+          } > /tmp/body.md
+          gh issue create --title "Upstream sync conflict: ${{ steps.pick.outputs.ref }}" --body-file /tmp/body.md
+
+      - name: Build and test
+        if: steps.merge.outputs.changed == '1'
+        id: test
+        continue-on-error: true
+        run: |
+          go build ./...
+          go test ./internal/prox/... ./internal/api/... ./sdk/cliproxy/...
+          (cd web/panel && bun install --frozen-lockfile && bun run lint && bun run test)
+
+      - name: Open PR
+        if: steps.merge.outputs.changed == '1'
+        run: |
+          git push --force origin "${{ steps.pick.outputs.branch }}"
+          result="passed"
+          [ "${{ steps.test.outcome }}" = success ] || result="**failed**, see the workflow run"
+          {
+            echo "Automated sync from upstream."
+            echo
+            echo "- CLIProxyAPI: \`${{ steps.pick.outputs.ref }}\` (${{ steps.pick.outputs.core }} before this run)"
+            echo "- Management Center: \`$(cat web/panel/UPSTREAM)\`"
+            [ "${{ steps.merge.outputs.panel_conflict }}" = 1 ] && echo "- Panel changes did not apply cleanly and were skipped; run \`scripts/prox/sync-panel.sh\` locally."
+            echo "- Build and tests: $result"
+            echo
+            echo "Review before merging, especially changes under \`.github/\`, \`internal/runtime/executor/\`, and anything that handles credentials."
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > /tmp/body.md
+          gh pr create --base main --head "${{ steps.pick.outputs.branch }}" \
+            --title "Sync upstream ${{ steps.pick.outputs.ref }}" --body-file /tmp/body.md
