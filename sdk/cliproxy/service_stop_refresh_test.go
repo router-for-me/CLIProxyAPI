@@ -91,7 +91,7 @@ func TestServiceShutdown_ClosesListenerBeforeWaitingForRefreshSave(t *testing.T)
 	t.Cleanup(func() {
 		releaseSave()
 		// Let the refresh finish before the next test touches shared state.
-		_ = manager.WaitAutoRefreshSaves(context.Background())
+		_ = manager.WaitAutoRefresh(context.Background())
 	})
 	manager.RegisterExecutor(&syncTestExecutor{})
 	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
@@ -183,7 +183,7 @@ func TestServiceShutdown_ReportsRefreshSaveStillRunning(t *testing.T) {
 			manager := coreauth.NewManager(store, nil, nil)
 			t.Cleanup(func() {
 				releaseSave()
-				_ = manager.WaitAutoRefreshSaves(context.Background())
+				_ = manager.WaitAutoRefresh(context.Background())
 			})
 			manager.RegisterExecutor(&syncTestExecutor{})
 			if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{

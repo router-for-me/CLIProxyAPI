@@ -26,8 +26,8 @@ func (e *failingHeldRefreshExecutor) Refresh(context.Context, *Auth) (*Auth, err
 }
 
 // A job whose refresh fails never reaches a commit or a hook; it must still stop
-// counting as saving when it returns, or WaitAutoRefreshSaves would wait forever.
-func TestWaitAutoRefreshSaves_WaitsForJobThatFails(t *testing.T) {
+// counting as saving when it returns, or WaitAutoRefresh would wait forever.
+func TestWaitAutoRefresh_WaitsForJobThatFails(t *testing.T) {
 	executor := &failingHeldRefreshExecutor{
 		countingRefreshExecutor: countingRefreshExecutor{id: saveWaitRefreshProvider},
 		started:                 make(chan struct{}),
@@ -64,33 +64,33 @@ func TestWaitAutoRefreshSaves_WaitsForJobThatFails(t *testing.T) {
 
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
-	if errWait := manager.WaitAutoRefreshSaves(expired); !errors.Is(errWait, context.Canceled) {
-		t.Fatalf("WaitAutoRefreshSaves with the refresh still held = %v, want context.Canceled", errWait)
+	if errWait := manager.WaitAutoRefresh(expired); !errors.Is(errWait, context.Canceled) {
+		t.Fatalf("WaitAutoRefresh with the refresh still held = %v, want context.Canceled", errWait)
 	}
 
 	releaseRefresh()
 	waitDone := make(chan error, 1)
-	go func() { waitDone <- manager.WaitAutoRefreshSaves(context.Background()) }()
+	go func() { waitDone <- manager.WaitAutoRefresh(context.Background()) }()
 	select {
 	case errWait := <-waitDone:
 		if errWait != nil {
-			t.Fatalf("WaitAutoRefreshSaves after the refresh failed = %v, want nil", errWait)
+			t.Fatalf("WaitAutoRefresh after the refresh failed = %v, want nil", errWait)
 		}
 	case <-hangGuard.C:
-		t.Fatal("WaitAutoRefreshSaves still waiting after the failed refresh returned")
+		t.Fatal("WaitAutoRefresh still waiting after the failed refresh returned")
 	}
 }
 
 // With no auto-refresh job running, the wait returns at once.
-func TestWaitAutoRefreshSaves_IdleReturnsAtOnce(t *testing.T) {
+func TestWaitAutoRefresh_IdleReturnsAtOnce(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
-	if errWait := manager.WaitAutoRefreshSaves(expired); errWait != nil {
-		t.Fatalf("WaitAutoRefreshSaves on an idle manager = %v, want nil", errWait)
+	if errWait := manager.WaitAutoRefresh(expired); errWait != nil {
+		t.Fatalf("WaitAutoRefresh on an idle manager = %v, want nil", errWait)
 	}
 	var nilManager *Manager
-	if errWait := nilManager.WaitAutoRefreshSaves(context.Background()); errWait != nil {
-		t.Fatalf("WaitAutoRefreshSaves on a nil manager = %v, want nil", errWait)
+	if errWait := nilManager.WaitAutoRefresh(context.Background()); errWait != nil {
+		t.Fatalf("WaitAutoRefresh on a nil manager = %v, want nil", errWait)
 	}
 }

@@ -398,7 +398,7 @@ func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool
 }
 
 // beginAutoRefreshJob starts job like beginRefreshJob and, if it started, counts
-// it as saving until the returned release runs, so WaitAutoRefreshSaves waits for
+// it as saving until the returned release runs, so WaitAutoRefresh waits for
 // it. The check and the count share one critical section: once StopAutoRefresh
 // has cancelled ctx, no job can start and be missed by a later wait.
 func (m *Manager) beginAutoRefreshJob(ctx context.Context, job *authRefreshJob) (func(), bool) {
@@ -425,7 +425,7 @@ func (m *Manager) beginAutoRefreshJob(ctx context.Context, job *authRefreshJob) 
 	}, true
 }
 
-// WaitAutoRefreshSaves waits until no job started by the auto-refresh loop is
+// WaitAutoRefresh waits until no job started by the auto-refresh loop is
 // still refreshing or saving its credential, or until ctx ends (it then returns
 // ctx.Err() and the jobs keep running). Call it after StopAutoRefresh, which
 // keeps new jobs from starting.
@@ -435,7 +435,7 @@ func (m *Manager) beginAutoRefreshJob(ctx context.Context, job *authRefreshJob) 
 // it, or stop the service, without waiting for itself. Writes after that point
 // (the hook's own work, cooldown state) are not waited for. The executor and
 // store run before it: calling this from them waits until ctx ends.
-func (m *Manager) WaitAutoRefreshSaves(ctx context.Context) error {
+func (m *Manager) WaitAutoRefresh(ctx context.Context) error {
 	if m == nil {
 		return nil
 	}

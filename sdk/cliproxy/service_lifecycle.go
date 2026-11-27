@@ -403,7 +403,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			// unfinished wait even after an earlier step failed: later calls
 			// return nil, so only this call can tell the caller a save may still
 			// be running (errors.Is(err, context.DeadlineExceeded)).
-			if errWait := s.coreManager.WaitAutoRefreshSaves(ctx); errWait != nil {
+			if errWait := s.coreManager.WaitAutoRefresh(ctx); errWait != nil {
 				log.WithError(errWait).Warn("auth auto-refresh did not finish saving before the shutdown deadline")
 				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("wait for auth refresh saves: %w", errWait))
 			}
