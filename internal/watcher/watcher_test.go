@@ -2553,3 +2553,65 @@ func TestConfigWatchRestoredWhenReplacementFollowsRemove(t *testing.T) {
 	}
 	waitForReloadedPort(t, reloadedPorts, 8002)
 }
+
+// A replacement created after the last re-arm check but before the directory
+// watch exists produces no event the watcher sees: neither the file nor its
+// directory is watched yet, and adding the directory watch does not replay the
+// creation. The watcher must check for the file once the directory watch is in
+// place, apply it, and keep reloading later edits.
+func TestConfigWatchRestoredWhenReplacementBeatsDirWatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+	reloadedPorts := make(chan int, 64)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
+		if cfg != nil {
+			reloadedPorts <- cfg.Port
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+
+	original := beforeConfigDirWatch
+	t.Cleanup(func() { beforeConfigDirWatch = original })
+	beforeConfigDirWatch = func() {
+		beforeConfigDirWatch = original
+		tmp := filepath.Join(tmpDir, ".config.yaml.tmp")
+		if errWrite := os.WriteFile(tmp, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", 8001, authDir)), 0o644); errWrite != nil {
+			t.Errorf("write replacement: %v", errWrite)
+			return
+		}
+		if errRename := os.Rename(tmp, configPath); errRename != nil {
+			t.Errorf("move replacement into place: %v", errRename)
+		}
+	}
+
+	if err = os.Remove(configPath); err != nil {
+		t.Fatalf("remove config: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+	waitForReloadedPort(t, reloadedPorts, 8001)
+
+	if err = os.WriteFile(configPath, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", 8002, authDir)), 0o644); err != nil {
+		t.Fatalf("edit config: %v", err)
+	}
+	waitForReloadedPort(t, reloadedPorts, 8002)
+}

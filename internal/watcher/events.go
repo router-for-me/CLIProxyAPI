@@ -328,8 +328,14 @@ func (w *Watcher) rearmConfigWatch() bool {
 		}
 	}
 	// The file is not back yet. Watch its directory so a replacement that lands
-	// later still re-arms the file watch (ensureConfigWatch) and reloads.
+	// later still re-arms the file watch (ensureConfigWatch) and reloads. A
+	// replacement can land after the checks above but before that watch exists,
+	// with no event to report it, so check once more after adding it.
 	w.watchConfigDirForReplacement()
+	if _, errStat := os.Stat(w.configPath); errStat == nil {
+		w.ensureConfigWatch()
+		return true
+	}
 	return false
 }
 
@@ -345,6 +351,7 @@ func (w *Watcher) watchConfigDirForReplacement() {
 	if w.configDirWatch != "" || (w.watchedAuthDir != "" && w.sameNormalizedAuthPath(dir, w.watchedAuthDir)) {
 		return
 	}
+	beforeConfigDirWatch()
 	if errAdd := w.watcher.Add(dir); errAdd != nil {
 		log.WithError(errAdd).Warnf("config file %s was removed and its directory cannot be watched; it is no longer watched for changes", w.configPath)
 		return
@@ -390,6 +397,10 @@ func (w *Watcher) ensureConfigWatch() {
 		w.configDirWatch = ""
 	}
 }
+
+// beforeConfigDirWatch runs right before the config directory watch is added;
+// tests use it to land a replacement in the window before that watch exists.
+var beforeConfigDirWatch = func() {}
 
 // addConfigWatch adds the config file to the fsnotify watcher; tests replace it.
 var addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
