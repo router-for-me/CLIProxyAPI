@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1256,5 +1257,40 @@ func TestWriteClaudeErrorResponseDropsTooDeepUpstreamDetails(t *testing.T) {
 	}
 	if ojson.GetBytesNoCopy(body, "error.details").Exists() {
 		t.Fatalf("too deep details forwarded; body=%.200s", body)
+	}
+}
+
+func TestWriteClaudeErrorResponseKeepsEnvelopeWithinDepthLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// details sits two levels deep in the response envelope, so it may use
+	// at most the parser depth limit minus two.
+	for _, tc := range []struct {
+		depth       int
+		wantDetails bool
+	}{
+		{depth: 9998, wantDetails: true},
+		{depth: 9999, wantDetails: false},
+		{depth: 10000, wantDetails: false},
+	} {
+		t.Run(strconv.Itoa(tc.depth), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			handler := &ClaudeCodeAPIHandler{}
+			details := strings.Repeat(`{"a":`, tc.depth-1) + "1" + strings.Repeat("}", tc.depth-1)
+			details = `{"error_code":"x","a":` + details + `}`
+			upstream := `{"type":"error","error":{"type":"invalid_request_error","message":"real message","details":` + details + `}}`
+			handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      errors.New(upstream),
+			})
+
+			body := recorder.Body.Bytes()
+			if !json.Valid(body) {
+				t.Fatalf("response body is not valid JSON; body=%.200s", body)
+			}
+			if got := ojson.GetBytesNoCopy(body, "error.details").Exists(); got != tc.wantDetails {
+				t.Fatalf("error.details present = %v, want %v; body=%.200s", got, tc.wantDetails, body)
+			}
+		})
 	}
 }

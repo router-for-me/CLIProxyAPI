@@ -754,7 +754,9 @@ func claudeErrorDetailsFromText(errText string) json.RawMessage {
 	// Get can return an object for malformed input, and json.Marshal rejects
 	// raw values that json.Valid rejects (including its depth limit, which
 	// ojson.Valid does not enforce). A rejected value would erase the envelope.
-	if !details.IsObject() || !json.Valid([]byte(details.Raw)) {
+	// Validate details at its depth in the envelope, so that the written body
+	// also stays within the depth limit.
+	if !details.IsObject() || !json.Valid([]byte(`{"error":{"details":`+details.Raw+`}}`)) {
 		return nil
 	}
 	return json.RawMessage(details.Raw)
