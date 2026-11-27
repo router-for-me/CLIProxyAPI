@@ -358,6 +358,73 @@ func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode st
 	}
 }
 
+func TestCodexBillingQuotaErrorClassificationAndCredentialScope(t *testing.T) {
+	const billingErrObj = `{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"Your credit balance is too low to access the API.","param":null}`
+	const codeOnlyErrObj = `{"type":"billing_error","code":"credit_balance_exhausted","message":"Credit balance exhausted."}`
+	const quotaCodeObj = `{"code":"insufficient_quota","message":"You exceeded your current quota."}`
+
+	for _, modelLevelCooling := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			path string
+			body string
+		}{
+			{name: "http_429_insufficient_quota", path: "http", body: `{"error":` + billingErrObj + `}`},
+			{name: "http_200_terminal_error", path: "terminal", body: `{"type":"error","sequence_number":2,"error":` + billingErrObj + `}`},
+			{name: "http_200_terminal_code_only", path: "terminal", body: `{"type":"error","sequence_number":2,"error":` + codeOnlyErrObj + `}`},
+			{name: "http_200_terminal_quota_code", path: "terminal", body: `{"type":"error","sequence_number":2,"error":` + quotaCodeObj + `}`},
+			{name: "http_200_response_failed", path: "terminal", body: `{"type":"response.failed","sequence_number":2,"response":{"error":` + billingErrObj + `}}`},
+			{name: "websocket_status_429_error", path: "websocket", body: `{"type":"error","status":429,"error":` + billingErrObj + `}`},
+			{name: "websocket_status_402_error", path: "websocket", body: `{"type":"error","status":402,"error":` + billingErrObj + `}`},
+			{name: "websocket_body_error", path: "websocket", body: `{"type":"error","status":429,"body":{"error":` + billingErrObj + `}}`},
+		} {
+			t.Run(tc.name+"/model_level_cooling="+strconv.FormatBool(modelLevelCooling), func(t *testing.T) {
+				var err error
+				switch tc.path {
+				case "http":
+					err = newCodexStatusErrWithCooling(http.StatusTooManyRequests, []byte(tc.body), modelLevelCooling)
+				case "terminal":
+					terminalErr, _, ok := codexTerminalFailureErrWithCooling([]byte(tc.body), modelLevelCooling)
+					if !ok {
+						t.Fatal("terminal billing quota error was not recognized")
+					}
+					err = terminalErr
+				case "websocket":
+					var ok bool
+					err, ok = parseCodexWebsocketErrorWithCooling([]byte(tc.body), modelLevelCooling)
+					if !ok {
+						t.Fatal("websocket billing quota error was not recognized")
+					}
+				}
+				var status interface{ StatusCode() int }
+				if !errors.As(err, &status) || status.StatusCode() != http.StatusTooManyRequests {
+					t.Fatalf("status code = %v, want 429; err=%v", err, err)
+				}
+				var scoped interface{ IsCredentialScoped() bool }
+				if !errors.As(err, &scoped) || !scoped.IsCredentialScoped() {
+					t.Fatalf("billing quota error must always be credential scoped (modelLevelCooling=%t); err=%T %v", modelLevelCooling, err, err)
+				}
+				var transient interface{ IsTransientRateLimit() bool }
+				if errors.As(err, &transient) && transient.IsTransientRateLimit() {
+					t.Fatalf("billing quota error must not be classified as transient rate limit: %v", err)
+				}
+			})
+		}
+	}
+
+	negative := []string{
+		`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached"}}`,
+		`{"error":{"type":"invalid_request_error","code":"invalid_value","message":"Your credit balance is too low to access the API."}}`,
+		`{"error":{"type":"authentication_error","code":"invalid_api_key","message":"Incorrect API key"}}`,
+		`{"error":{"type":"usage_limit_reached","message":"You have hit your usage limit"}}`,
+	}
+	for _, body := range negative {
+		if isCodexBillingQuotaError([]byte(body)) {
+			t.Fatalf("isCodexBillingQuotaError unexpectedly matched %s", body)
+		}
+	}
+}
+
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }

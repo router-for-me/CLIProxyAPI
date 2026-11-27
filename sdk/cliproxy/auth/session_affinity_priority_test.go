@@ -151,6 +151,7 @@ func TestSessionAffinityFallbackOnlyReceivesHighestAvailablePriority(t *testing.
 	assertPick("cold binding", opts, high.ID)
 	assertPick("no-session fallback", cliproxyexecutor.Options{}, high.ID)
 
+	high.Status = StatusError
 	high.Unavailable = true
 	assertPick("fallback after bound auth became unavailable", opts, low.ID)
 }
