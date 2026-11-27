@@ -88,6 +88,74 @@ account or window only records a baseline. A webhook `body` may use `{{title}}`,
 JSON. `POST /prox/api/notify/test` sends a test message and
 `GET /prox/api/notify/log` lists recent deliveries.
 
+## Kimi and Grok monitoring
+
+Kimi and Grok (CLI subscription) accounts are polled every 5 minutes with
+read-only GETs against the same endpoints the CPA Management Center uses, so
+they appear in the pool, history, and notifications. prox does not route them.
+API-billed Grok accounts have no quota and show `api_billing_no_quota`.
+Antigravity is intentionally not monitored.
+
+```yaml
+plugins:
+  configs:
+    prox:
+      monitor: {enabled: true, poll_interval: 5m, kimi: true, xai: true}
+```
+
+`GET /prox/api/monitor` lists them; `POST /prox/api/monitor/refresh` polls now.
+
+## Usage and cost
+
+Every upstream attempt (all providers) is recorded per hour, provider, account,
+model, and client (`claude`, `codex`, ... from the session headers) with tokens
+and API-equivalent cost. Hourly rows roll into days after a week and are kept
+90 days. Defaults cover current Claude models and the GPT-5 family; add the
+rest (for example GPT-6, Kimi, Grok) under `usage.pricing`, USD per 1M tokens:
+
+```yaml
+plugins:
+  configs:
+    prox:
+      usage:
+        retention: 2160h
+        pricing:
+          gpt-6-luna: {input: 1.25, output: 10, cache_read: 0.125}
+          kimi-k3:    {input: 0.60, output: 2.50}
+```
+
+`cache_read` defaults to 0.1x and `cache_write` to 1.25x the input price. Rows
+for unpriced models count tokens and report `unpriced` requests.
+
+- `GET /prox/api/costs?range=24h|7d|30d&group=provider,auth,model,client&step=1h`
+  returns grouped rows, totals, and the cache-read share of input tokens (a low
+  share points at affinity or prompt-cache problems).
+- `GET /prox/api/pool` returns per provider: accounts, usable accounts, the
+  plan-weighted remaining percent per window (Max 20x counts 20x a Pro account),
+  next reset, the next new-session account, and today's and 7-day cost.
+
+## ClickHouse
+
+```yaml
+plugins:
+  configs:
+    prox:
+      clickhouse:
+        url: http://nas.tailnet.ts.net:8123
+        database: prox
+        table: requests
+        username: default
+        password_env: CLICKHOUSE_PASSWORD
+```
+
+prox creates the database and a MergeTree table on first write and inserts one
+row per upstream attempt (time, request and trace IDs, provider, account,
+model, client, hashed session keys, status, latency, TTFT, tokens, cost,
+reasoning effort, service tier) through ClickHouse's HTTP interface, batched
+every 5 s. Request and response bodies are not stored. If ClickHouse is down,
+rows queue in memory (20k by default) and are then dropped with a warning;
+requests are never delayed. `GET /prox/api/sink` shows counters.
+
 These features are written from scratch based on the documented behavior of
 [lamplighter](https://github.com/PosvdM/cpa-plugin-lamplighter); no lamplighter
 code is included.

@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/quota"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/router"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/session"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/sink"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/store"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/telemetry"
 	proxusage "github.com/router-for-me/CLIProxyAPI/v8/internal/prox/usage"
@@ -71,6 +72,7 @@ type Engine struct {
 	ntf      *notify.Notifier
 	mon      *monitor.Monitor
 	ledger   *proxusage.Ledger
+	ch       *sink.ClickHouse
 	usageCfg proxusage.Config
 	// usageSavedAt is touched only by the background loop and Flush.
 	usageSavedAt time.Time
@@ -151,6 +153,7 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 	var ncfg notify.Config
 	var mcfg monitor.Config
 	var ucfg proxusage.Config
+	var scfg sink.Config
 	if err == nil {
 		icfg, err = ignite.Decode(raw)
 	}
@@ -163,6 +166,9 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 	if err == nil {
 		ucfg, err = proxusage.Decode(raw)
 	}
+	if err == nil {
+		scfg, err = sink.Decode(raw)
+	}
 	if err != nil {
 		e.mu.Lock()
 		e.configErr = err.Error()
@@ -172,6 +178,7 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 	e.Configure(cfg)
 	e.configureExtras(icfg, ncfg, mcfg)
 	e.configureUsage(ucfg)
+	e.configureSink(scfg)
 	return nil
 }
 
@@ -234,6 +241,34 @@ func (e *Engine) configureUsage(cfg proxusage.Config) {
 		e.ledger.Configure(pricer, cfg.Retention)
 	}
 	e.usageCfg = cfg
+}
+
+func (e *Engine) configureSink(cfg sink.Config) {
+	e.mu.Lock()
+	old := e.ch
+	if old != nil && old.Config() == cfg {
+		e.mu.Unlock()
+		return
+	}
+	e.ch = nil
+	if cfg.URL != "" {
+		e.ch = sink.New(cfg)
+	}
+	e.mu.Unlock()
+	if old != nil {
+		go old.Close()
+	}
+}
+
+// SinkStatus describes the ClickHouse sink.
+func (e *Engine) SinkStatus() sink.Status {
+	e.mu.Lock()
+	ch := e.ch
+	e.mu.Unlock()
+	if ch == nil {
+		return sink.Status{}
+	}
+	return ch.Status()
 }
 
 // Ledger returns the usage ledger, or nil before configuration.
@@ -380,8 +415,12 @@ func (e *Engine) IgniteNow(authID string) bool {
 func (e *Engine) Shutdown() {
 	e.Stop()
 	e.mu.Lock()
-	ign, ntf, mf := e.ign, e.ntf, e.monFetcher
+	ign, ntf, mf, ch := e.ign, e.ntf, e.monFetcher, e.ch
+	e.ch = nil
 	e.mu.Unlock()
+	if ch != nil {
+		ch.Close()
+	}
 	if mf != nil {
 		mf.Close()
 	}
@@ -766,14 +805,41 @@ func (e *Engine) HandleUsage(_ context.Context, rec coreusage.Record) {
 		at = e.now()
 	}
 	e.mu.Lock()
-	ledger := e.ledger
+	ledger, ch := e.ledger, e.ch
 	e.mu.Unlock()
 	if ledger != nil && proxusage.GenerateEnabled(rec) {
 		client := "other"
-		if ref, ok := session.FromUsage(rec.SessionID, rec.ParentSessionID, rec.APIKey); ok && ref.Client != "" {
+		ref, hasRef := session.FromUsage(rec.SessionID, rec.ParentSessionID, rec.APIKey)
+		if hasRef && ref.Client != "" {
 			client = ref.Client
 		}
-		ledger.Add(at, provider, rec.AuthID, firstNonEmpty(rec.ResponseModel, rec.Model), client, rec.Failed, proxusage.TokensFromDetail(provider, rec.Detail))
+		model := firstNonEmpty(rec.ResponseModel, rec.Model)
+		tokens := proxusage.TokensFromDetail(provider, rec.Detail)
+		ledger.Add(at, provider, rec.AuthID, model, client, rec.Failed, tokens)
+		if ch != nil {
+			row := sink.Row{
+				TS: at, RequestID: rec.RequestID, TraceID: rec.TraceID, Provider: provider, AuthID: rec.AuthID,
+				Model: proxusage.NormalizeModel(rec.Model), ResponseModel: rec.ResponseModel, Alias: rec.Alias, Client: client,
+				Status: uint16(rec.Fail.StatusCode), FailCode: rec.Fail.Code, LatencyMS: uint32(rec.Latency.Milliseconds()), TTFTMS: uint32(rec.TTFT.Milliseconds()),
+				InputTokens: tokens.Input, OutputTokens: tokens.Output, ReasoningTokens: tokens.Reasoning, CacheReadTokens: tokens.CacheRead, CacheWriteTokens: tokens.CacheWrite,
+				ReasoningEffort: rec.ReasoningEffort, ServiceTier: firstNonEmpty(rec.EffectiveServiceTier, rec.ServiceTier), Executor: rec.ExecutorType,
+			}
+			if hasRef {
+				row.SessionKey, row.ParentSessionKey = ref.Key, ref.ParentKey
+			}
+			if rec.Stream {
+				row.Stream = 1
+			}
+			if rec.Failed {
+				row.Failed = 1
+			} else if row.Status == 0 {
+				row.Status = http.StatusOK
+			}
+			if p, ok := ledger.Price(model); ok {
+				row.CostUSD = p.Cost(tokens)
+			}
+			ch.Add(row)
+		}
 	}
 	if provider != "claude" && provider != "codex" {
 		return

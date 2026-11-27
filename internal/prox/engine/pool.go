@@ -180,6 +180,9 @@ func parseRange(s string, def time.Duration) time.Duration {
 // handleUsage serves /costs and /pool.
 func (e *Engine) handleUsage(c *gin.Context, path string) bool {
 	switch {
+	case path == "/sink" && c.Request.Method == http.MethodGet:
+		c.JSON(http.StatusOK, e.SinkStatus())
+		return true
 	case path == "/pool" && c.Request.Method == http.MethodGet:
 		c.JSON(http.StatusOK, gin.H{"now": e.now(), "providers": e.Pool()})
 		return true
