@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1913,5 +1914,149 @@ func TestCodexWebsocketsExecutor_PreOutputUpstreamErrorDoesNotNotifyDisconnect(t
 				}
 			})
 		}
+	}
+}
+
+func TestCodexBillingQuotaBootstrapFailoverAndTimeout(t *testing.T) {
+	const billingErrorFrame = `{"type":"error","sequence_number":2,"error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"Your credit balance is too low to access the API.","param":null}}`
+	const billingFailedFrame = `{"type":"response.failed","sequence_number":2,"response":{"error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"Your credit balance is too low to access the API.","param":null}}}`
+
+	t.Run("sse_billing_error_directly_after_timeout_delivers_in_stream", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+		clock := withMockClock(t, t0)
+
+		bootstrapStarted := make(chan struct{})
+		var once sync.Once
+		cleanup := setCodexBootstrapNowForTest(func() time.Time {
+			now := clock.now()
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+			return now
+		})
+		t.Cleanup(cleanup)
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-bootstrapStarted
+			clock.advance(11 * time.Second)
+			// Send the billing error as the first frame after timeout so the billing branch itself
+			// must evaluate timeoutReached rather than relying on an earlier frame releasing the stream.
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", billingErrorFrame)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}))
+		defer srv.Close()
+
+		exec := NewCodexExecutor(codexBufferingConfigWithTimeout(true, "10s"))
+		req, opts := codexTestRequest()
+		result, err := exec.ExecuteStream(context.Background(), codexTestAuth(srv.URL), req, opts)
+		if err != nil {
+			t.Fatalf("expected timed-out bootstrap billing error to be delivered in-stream, got direct err=%v", err)
+		}
+		_, streamErr := drainChunks(result)
+		if streamErr == nil {
+			t.Fatal("expected in-stream billing error after timeout")
+		}
+		if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
+			t.Fatalf("status code = %d, want 429", got)
+		}
+		var scoped interface{ IsCredentialScoped() bool }
+		if !errors.As(streamErr, &scoped) || !scoped.IsCredentialScoped() {
+			t.Fatalf("in-stream billing error must remain credential-scoped: %v", streamErr)
+		}
+	})
+
+	t.Run("ws_billing_error_directly_after_timeout_delivers_in_stream", func(t *testing.T) {
+		t0 := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+		clock := withMockClock(t, t0)
+
+		bootstrapStarted := make(chan struct{})
+		var once sync.Once
+		cleanup := setCodexBootstrapNowForTest(func() time.Time {
+			now := clock.now()
+			once.Do(func() {
+				close(bootstrapStarted)
+			})
+			return now
+		})
+		t.Cleanup(cleanup)
+
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+			if errUpgrade != nil {
+				return
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Errorf("close websocket: %v", errClose)
+				}
+			}()
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+			<-bootstrapStarted
+			clock.advance(11 * time.Second)
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(billingErrorFrame))
+		}))
+		defer srv.Close()
+
+		exec := NewCodexWebsocketsExecutor(codexBufferingConfigWithTimeout(true, "10s"))
+		req, opts := codexWebsocketRequest()
+		result, err := exec.ExecuteStream(context.Background(), codexTestAuth(srv.URL), req, opts)
+		if err != nil {
+			t.Fatalf("expected timed-out bootstrap billing error to be delivered in-stream, got direct err=%v", err)
+		}
+		_, streamErr := drainChunks(result)
+		if streamErr == nil {
+			t.Fatal("expected in-stream billing error after timeout")
+		}
+		if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
+			t.Fatalf("status code = %d, want 429", got)
+		}
+		var scoped interface{ IsCredentialScoped() bool }
+		if !errors.As(streamErr, &scoped) || !scoped.IsCredentialScoped() {
+			t.Fatalf("in-stream billing error must remain credential-scoped: %v", streamErr)
+		}
+	})
+
+	for name, frame := range map[string]string{
+		"ws_error_no_status": billingErrorFrame,
+		"ws_response_failed": billingFailedFrame,
+	} {
+		t.Run(name+"_does_not_notify_disconnect", func(t *testing.T) {
+			server := codexWebsocketServerHoldingConnection(t, codexCreatedEvent, codexInProgressEvent, frame)
+			defer server.Close()
+
+			exec := NewCodexWebsocketsExecutor(codexBufferingConfig(true))
+			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+
+			const sessionID = "issue-8527-ws-session"
+			disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+			req, opts := codexWebsocketRequest()
+			opts.Metadata = map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sessionID}
+			result, err := exec.ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+			if err == nil {
+				t.Fatalf("expected direct failover error from ExecuteStream, got result=%v", result)
+			}
+			if got := statusCodeFromTestError(t, err); got != http.StatusTooManyRequests {
+				t.Fatalf("status code = %d, want 429", got)
+			}
+			var scoped interface{ IsCredentialScoped() bool }
+			if !errors.As(err, &scoped) || !scoped.IsCredentialScoped() {
+				t.Fatalf("expected credential-scoped error, got %T %v", err, err)
+			}
+			select {
+			case disconnectErr := <-disconnectCh:
+				t.Fatalf("pre-output billing quota error must not notify downstream disconnect, got %v", disconnectErr)
+			default:
+			}
+		})
 	}
 }

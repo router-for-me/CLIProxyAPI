@@ -1329,6 +1329,9 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 		return true, blockReasonOther, credNext
 	}
 	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
+	if unavailable && isOrphanedAuthUnavailable(auth, now) {
+		unavailable = false
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelLookupKey(model)
@@ -1508,6 +1511,9 @@ func isAuthBlockedByQuotaOrAuthForModelForRequest(ctx context.Context, auth *Aut
 	}
 	quota := auth.Quota
 	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
+	if unavailable && isOrphanedAuthUnavailable(auth, now) {
+		unavailable = false
+	}
 	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !unavailable {
 		quota.Exceeded = false
 	}
