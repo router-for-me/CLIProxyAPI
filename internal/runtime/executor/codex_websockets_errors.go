@@ -66,7 +66,7 @@ func inferCodexWebsocketErrorStatus(payload []byte) int {
 	if !ok {
 		return 0
 	}
-	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+	if isCodexUsageLimitError(body) || isCodexBillingQuotaError(body) || isCodexTransientCapacityError(body) {
 		return http.StatusTooManyRequests
 	}
 	if codexTerminalErrorIsContextLength(body) {
@@ -101,21 +101,26 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	isUsageLimit := isCodexUsageLimitError(out)
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
+	isBillingQuota := isCodexBillingQuotaError(out)
+	transientCapacity := !isUsageLimit && !isBillingQuota && isCodexTransientCapacityError(out)
+	errCode := status
+	if isBillingQuota {
+		errCode = http.StatusTooManyRequests
+	}
 	statusError := statusErr{
-		code:               status,
+		code:               errCode,
 		msg:                string(out),
-		credentialScoped:   isUsageLimit && !modelLevelCooling,
-		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
+		credentialScoped:   isBillingQuota || (isUsageLimit && !modelLevelCooling),
+		transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests,
 	}
 	// Hint precedence: the quota body reset wins, then the connection-limit
 	// immediate-retry contract, then the generic Retry-After header.
-	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+	if retryAfter := parseCodexRetryAfter(errCode, out, time.Now()); retryAfter != nil {
 		statusError.retryAfter = retryAfter
 	} else if isCodexWebsocketConnectionLimitError(payload) {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
-	} else if shouldParseCodexRetryAfterHeader(status) {
+	} else if shouldParseCodexRetryAfterHeader(errCode) {
 		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
 			statusError.retryAfter = retryAfter
 		}

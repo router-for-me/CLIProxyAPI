@@ -643,6 +643,13 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 		return false, status, statusMessage, time.Time{}
 	}
 
+	// Match selector.isAuthBlockedForModelForRequest: an enabled active credential
+	// with no cooldown deadline, no error status/message, and no unresolved auth
+	// or token failure must not be reported as permanently unavailable.
+	if !hasActiveCredCooldown && !hasActiveModelCooldown && coreauth.IsOrphanedAuthUnavailable(auth, now) {
+		return false, coreauth.StatusActive, "", time.Time{}
+	}
+
 	// If nextRetry is in the past, do not expose a past retry deadline.
 	if !nextRetry.IsZero() && !nextRetry.After(now) {
 		nextRetry = time.Time{}
