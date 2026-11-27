@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -144,20 +145,31 @@ func replaceCPASessionID(val, sessionID string) string {
 	return sb.String()
 }
 
+// extractCustomHeaders resolves header: attributes keyed by canonical header
+// name. Attribute names that differ only by case would otherwise race through
+// random map order, so keys are visited in sorted byte order and the first one
+// that resolves to a non-empty value wins.
 func extractCustomHeaders(attrs map[string]string, clientHeaders http.Header, ctx context.Context) map[string]string {
 	if len(attrs) == 0 {
 		return nil
 	}
-	headers := make(map[string]string)
-	for k, v := range attrs {
-		if !strings.HasPrefix(k, "header:") {
-			continue
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		if strings.HasPrefix(k, "header:") {
+			keys = append(keys, k)
 		}
-		name := strings.TrimSpace(strings.TrimPrefix(k, "header:"))
+	}
+	sort.Strings(keys)
+	headers := make(map[string]string)
+	for _, k := range keys {
+		name := http.CanonicalHeaderKey(strings.TrimSpace(strings.TrimPrefix(k, "header:")))
 		if name == "" {
 			continue
 		}
-		val := strings.TrimSpace(v)
+		if _, ok := headers[name]; ok {
+			continue
+		}
+		val := strings.TrimSpace(attrs[k])
 		if val == "" {
 			continue
 		}
