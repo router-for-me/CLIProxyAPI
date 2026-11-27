@@ -185,6 +185,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAffinityLookup(ctx, request)
 	case pluginabi.MethodHostRoutingResetCooldown:
 		return h.callHostRoutingResetCooldown(ctx, request)
+	case pluginabi.MethodHostContextDone:
+		return h.callHostContextDone(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}

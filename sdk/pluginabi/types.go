@@ -136,6 +136,7 @@ const (
 	MethodHostHTTPDoStream       = "host.http.do_stream"
 	MethodHostHTTPOperationOpen  = "host.http.operation_open"
 	MethodHostHTTPCancel         = "host.http.cancel"
+	MethodHostContextDone        = "host.context.done"
 	MethodHostHTTPStreamRead     = "host.http.stream_read"
 	MethodHostHTTPStreamClose    = "host.http.stream_close"
 	MethodHostModelExecute       = "host.model.execute"

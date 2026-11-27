@@ -115,6 +115,8 @@ plugins:
 
 `auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, or `round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
 
+`scheduler.pick` requests carry a `host_callback_id`. The host cannot interrupt a plugin call, so a scheduler that blocks inside a pick (to hold a request until an account frees up) should call `host.context.done` with that ID from another thread. The call blocks until the request's context ends, returning `{"done": true, "error": "context canceled"}`, or until the pick returns, returning `{"done": false}`. On `done: true` the client is gone or timed out: stop holding and return; the host discards the pick result. Hosts without this method reject the call, so treat an error as "no cancellation signal".
+
 ## Plugin Executor Error Handling and HTTP Status
 
 When a plugin executor encounters an upstream failure (such as `401 Unauthorized` for invalid credentials, `403 Forbidden` for model permission/quota limits, or `429 Too Many Requests` for rate limits), it should report the HTTP status code in the error envelope:

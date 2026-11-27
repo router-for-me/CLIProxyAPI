@@ -93,6 +93,11 @@ type rpcAuthRefreshRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcSchedulerPickRequest struct {
+	pluginapi.SchedulerPickRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcAuthModelRequest struct {
 	pluginapi.AuthModelRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`

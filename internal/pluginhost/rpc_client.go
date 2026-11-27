@@ -385,6 +385,9 @@ func sanitizePluginRequest(request any) any {
 	case rpcRequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case rpcSchedulerPickRequest:
+		req.SchedulerPickRequest = sanitizePluginRequest(req.SchedulerPickRequest).(pluginapi.SchedulerPickRequest)
+		return req
 	case rpcModelRouteRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
@@ -556,7 +559,24 @@ func (a *rpcPluginAdapter) ModelsForAuth(ctx context.Context, req pluginapi.Auth
 }
 
 func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
-	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
+	// The callback ID lets a plugin that holds the pick wait on
+	// host.context.done and stop holding once the request is gone. The
+	// guarded client returns when ctx ends while the C call goes on, so the
+	// callback stays open until the plugin call itself exits.
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	ctx, finish := withPluginCallFinish(ctx, closeCallback)
+	defer finish()
+	resp, errPick := callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, rpcSchedulerPickRequest{
+		SchedulerPickRequest: req,
+		HostCallbackID:       callbackID,
+	})
+	if errPick == nil {
+		// A pick that ends with its request must not hand back a selection.
+		if errCtx := ctx.Err(); errCtx != nil {
+			return pluginapi.SchedulerPickResponse{}, errCtx
+		}
+	}
+	return resp, errPick
 }
 
 func (a *rpcPluginAdapter) Continuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, error) {
