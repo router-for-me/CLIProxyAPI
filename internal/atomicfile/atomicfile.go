@@ -14,7 +14,8 @@ import (
 )
 
 // rename, exchange, exchangeAvailable, matchOwner, statTarget, chmodTemp,
-// syncTemp and removeFile are replaced in tests to exercise the fallbacks.
+// syncTemp, removeFile and createTempFile are replaced in tests to exercise the
+// fallbacks.
 var (
 	rename            = os.Rename
 	exchange          = exchangeFiles
@@ -24,6 +25,7 @@ var (
 	chmodTemp         = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 	syncTemp          = func(file *os.File) error { return file.Sync() }
 	removeFile        = os.Remove
+	createTempFile    = createTemp
 )
 
 // keptModeBits are the mode bits a replacement carries over from the file it
@@ -44,6 +46,9 @@ var beforeCommit = func() {}
 // less the umask, as with os.WriteFile. Other inode metadata (extended attributes,
 // POSIX ACLs, SELinux labels, Windows DACLs) is not copied: the new file gets the
 // defaults for its directory.
+//
+// A full disk, an exhausted quota or an I/O error is returned with the target
+// untouched, never retried in place.
 //
 // It writes in place, which is what os.WriteFile does, when a rename would change
 // what path refers to: a dangling symlink (the link would be replaced), a special
@@ -128,8 +133,13 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	if existing != nil {
 		tempPerm = 0o600
 	}
-	tmp, errCreate := createTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-", tempPerm)
+	tmp, errCreate := createTempFile(filepath.Dir(target), "."+filepath.Base(target)+".tmp-", tempPerm)
 	if errCreate != nil {
+		if capacityError(errCreate) {
+			// Writing in place would truncate the only valid copy on a disk that may
+			// not have room for the new one.
+			return fmt.Errorf("atomicfile: create temp file next to %s: %w", target, errCreate)
+		}
 		log.WithError(errCreate).Debugf("atomicfile: cannot create temp file next to %s, writing in place", target)
 		return writeInPlace(target, data, perm, mustExist)
 	}
@@ -231,6 +241,9 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	}
 	runCommitHook()
 	if errRename := rename(tmpPath, target); errRename != nil {
+		if capacityError(errRename) {
+			return fmt.Errorf("atomicfile: replace %s: %w", target, errRename)
+		}
 		log.WithError(errRename).Debugf("atomicfile: cannot replace %s, writing in place", target)
 		return writeInPlace(target, data, perm, mustExist)
 	}

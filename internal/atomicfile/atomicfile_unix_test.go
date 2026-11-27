@@ -404,3 +404,56 @@ func TestWriteFileTempIsOwnerOnlyWhileHoldingNewContent(t *testing.T) {
 		t.Fatalf("final mode = %v, want the existing 0600", info.Mode().Perm())
 	}
 }
+
+// A full disk or exhausted quota must not send the save to the in-place fallback:
+// truncating the only valid file and then failing to write the new one is the
+// corruption this package exists to prevent. The target must stay as it was.
+func TestWriteFileKeepsTargetWhenDiskIsFull(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		// fail picks the step that hits the capacity error.
+		fail string
+	}{
+		{name: "temp ENOSPC", err: syscall.ENOSPC, fail: "temp"},
+		{name: "temp EDQUOT", err: syscall.EDQUOT, fail: "temp"},
+		{name: "rename ENOSPC", err: syscall.ENOSPC, fail: "rename"},
+		{name: "rename EDQUOT", err: syscall.EDQUOT, fail: "rename"},
+	} {
+		for _, replace := range []bool{false, true} {
+			t.Run(tc.name+map[bool]string{false: " WriteFile", true: " ReplaceFile"}[replace], func(t *testing.T) {
+				originalTemp, originalRename, originalExchange := createTempFile, rename, exchangeAvailable
+				t.Cleanup(func() { createTempFile, rename, exchangeAvailable = originalTemp, originalRename, originalExchange })
+				// Take the check-then-rename path for ReplaceFile too.
+				exchangeAvailable = func() bool { return false }
+				switch tc.fail {
+				case "temp":
+					createTempFile = func(dir, prefix string, _ os.FileMode) (*os.File, error) {
+						return nil, &os.PathError{Op: "open", Path: filepath.Join(dir, prefix), Err: tc.err}
+					}
+				case "rename":
+					rename = func(from, to string) error { return &os.LinkError{Op: "rename", Old: from, New: to, Err: tc.err} }
+				}
+
+				path := filepath.Join(t.TempDir(), "auth.json")
+				if err := os.WriteFile(path, []byte(`{"refresh_token":"old"}`), 0o600); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+				var err error
+				if replace {
+					err = ReplaceFile(path, []byte(`{"refresh_token":"new"}`), 0o600)
+				} else {
+					err = WriteFile(path, []byte(`{"refresh_token":"new"}`), 0o600)
+				}
+				if !errors.Is(err, tc.err) {
+					t.Fatalf("error = %v, want it to wrap %v", err, tc.err)
+				}
+				got, _ := os.ReadFile(path)
+				if string(got) != `{"refresh_token":"old"}` {
+					t.Fatalf("target = %q, want the old content untouched", got)
+				}
+				assertNoTempFiles(t, filepath.Dir(path))
+			})
+		}
+	}
+}

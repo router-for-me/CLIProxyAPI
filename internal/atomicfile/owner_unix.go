@@ -41,3 +41,10 @@ func keepOwner(tmp *os.File, existing os.FileInfo) error {
 func syncUnsupported(err error) bool {
 	return errors.Is(err, syscall.EINVAL) || errors.Is(err, errors.ErrUnsupported)
 }
+
+// capacityError reports a full disk, an exhausted quota or an I/O error. Writing
+// in place cannot do better than the atomic path then: it would truncate the
+// target first and could leave it empty or partial.
+func capacityError(err error) bool {
+	return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.EIO)
+}
