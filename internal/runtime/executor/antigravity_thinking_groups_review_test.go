@@ -689,7 +689,7 @@ func TestAntigravityThinkingGroupsReviewRefreshReselectsChangedPrefix(t *testing
 				cfg := &config.Config{}
 				manager := cliproxyauth.NewManager(nil, nil, nil)
 				manager.SetConfig(cfg)
-				manager.SetRetryConfig(0, 0, 1)
+				manager.SetRetryConfig(3, 0, 1)
 				manager.RegisterExecutor(NewAntigravityExecutor(cfg))
 				auth := newIssue7865TestAuth(t.Name())
 				auth.Prefix = tc.initialPrefix
@@ -730,10 +730,12 @@ func TestAntigravityThinkingGroupsReviewRefreshReselectsChangedPrefix(t *testing
 						Body:       io.NopCloser(strings.NewReader(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}`)),
 					}, nil
 				}))
+				interceptions := 0
 				opts := cliproxyexecutor.Options{
 					SourceFormat: sdktranslator.FormatClaude,
 					Stream:       mode == "stream",
 					RequestAfterAuthInterceptor: func(callCtx context.Context, _ cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+						interceptions++
 						updated := registered.Clone()
 						updated.Prefix = tc.prefix
 						updated.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
@@ -770,6 +772,9 @@ func TestAntigravityThinkingGroupsReviewRefreshReselectsChangedPrefix(t *testing
 				default:
 					_, errExecute = manager.Execute(ctx, []string{"antigravity"}, req, opts)
 				}
+				if interceptions != 1 {
+					t.Fatalf("auth interceptors called %d times, want one credential attempt without extra retry rounds", interceptions)
+				}
 				if tc.wantExcluded {
 					var rejected *cliproxyauth.Error
 					if !errors.As(errExecute, &rejected) || rejected.HTTPStatus != http.StatusServiceUnavailable || !strings.Contains(rejected.Message, "excluded") {
@@ -804,6 +809,125 @@ func TestAntigravityThinkingGroupsReviewRefreshReselectsChangedPrefix(t *testing
 				}
 			})
 		}
+	}
+}
+
+func TestAntigravityThinkingGroupsReviewExcludedCredentialFailsOver(t *testing.T) {
+	for _, mode := range []string{"generate", "stream", "count"} {
+		t.Run(mode, func(t *testing.T) {
+			client := newFakeAntigravityKVClient()
+			useFakeAntigravityKVClient(t, client, true, nil)
+			cfg := &config.Config{}
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(3, 0, 2)
+			manager.RegisterExecutor(NewAntigravityExecutor(cfg))
+			blocked := newIssue7865TestAuth(t.Name() + "/blocked")
+			blocked.Prefix = "other"
+			blocked.Attributes = map[string]string{"excluded_models": "team/*", "priority": "10"}
+			blocked.Metadata["expired"] = time.Now().Add(time.Minute).Format(time.RFC3339)
+			allowed := newIssue7865TestAuth(t.Name() + "/allowed")
+			allowed.Prefix = "allowed"
+			allowed.Attributes = map[string]string{"excluded_models": "team/*"}
+			reg := registry.GetGlobalRegistry()
+			for _, auth := range []*cliproxyauth.Auth{blocked, allowed} {
+				registered, errRegister := manager.Register(t.Context(), auth)
+				if errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				if !manager.StoreAntigravityModelCatalog(t.Context(), registered,
+					map[string]string{reviewHigh: "HIGH_ENUM", reviewLow: "LOW_ENUM"},
+					map[string]map[string]int{reviewGroup: {"low": 50000, "high": 60000}},
+					nil,
+				) {
+					t.Fatal("failed to publish local catalog")
+				}
+				reg.RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: reviewHigh}, {ID: reviewLow}})
+				t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			}
+			var upstream ojson.Result
+			upstreamCalls := 0
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				upstreamCalls++
+				if got := r.Header.Get("Authorization"); got != "Bearer token-"+allowed.ID {
+					t.Errorf("upstream credential = %q, want the allowed credential", got)
+				}
+				raw, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					return nil, errRead
+				}
+				upstream = ojson.ParseBytes(raw)
+				path := antigravityGeneratePath
+				body := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}`
+				switch mode {
+				case "stream":
+					path = antigravityStreamPath
+					body = "data: " + body + "\n\n"
+				case "count":
+					path = antigravityCountTokensPath
+					body = `{"totalTokens":42}`
+				}
+				if r.URL.Path != path {
+					t.Errorf("request path = %q, want %q", r.URL.Path, path)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+			}))
+			interceptions := 0
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAI,
+				Stream:       mode == "stream",
+				RequestAfterAuthInterceptor: func(callCtx context.Context, _ cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+					interceptions++
+					if interceptions == 1 {
+						updated := blocked.Clone()
+						updated.Prefix = "team"
+						updated.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+						if _, errUpdate := manager.Update(callCtx, updated); errUpdate != nil {
+							t.Fatal(errUpdate)
+						}
+					}
+					return cliproxyexecutor.RequestAfterAuthInterceptResponse{}
+				},
+			}
+			req := cliproxyexecutor.Request{
+				Model:   reviewHigh,
+				Payload: []byte(`{"reasoning_effort":"low","messages":[{"role":"user","content":"hi"}]}`),
+			}
+			var errExecute error
+			switch mode {
+			case "stream":
+				var result *cliproxyexecutor.StreamResult
+				result, errExecute = manager.ExecuteStream(ctx, []string{"antigravity"}, req, opts)
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							errExecute = chunk.Err
+						}
+					}
+				}
+			case "count":
+				_, errExecute = manager.ExecuteCount(ctx, []string{"antigravity"}, req, opts)
+			default:
+				_, errExecute = manager.Execute(ctx, []string{"antigravity"}, req, opts)
+			}
+			if errExecute != nil {
+				t.Fatalf("allowed credential did not complete the request: %v", errExecute)
+			}
+			if interceptions != 2 || upstreamCalls != 1 {
+				t.Fatalf("credential attempts = %d, upstream calls = %d; want two credential attempts and one allowed upstream call", interceptions, upstreamCalls)
+			}
+			modelPath := "model"
+			if mode == "count" {
+				modelPath = "request.model"
+			}
+			if got := strings.TrimPrefix(upstream.Get(modelPath).Str, "models/"); got != reviewLow {
+				t.Fatalf("upstream model = %q, want allowed target %q; body=%s", got, reviewLow, upstream.Raw)
+			}
+			current, _ := manager.GetByID(blocked.ID)
+			if current.Unavailable || len(current.ModelStates) != 0 {
+				t.Fatalf("excluded credential gained cooldown state: %+v", current.ModelStates)
+			}
+		})
 	}
 }
 
