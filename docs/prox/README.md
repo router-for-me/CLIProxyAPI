@@ -162,6 +162,13 @@ code is included.
 
 ## Dashboard
 
+Pages: Overview (pooled headroom per provider, next-session account, Claude/Codex
+accounts, monitored Kimi/Grok accounts), Accounts & Quotas, Sessions, Activity
+(decision explorer), Cost & Tokens (API-equivalent cost and tokens by model,
+account, client, provider), Routing Usage (affinity, failovers), Ignition &
+Alerts (ignition plans and events, notification log, ClickHouse status), and
+Settings.
+
 Open `http://<host>:8317/prox/ui/index.html` and enter the management key
 (`remote-management.secret-key`). The JSON API is under `/prox/api/*` and
 requires the same key. Settings saved from the dashboard go through

@@ -1,10 +1,12 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { hasKey, onKeyChange, request, setKey } from "./api";
-import { IconAccounts, IconActivity, IconLogout, IconMenu, IconMoon, IconOverview, IconRefresh, IconSearch, IconSessions, IconSettings, IconSun, IconUsage, Logo } from "./components/icons";
+import { IconAccounts, IconActivity, IconBolt, IconCost, IconLogout, IconMenu, IconMoon, IconOverview, IconRefresh, IconSearch, IconSessions, IconSettings, IconSun, IconUsage, Logo } from "./components/icons";
 import { Banner, Pill, Seg } from "./components/ui";
 import { relative } from "./format";
 import { useNow, usePoll, useToasts } from "./hooks";
 import { AccountsPage } from "./pages/Accounts";
+import { AutomationPage } from "./pages/Automation";
+import { CostPage } from "./pages/Cost";
 import { ActivityPage } from "./pages/Activity";
 import { OverviewPage } from "./pages/Overview";
 import { SessionsPage } from "./pages/Sessions";
@@ -22,13 +24,15 @@ export interface PageProps {
   now: number;
 }
 
-type Route = "overview" | "accounts" | "sessions" | "activity" | "usage" | "settings";
+type Route = "overview" | "accounts" | "sessions" | "activity" | "usage" | "cost" | "automation" | "settings";
 const routes: { id: Route; label: string; icon: () => ReactNode; group: string; filters: boolean }[] = [
   { id: "overview", label: "Overview", icon: IconOverview, group: "Monitor", filters: true },
   { id: "accounts", label: "Accounts & Quotas", icon: IconAccounts, group: "Monitor", filters: true },
   { id: "sessions", label: "Sessions", icon: IconSessions, group: "Monitor", filters: true },
   { id: "activity", label: "Activity", icon: IconActivity, group: "Analyze", filters: true },
-  { id: "usage", label: "Usage", icon: IconUsage, group: "Analyze", filters: false },
+  { id: "cost", label: "Cost & Tokens", icon: IconCost, group: "Analyze", filters: false },
+  { id: "usage", label: "Routing Usage", icon: IconUsage, group: "Analyze", filters: false },
+  { id: "automation", label: "Ignition & Alerts", icon: IconBolt, group: "Configure", filters: false },
   { id: "settings", label: "Settings", icon: IconSettings, group: "Configure", filters: false },
 ];
 
@@ -104,7 +108,7 @@ function Login() {
           <span className="brand-mark"><Logo /></span>
           <div>
             <div className="brand-name">prox</div>
-            <div className="brand-sub">CLIProxyAPI plugin</div>
+            <div className="brand-sub">quota router</div>
           </div>
         </div>
         <h1>Connect with your management key</h1>
@@ -145,7 +149,7 @@ function Shell({ theme, toggleTheme }: { theme: "dark" | "light"; toggleTheme: (
           <span className="brand-mark"><Logo /></span>
           <div>
             <div className="brand-name">prox</div>
-            <div className="brand-sub">CLIProxyAPI plugin{ov ? ` · v${ov.plugin.version}` : ""}</div>
+            <div className="brand-sub">quota router{ov ? ` · v${ov.plugin.version}` : ""}</div>
           </div>
         </div>
         {groups.map((g) => (
@@ -253,6 +257,10 @@ function Page({ route, props }: { route: Route; props: PageProps }) {
       return <ActivityPage {...props} />;
     case "usage":
       return <UsagePage {...props} />;
+    case "cost":
+      return <CostPage {...props} />;
+    case "automation":
+      return <AutomationPage {...props} />;
     case "settings":
       return <SettingsPage {...props} />;
     default:

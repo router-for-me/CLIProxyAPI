@@ -4,6 +4,8 @@ import { request } from "../api";
 import { AccountDrawer } from "../components/AccountDrawer";
 import { AccountTable } from "../components/AccountTable";
 import { IconStar } from "../components/icons";
+import { MonitoredPanel } from "../components/Monitored";
+import { PoolStrip } from "../components/Pool";
 import { Empty, Pill, ProviderMark, providerName, Skeleton } from "../components/ui";
 import { absolute, policyLabel, reason, relative } from "../format";
 import { toast } from "../hooks";
@@ -35,6 +37,7 @@ export function OverviewPage({ overview, reloadOverview, provider, search, now }
   const opened = ov.accounts.find((a) => a.id === open);
   return (
     <>
+      <PoolStrip now={now} />
       <Stats ov={ov} now={now} />
       <section className="split" aria-label="Next account for a new session">
         {providers.map((p) => (
@@ -69,6 +72,7 @@ export function OverviewPage({ overview, reloadOverview, provider, search, now }
           </section>
         );
       })}
+      {provider === "all" && <MonitoredPanel now={now} search={search} />}
       {opened && <AccountDrawer a={opened} now={now} onClose={() => setOpen(undefined)} onChanged={reloadOverview} />}
     </>
   );

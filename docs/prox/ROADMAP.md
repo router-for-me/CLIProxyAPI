@@ -61,6 +61,13 @@ stays MIT). Remaining from phase 3: Kimi/Grok/Antigravity monitoring (endpoints
 from the MIT Management Center), plan weights. Dashboard pages for ignition and
 notifications come with phase 6.
 
+Status (2026-11-27, end of day): phases 3-6 done. Kimi/Grok monitor, usage and
+cost ledger, pooled limits endpoint, ClickHouse usage sink, and dashboard pages
+(pool strip, Cost & Tokens, Ignition & Alerts, monitored accounts). Open: request/
+response body logging to ClickHouse (needs a request-logger hook), dashboard
+settings forms for the ignition/notify/usage blocks, live verification against
+real accounts.
+
 1. **Quota core.** `config`, `state`, `quota` (Claude + Codex first), `poller`.
    Read-only polling and passive headers. Unit tests with fixtures from both repos.
 2. **Router.** `session`, `router`, composite scheduler wiring, `shadow`/`active`

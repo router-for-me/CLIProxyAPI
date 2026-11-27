@@ -27,3 +27,5 @@ export const Logo = () => (
     <path d="M20 18v-3" stroke="var(--text-3)" strokeWidth="2.4" strokeLinecap="round" />
   </svg>
 );
+export const IconCost = () => (<svg {...base}><circle cx="12" cy="12" r="9" /><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .9-3 2.2 0 3 6 1.6 6 4.6 0 1.3-1.3 2.2-3 2.2-1.4 0-2.6-.6-3.1-1.6M12 6v2M12 16v2" /></svg>);
+export const IconBolt = () => (<svg {...base}><path d="M13 2 4 14h7l-1 8 9-12h-7z" /></svg>);
