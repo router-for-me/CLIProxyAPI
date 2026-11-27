@@ -190,6 +190,9 @@ func (e *modelCooldownError) Error() string {
 			errorBody["message"] = message
 		}
 	}
+	if limit, ok := e.codexUsageLimit(); ok {
+		limit.addBodyFields(errorBody)
+	}
 	payload := map[string]any{"error": errorBody}
 	data, err := json.Marshal(payload)
 	if err != nil {
