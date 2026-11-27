@@ -51,7 +51,8 @@ export function TimeChart({ times, series, kind, format = compact, title }: { ti
   const empty = totals.every((t) => t === 0);
   const tf = (iso: string) => {
     const d = new Date(iso);
-    return n > 30 && times.length > 0 && Date.parse(times[n - 1]) - Date.parse(times[0]) > 36 * 3600e3
+    const daily = n > 1 && Date.parse(times[1]) - Date.parse(times[0]) >= 20 * 3600e3;
+    return daily || (n > 30 && times.length > 0 && Date.parse(times[n - 1]) - Date.parse(times[0]) > 36 * 3600e3)
       ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
       : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   };

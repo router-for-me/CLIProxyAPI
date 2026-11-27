@@ -168,6 +168,8 @@ func short(kind string) string {
 		return "30d"
 	case "daily":
 		return "1d"
+	case "model_weekly":
+		return "7d"
 	}
 	return kind
 }
@@ -178,7 +180,7 @@ func (e *Evaluator) windowLocked(cfg Config, ws *WindowState, a router.AccountVi
 	defer func() { e.dirty = true }()
 	name := short(w.Kind)
 	if w.Family != "" {
-		name = w.Family + " " + name
+		name = strings.ToUpper(w.Family[:1]) + w.Family[1:] + " " + name
 	}
 	// A new cycle: the stored reset passed and the window now reports a
 	// later reset (or none, when it has not started).
@@ -297,7 +299,7 @@ func windowsBody(cfg Config, a router.AccountView, now time.Time) string {
 	for _, w := range ws {
 		name := short(w.Kind)
 		if w.Family != "" {
-			name = w.Family + " " + name
+			name = strings.ToUpper(w.Family[:1]) + w.Family[1:] + " " + name
 		}
 		line := fmt.Sprintf("%s: %s | %s", name, pct(w.Remaining), until(w.ResetsAt, now))
 		if w.ResetsAt != nil {
