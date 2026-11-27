@@ -103,9 +103,6 @@ func (e *Evaluator) Evaluate(cfg Config, accounts []router.AccountView, now time
 	labels := Labels(accounts)
 	var out []Message
 	for _, a := range accounts {
-		if a.Provider != "claude" && a.Provider != "codex" {
-			continue
-		}
 		st := e.state.Accounts[a.ID]
 		if st == nil {
 			st = &AccountState{Windows: map[string]*WindowState{}}
@@ -169,6 +166,8 @@ func short(kind string) string {
 		return "7d"
 	case "monthly":
 		return "30d"
+	case "daily":
+		return "1d"
 	}
 	return kind
 }
@@ -338,6 +337,10 @@ func providerName(p string) string {
 		return "GPT"
 	case "claude":
 		return "Claude"
+	case "kimi":
+		return "Kimi"
+	case "xai":
+		return "Grok"
 	}
 	if p == "" {
 		return "?"

@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,12 +17,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/ignite"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/mgmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/monitor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/notify"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/quota"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/router"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/store"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/telemetry"
+	proxusage "github.com/router-for-me/CLIProxyAPI/v8/internal/prox/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -42,6 +46,7 @@ const (
 	historyFile    = "history.json"
 	igniteFile     = "ignite.json"
 	notifyFile     = "notify.json"
+	usageFile      = "usage.json"
 )
 
 // Host is the subset of CPA state the engine reads.
@@ -58,30 +63,36 @@ type Engine struct {
 	Now        func() time.Time
 	NewFetcher func() quota.Fetcher
 
-	mu          sync.Mutex
-	host        Host
-	manager     *coreauth.Manager
-	enabled     bool
-	ign         *ignite.Igniter
-	ntf         *notify.Notifier
-	cfg         config.Config
-	router      *router.Router
-	tel         *telemetry.Recorder
-	store       *store.Store
-	loadRes     string
-	fetcher     quota.Fetcher
-	server      *mgmt.Server
-	cancel      context.CancelFunc
-	done        chan struct{}
-	wake        chan struct{}
-	started     time.Time
-	saveErr     string
-	savedAt     time.Time
-	configErr   string
-	panics      atomic.Uint64
-	failed      atomic.Bool
-	running     atomic.Bool
-	rosterEmpty atomic.Bool
+	mu       sync.Mutex
+	host     Host
+	manager  *coreauth.Manager
+	enabled  bool
+	ign      *ignite.Igniter
+	ntf      *notify.Notifier
+	mon      *monitor.Monitor
+	ledger   *proxusage.Ledger
+	usageCfg proxusage.Config
+	// usageSavedAt is touched only by the background loop and Flush.
+	usageSavedAt time.Time
+	monFetcher   *quota.HTTPFetcher
+	cfg          config.Config
+	router       *router.Router
+	tel          *telemetry.Recorder
+	store        *store.Store
+	loadRes      string
+	fetcher      quota.Fetcher
+	server       *mgmt.Server
+	cancel       context.CancelFunc
+	done         chan struct{}
+	wake         chan struct{}
+	started      time.Time
+	saveErr      string
+	savedAt      time.Time
+	configErr    string
+	panics       atomic.Uint64
+	failed       atomic.Bool
+	running      atomic.Bool
+	rosterEmpty  atomic.Bool
 }
 
 // New returns an idle engine.
@@ -138,11 +149,19 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 	cfg, err := config.Decode(raw)
 	var icfg ignite.Config
 	var ncfg notify.Config
+	var mcfg monitor.Config
+	var ucfg proxusage.Config
 	if err == nil {
 		icfg, err = ignite.Decode(raw)
 	}
 	if err == nil {
 		ncfg, err = notify.Decode(raw)
+	}
+	if err == nil {
+		mcfg, err = monitor.Decode(raw)
+	}
+	if err == nil {
+		ucfg, err = proxusage.Decode(raw)
 	}
 	if err != nil {
 		e.mu.Lock()
@@ -151,14 +170,23 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 		return err
 	}
 	e.Configure(cfg)
-	e.configureExtras(icfg, ncfg)
+	e.configureExtras(icfg, ncfg, mcfg)
+	e.configureUsage(ucfg)
 	return nil
 }
 
 // configureExtras applies ignition and notification settings.
-func (e *Engine) configureExtras(icfg ignite.Config, ncfg notify.Config) {
+func (e *Engine) configureExtras(icfg ignite.Config, ncfg notify.Config, mcfg monitor.Config) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.mon == nil {
+		e.monFetcher = quota.NewHTTPFetcher()
+		e.mon = monitor.New(hostProxy{e: e}, e.monFetcher, mcfg)
+		e.mon.Now = e.Now
+		e.mon.ClientVersion = helps.GetXAIClientVersion
+	} else {
+		e.mon.Configure(mcfg)
+	}
 	if e.ntf == nil {
 		e.ntf = notify.NewNotifier(ncfg)
 		if e.store != nil {
@@ -188,6 +216,40 @@ func (e *Engine) configureExtras(icfg ignite.Config, ncfg notify.Config) {
 	} else {
 		e.ign.Configure(icfg)
 	}
+}
+
+func (e *Engine) configureUsage(cfg proxusage.Config) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	pricer := proxusage.NewPricer(cfg.Pricing)
+	if e.ledger == nil {
+		e.ledger = proxusage.NewLedger(pricer, cfg.Retention)
+		if e.store != nil {
+			var us proxusage.State
+			if res, _ := e.store.Load(usageFile, &us); res == store.Loaded {
+				e.ledger.Import(us)
+			}
+		}
+	} else {
+		e.ledger.Configure(pricer, cfg.Retention)
+	}
+	e.usageCfg = cfg
+}
+
+// Ledger returns the usage ledger, or nil before configuration.
+func (e *Engine) Ledger() *proxusage.Ledger {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ledger
+}
+
+func firstNonEmpty(v ...string) string {
+	for _, s := range v {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func (e *Engine) authManager() *coreauth.Manager {
@@ -287,6 +349,25 @@ func (e *Engine) Stop() {
 	e.Flush()
 }
 
+func (e *Engine) pollMonitor(ctx context.Context, mon *monitor.Monitor, tel *telemetry.Recorder) {
+	defer func() {
+		if r := recover(); r != nil {
+			e.panics.Add(1)
+			log.Errorf("prox: monitor panic: %v", r)
+		}
+	}()
+	for _, o := range mon.PollDue(ctx) {
+		tel.Quota(o.Window.ObservedAt, o.AuthID, o.Key, o.Window.UsedPercent, o.Window.ResetsAt)
+	}
+}
+
+// Monitor returns the monitor for monitored-only providers, or nil.
+func (e *Engine) Monitor() *monitor.Monitor {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.mon
+}
+
 // IgniteNow fires one account outside the schedule.
 func (e *Engine) IgniteNow(authID string) bool {
 	e.mu.Lock()
@@ -299,8 +380,11 @@ func (e *Engine) IgniteNow(authID string) bool {
 func (e *Engine) Shutdown() {
 	e.Stop()
 	e.mu.Lock()
-	ign, ntf := e.ign, e.ntf
+	ign, ntf, mf := e.ign, e.ntf, e.monFetcher
 	e.mu.Unlock()
+	if mf != nil {
+		mf.Close()
+	}
 	if ign != nil {
 		ign.Close()
 	}
@@ -308,7 +392,7 @@ func (e *Engine) Shutdown() {
 		ntf.Close()
 	}
 	e.mu.Lock()
-	e.ign, e.ntf = nil, nil
+	e.ign, e.ntf, e.mon, e.monFetcher = nil, nil, nil, nil
 	if e.store != nil {
 		e.store.Close()
 		e.store = nil
@@ -333,8 +417,13 @@ func (e *Engine) Flush() {
 
 func (e *Engine) saveExtras(st *store.Store, force bool) {
 	e.mu.Lock()
-	ign, ntf := e.ign, e.ntf
+	ign, ntf, ledger := e.ign, e.ntf, e.ledger
 	e.mu.Unlock()
+	// The ledger can be large; write it at most once a minute.
+	if ledger != nil && (force || time.Since(e.usageSavedAt) >= time.Minute) && (ledger.TakeDirty() || force) {
+		e.usageSavedAt = time.Now()
+		e.recordSave(st.Save(usageFile, ledger.Export()))
+	}
 	if ign != nil && (ign.TakeDirty() || force) {
 		e.recordSave(st.Save(igniteFile, ign.Export()))
 	}
@@ -375,21 +464,31 @@ func (e *Engine) loop(ctx context.Context, wake chan struct{}, fetcher quota.Fet
 		if e.rosterEmpty.Load() && now.Sub(started) < time.Minute {
 			every = 2 * time.Second
 		}
+		e.mu.Lock()
+		r, tel, st, ign, ntf, mon := e.router, e.tel, e.store, e.ign, e.ntf, e.mon
+		e.mu.Unlock()
 		if now.Sub(lastRoster) >= every {
 			lastRoster = now
 			if e.SyncRoster() > 0 {
 				e.wakePoller()
 			}
+			if mon != nil {
+				mon.Sync()
+			}
 		}
-		e.mu.Lock()
-		r, tel, st, ign, ntf := e.router, e.tel, e.store, e.ign, e.ntf
-		e.mu.Unlock()
+		if mon != nil {
+			go e.pollMonitor(ctx, mon, tel)
+		}
 		if ign != nil {
 			ign.Tick()
 		}
 		if ntf != nil && now.Sub(lastNotify) >= notifyEvery {
 			lastNotify = now
-			ntf.Evaluate(r.Accounts(), e.now())
+			accounts := r.Accounts()
+			if mon != nil {
+				accounts = append(accounts, mon.Views()...)
+			}
+			ntf.Evaluate(accounts, e.now())
 		}
 		if st != nil {
 			e.saveExtras(st, false)
@@ -409,6 +508,9 @@ func (e *Engine) loop(ctx context.Context, wake chan struct{}, fetcher quota.Fet
 			lastHousekeep = now
 			tel.Prune(e.now())
 			r.Sweep()
+			if l := e.Ledger(); l != nil {
+				l.Prune(e.now())
+			}
 		}
 	}
 }
@@ -656,12 +758,25 @@ func (e *Engine) HandleUsage(_ context.Context, rec coreusage.Record) {
 		return
 	}
 	provider := strings.ToLower(strings.TrimSpace(rec.Provider))
-	if provider != "claude" && provider != "codex" {
-		return
+	if fam := monitor.Family(provider); fam != "" {
+		provider = fam
 	}
 	at := rec.RequestedAt.Add(rec.Latency)
 	if rec.RequestedAt.IsZero() {
 		at = e.now()
+	}
+	e.mu.Lock()
+	ledger := e.ledger
+	e.mu.Unlock()
+	if ledger != nil && proxusage.GenerateEnabled(rec) {
+		client := "other"
+		if ref, ok := session.FromUsage(rec.SessionID, rec.ParentSessionID, rec.APIKey); ok && ref.Client != "" {
+			client = ref.Client
+		}
+		ledger.Add(at, provider, rec.AuthID, firstNonEmpty(rec.ResponseModel, rec.Model), client, rec.Failed, proxusage.TokensFromDetail(provider, rec.Detail))
+	}
+	if provider != "claude" && provider != "codex" {
+		return
 	}
 	status := rec.Fail.StatusCode
 	// Locally synthesized failures are not upstream refusals and must not
@@ -678,4 +793,27 @@ func (e *Engine) HandleUsage(_ context.Context, rec coreusage.Record) {
 	e.wakePoller()
 	d := rec.Detail
 	e.tel.Usage(at, provider, rec.AuthID, rec.Failed, rec.Fail.StatusCode, d.InputTokens, d.OutputTokens, d.ReasoningTokens, d.CacheReadTokens, d.CacheCreationTokens)
+}
+
+// hostProxy reads the engine's current host at call time.
+type hostProxy struct{ e *Engine }
+
+func (h hostProxy) Roster() ([]router.RosterEntry, error) {
+	h.e.mu.Lock()
+	host := h.e.host
+	h.e.mu.Unlock()
+	if host == nil {
+		return nil, os.ErrNotExist
+	}
+	return host.Roster()
+}
+
+func (h hostProxy) Credential(authIndex string) ([]byte, error) {
+	h.e.mu.Lock()
+	host := h.e.host
+	h.e.mu.Unlock()
+	if host == nil {
+		return nil, os.ErrNotExist
+	}
+	return host.Credential(authIndex)
 }

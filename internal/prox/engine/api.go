@@ -54,6 +54,9 @@ func (e *Engine) handleExtra(c *gin.Context) bool {
 	e.mu.Lock()
 	ign, ntf := e.ign, e.ntf
 	e.mu.Unlock()
+	if e.handleUsage(c, path) {
+		return true
+	}
 	switch {
 	case path == "/ignition" && c.Request.Method == http.MethodGet:
 		if ign == nil {
@@ -76,6 +79,27 @@ func (e *Engine) handleExtra(c *gin.Context) bool {
 			return true
 		}
 		c.JSON(http.StatusAccepted, gin.H{"accepted": true})
+		return true
+	case path == "/monitor" && c.Request.Method == http.MethodGet:
+		accounts := []any{}
+		if mon := e.Monitor(); mon != nil {
+			for _, v := range mon.Views() {
+				accounts = append(accounts, v)
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"now": e.now(), "accounts": accounts})
+		return true
+	case path == "/monitor/refresh" && c.Request.Method == http.MethodPost:
+		var body struct {
+			AuthID string `json:"auth_id"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
+		_ = json.Unmarshal(raw, &body)
+		n := 0
+		if mon := e.Monitor(); mon != nil {
+			n = mon.Refresh(strings.TrimSpace(body.AuthID))
+		}
+		c.JSON(http.StatusAccepted, gin.H{"scheduled": n})
 		return true
 	case path == "/notify/log" && c.Request.Method == http.MethodGet:
 		if ntf == nil {
