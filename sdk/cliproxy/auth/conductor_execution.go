@@ -1249,9 +1249,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
 		}
-		for authID := range m.coolingDisabledRetryExclusions(retryRound, routeModel) {
-			tried[authID] = struct{}{}
-		}
 	}
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
@@ -1278,7 +1275,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, m.withCoolingDisabledRetryExclusions(tried, homeMode, retryRound, routeModel))
 		if errPick == nil {
 			updateInFlightScopeProvider(ctx, provider)
 		}
@@ -1555,9 +1552,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
 		}
-		for authID := range m.coolingDisabledRetryExclusions(retryRound, routeModel) {
-			tried[authID] = struct{}{}
-		}
 	}
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
@@ -1584,7 +1578,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, m.withCoolingDisabledRetryExclusions(tried, homeMode, retryRound, routeModel))
 		if errPick == nil {
 			updateInFlightScopeProvider(ctx, provider)
 		}
@@ -1873,9 +1867,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
 		}
-		for authID := range m.coolingDisabledRetryExclusions(retryRound, routeModel) {
-			tried[authID] = struct{}{}
-		}
 	}
 	homeSameAuthRetries := make(map[string]int)
 	lastHomeAuthID := ""
@@ -1925,7 +1916,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				provider = selection.Provider
 			}
 		} else {
-			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, m.withCoolingDisabledRetryExclusions(tried, homeMode, retryRound, routeModel))
 			if errPick == nil {
 				updateInFlightScopeProvider(ctx, provider)
 			}

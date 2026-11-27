@@ -1623,6 +1623,29 @@ func (m *Manager) requestRetryRoundExclusions(retryRound int, defaultRequestRetr
 // coolingDisabledRetryExclusions returns the cooling-disabled auths a retry round
 // for routeModel must skip: a 429 they returned announced a reset that has not
 // passed. The first round excludes none, so a fresh request may still use them.
+// withCoolingDisabledRetryExclusions returns tried plus the credentials whose
+// cooling-disabled reset is live right now (coolingDisabledRetryExclusions). It
+// is evaluated before every pick, and kept apart from tried, so a reset that
+// passes during the round makes its credential pickable again. tried is not
+// modified. Home dispatch (homeMode) does its own scheduling and gets tried as is.
+func (m *Manager) withCoolingDisabledRetryExclusions(tried map[string]struct{}, homeMode bool, retryRound int, routeModel string) map[string]struct{} {
+	if homeMode {
+		return tried
+	}
+	excluded := m.coolingDisabledRetryExclusions(retryRound, routeModel)
+	if len(excluded) == 0 {
+		return tried
+	}
+	merged := make(map[string]struct{}, len(tried)+len(excluded))
+	for authID := range tried {
+		merged[authID] = struct{}{}
+	}
+	for authID := range excluded {
+		merged[authID] = struct{}{}
+	}
+	return merged
+}
+
 func (m *Manager) coolingDisabledRetryExclusions(retryRound int, routeModel string) map[string]struct{} {
 	excluded := make(map[string]struct{})
 	if m == nil || retryRound <= 0 {
@@ -1703,13 +1726,15 @@ func (m *Manager) pooledStateModels(auth *Auth, routeModel string) []string {
 }
 
 // coolingDisabledRetryAt returns the latest upstream reset a 429 recorded for
-// auth and model while cooling was disabled, or zero.
+// auth and model while cooling was disabled, including a credential-scoped one,
+// or zero.
 func coolingDisabledRetryAt(auth *Auth, model string) time.Time {
 	modelKey := canonicalModelKey(model)
 	if auth == nil || modelKey == "" {
 		return time.Time{}
 	}
-	var latest time.Time
+	// A credential-scoped reset covers every model.
+	latest := auth.credentialCoolingDisabledReset.coolingDisabledRetryAt
 	for stateModel, state := range auth.ModelStates {
 		// Model keys match case-insensitively, like cooldown lookups.
 		if state != nil && sameCanonicalModelKey(stateModel, modelKey) && state.coolingDisabledRetryAt.After(latest) {

@@ -166,6 +166,14 @@ type Auth struct {
 	nonQuotaCooldownUntil       time.Time `json:"-"`
 	forceCooldownSeeded         bool      `json:"-"`
 
+	// credentialCoolingDisabledReset holds the reset of a credential-scoped 429
+	// (Result.CredentialScope) recorded while cooling is disabled. It applies to
+	// every model the credential serves, so retry scheduling does not send the
+	// credential through another model, or another member of a pooled alias,
+	// before the upstream's reset. Only its cooling-disabled reset fields are
+	// used, with the same ordering rules as a model's. Runtime only.
+	credentialCoolingDisabledReset ModelState `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
 	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized

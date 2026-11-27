@@ -1222,6 +1222,9 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
 		cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 	}
+	if auth.credentialCoolingDisabledReset.coolingDisabledRetryAt.After(now) {
+		m.writeCoolingDisabledReset(&auth.credentialCoolingDisabledReset, time.Time{})
+	}
 	m.sequenceCoolingDisabledClearsLocked(auth)
 	errPersist := m.persistLocked(ctx, auth)
 	m.mu.Unlock()
@@ -1909,15 +1912,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// updates the reset: retry scheduling waits on it for any
 					// cooling-disabled credential, so an obsolete one must not outlive it.
 					if authCoolingDisabled && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
-						newer := result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq
+						// A credential-scoped 429 limits the whole credential: its
+						// reset covers every model (credentialCoolingDisabledReset).
+						holder := state
+						if result.CredentialScope {
+							holder = &auth.credentialCoolingDisabledReset
+						}
+						newer := result.ExecutionSeq == 0 || result.ExecutionSeq > holder.coolingDisabledRetrySeq
 						stale := result.ExecutionSeq > 0 && !newer
 						if *result.RetryAfter > 0 {
 							until := now.Add(*result.RetryAfter)
-							if newer || (until.After(state.coolingDisabledRetryAt) && (!stale || state.coolingDisabledRetryAt.After(now))) {
-								m.writeCoolingDisabledReset(state, until)
+							if newer || (until.After(holder.coolingDisabledRetryAt) && (!stale || holder.coolingDisabledRetryAt.After(now))) {
+								m.writeCoolingDisabledReset(holder, until)
 							}
 						} else if newer {
-							m.writeCoolingDisabledReset(state, time.Time{})
+							m.writeCoolingDisabledReset(holder, time.Time{})
 						}
 					}
 					if isModelSupportResultError(result.Error) {
@@ -2447,6 +2456,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					(result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq))) {
 				m.writeCoolingDisabledReset(state, time.Time{})
 			}
+		}
+
+		// A success on any model, dispatched after a credential-scoped reset was
+		// recorded, shows the credential is usable again: clear it, under the
+		// current watermark so an earlier 429 cannot bring it back.
+		if result.Success && !auth.credentialCoolingDisabledReset.coolingDisabledRetryAt.IsZero() &&
+			(result.ExecutionSeq == 0 || result.ExecutionSeq > auth.credentialCoolingDisabledReset.coolingDisabledRetrySeq) {
+			m.writeCoolingDisabledReset(&auth.credentialCoolingDisabledReset, time.Time{})
 		}
 
 		if rejectsToken {
