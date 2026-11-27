@@ -2,9 +2,9 @@ package openai
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +12,9 @@ import (
 	"github.com/gorilla/websocket"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+// terminalCloseHangGuard only fails a test that would otherwise hang; no ordering depends on it.
+const terminalCloseHangGuard = 5 * time.Second
 
 // terminalCloseRead runs serve on one server socket and returns the client's first read.
 func terminalCloseRead(t *testing.T, serve func(*responsesWebsocketWriter, *websocket.Conn)) ([]byte, error) {
@@ -32,10 +35,34 @@ func terminalCloseRead(t *testing.T, serve func(*responsesWebsocketWriter, *webs
 		t.Fatalf("dial: %v", errDial)
 	}
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(terminalCloseHangGuard))
 	_, frame, errRead := conn.ReadMessage()
 	<-served
 	return frame, errRead
+}
+
+// closeWaits reports each time a close on w starts waiting on another write.
+func closeWaits(w *responsesWebsocketWriter) <-chan struct{} {
+	waits := make(chan struct{}, 4)
+	w.onCloseWait = func() { waits <- struct{}{} }
+	return waits
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(terminalCloseHangGuard):
+		t.Errorf("timed out waiting for %s", what)
+	}
+}
+
+// releaseWhenCloseWaits releases a held writeMu once a close is waiting behind it.
+func releaseWhenCloseWaits(t *testing.T, w *responsesWebsocketWriter, waits <-chan struct{}) {
+	go func() {
+		awaitSignal(t, waits, "the terminal close to wait for the active write")
+		w.writeMu.Unlock()
+	}()
 }
 
 // A terminal error that lands while another write is finishing still reaches the client,
@@ -43,8 +70,9 @@ func terminalCloseRead(t *testing.T, serve func(*responsesWebsocketWriter, *webs
 func TestResponsesWebsocketTerminalErrorFrameWaitsForAFinishingWriter(t *testing.T) {
 	payload := []byte(`{"type":"error","status":429}`)
 	frame, errRead := terminalCloseRead(t, func(w *responsesWebsocketWriter, _ *websocket.Conn) {
+		waits := closeWaits(w)
 		w.writeMu.Lock()
-		time.AfterFunc(20*time.Millisecond, w.writeMu.Unlock)
+		releaseWhenCloseWaits(t, w, waits)
 		_, _ = w.closeWithPayload(payload)
 	})
 	if errRead != nil || string(frame) != string(payload) {
@@ -55,8 +83,9 @@ func TestResponsesWebsocketTerminalErrorFrameWaitsForAFinishingWriter(t *testing
 // The replay-required close (1012) is not degraded to a bare disconnect behind a finishing write.
 func TestResponsesWebsocketReplayCloseWaitsForAFinishingWriter(t *testing.T) {
 	_, errRead := terminalCloseRead(t, func(w *responsesWebsocketWriter, _ *websocket.Conn) {
+		waits := closeWaits(w)
 		w.writeMu.Lock()
-		time.AfterFunc(20*time.Millisecond, w.writeMu.Unlock)
+		releaseWhenCloseWaits(t, w, waits)
 		_, _ = w.closeForUpstreamError(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 	})
 	var closeErr *websocket.CloseError
@@ -70,14 +99,24 @@ func TestResponsesWebsocketReplayCloseWaitsForAFinishingWriter(t *testing.T) {
 func TestResponsesWebsocketSessionTeardownWaitsForAnInFlightTerminalFrame(t *testing.T) {
 	payload := []byte(`{"type":"error","status":429}`)
 	frame, errRead := terminalCloseRead(t, func(w *responsesWebsocketWriter, conn *websocket.Conn) {
+		waits := closeWaits(w)
 		w.writeMu.Lock()
-		go func() { _, _ = w.closeWithPayload(payload) }()
-		for !w.closing.Load() {
-			runtime.Gosched()
-		}
-		time.AfterFunc(20*time.Millisecond, w.writeMu.Unlock)
-		_, _ = w.closeWithoutError()
-		_ = conn.Close()
+		terminalDone := make(chan struct{})
+		go func() {
+			defer close(terminalDone)
+			_, _ = w.closeWithPayload(payload)
+		}()
+		awaitSignal(t, waits, "the terminal close to wait for the active write")
+		teardownDone := make(chan struct{})
+		go func() {
+			defer close(teardownDone)
+			_, _ = w.closeWithoutError()
+			_ = conn.Close()
+		}()
+		awaitSignal(t, waits, "the teardown to wait for the terminal close")
+		w.writeMu.Unlock()
+		awaitSignal(t, teardownDone, "the teardown")
+		awaitSignal(t, terminalDone, "the terminal close")
 	})
 	if errRead != nil || string(frame) != string(payload) {
 		t.Fatalf("client read %q, err=%v; want the terminal error frame", frame, errRead)
@@ -97,7 +136,88 @@ func TestResponsesWebsocketTerminalCloseStillCutsOffABlockedWriter(t *testing.T)
 	if errRead == nil {
 		t.Fatal("client read a frame behind a blocked writer; want the connection closed")
 	}
-	if took < responsesWebsocketCloseLockWait || took > responsesWebsocketCloseLockWait+time.Second {
-		t.Fatalf("close behind a blocked writer took %s; want about %s", took, responsesWebsocketCloseLockWait)
+	if took < responsesWebsocketCloseWait || took > responsesWebsocketCloseWait+time.Second {
+		t.Fatalf("close behind a blocked writer took %s; want about %s", took, responsesWebsocketCloseWait)
+	}
+}
+
+// blockingTerminalCloseConn returns a server socket whose writes can be made to block,
+// like a client that stopped reading.
+func blockingTerminalCloseConn(t *testing.T) (*websocket.Conn, *blockingWebsocketWriteConn) {
+	t.Helper()
+	clientRaw, serverRaw := net.Pipe()
+	t.Cleanup(func() { _ = clientRaw.Close() })
+	blocking := newBlockingWebsocketWriteConn(serverRaw)
+	t.Cleanup(func() { _ = blocking.Close() })
+
+	type upgraded struct {
+		conn *websocket.Conn
+		err  error
+	}
+	result := make(chan upgraded, 1)
+	go func() {
+		req, errReq := http.NewRequest(http.MethodGet, "http://example.com/v1/responses", nil)
+		if errReq != nil {
+			result <- upgraded{err: errReq}
+			return
+		}
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(newHijackableWebsocketResponseWriter(blocking), req, nil)
+		result <- upgraded{conn: conn, err: errUpgrade}
+	}()
+	// Drain the HTTP 101 Switching Protocols response on the client side of the pipe.
+	buf := make([]byte, 512)
+	if _, errRead := clientRaw.Read(buf); errRead != nil {
+		t.Fatalf("read upgrade response: %v", errRead)
+	}
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("upgrade websocket: %v", got.err)
+	}
+	return got.conn, blocking
+}
+
+// A terminal frame stuck on a client that stopped reading cannot hold the session open: the
+// handler's teardown (closeWithoutError, the socket, then waiting for the disconnect watcher)
+// still closes the socket and unblocks the write, without any network deadline.
+func TestResponsesWebsocketTeardownAbortsAStuckTerminalWrite(t *testing.T) {
+	cases := map[string]func(*responsesWebsocketWriter){
+		"closeWithPayload": func(w *responsesWebsocketWriter) {
+			_, _ = w.closeWithPayload([]byte(`{"type":"error","status":429}`))
+		},
+		"closeForUpstreamError": func(w *responsesWebsocketWriter) {
+			_, _ = w.closeForUpstreamError(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
+		},
+	}
+	for name, terminalClose := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn, blocking := blockingTerminalCloseConn(t)
+			w := newResponsesWebsocketWriter(conn)
+			blocking.blockWrites.Store(true)
+
+			terminalDone := make(chan struct{})
+			go func() {
+				defer close(terminalDone)
+				terminalClose(w)
+			}()
+			awaitSignal(t, blocking.writeBlock, "the terminal frame to block in the network write")
+
+			teardownDone := make(chan struct{})
+			go func() {
+				defer close(teardownDone)
+				_, _ = w.closeWithoutError()
+				_ = conn.Close()
+				<-terminalDone
+			}()
+			select {
+			case <-teardownDone:
+			case <-time.After(terminalCloseHangGuard):
+				_ = blocking.Close()
+				t.Fatal("teardown hung behind a stuck terminal write")
+			}
+		})
 	}
 }
