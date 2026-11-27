@@ -946,7 +946,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
 	billingBlock := buildTextBlock(billingText, nil)
-	if keepClassifierShape && !strictMode && helps.IsClaudeAutoModeClassifierRequest(system, doc.Get("messages")) {
+	if keepClassifierShape && !strictMode && helps.IsClaudeAutoModeClassifierRequest(doc) {
 		keepClaudeClassifierSystemPromptDoc(doc, system, billingBlock)
 		return true
 	}
@@ -1214,20 +1214,30 @@ func validateClaudeCallerSystemBlocks(system ojson.Result) error {
 // system prompt would put the large stable prompt after the volatile
 // transcript and defeat prompt caching on every call.
 func keepClaudeClassifierSystemPromptDoc(doc *ojson.Doc, system ojson.Result, billingBlock string) {
-	blocks := []string{billingBlock}
-	if system.Type == ojson.String {
-		if text := system.String(); strings.TrimSpace(text) != "" && !util.IsClaudeCodeAttributionSystemText(text) {
-			blocks = append(blocks, buildTextBlock(text, nil))
-		}
-	}
-	system.ForEach(func(_, part ojson.Result) bool {
-		text := part.Get("text").String()
-		if part.Get("type").String() == "text" && strings.TrimSpace(text) != "" && !util.IsClaudeCodeAttributionSystemText(text) {
-			blocks = append(blocks, part.Raw)
-		}
-		return true
-	})
+	blocks := append([]string{billingBlock}, claudeClassifierSystemBlocks(system)...)
 	_ = doc.SetRawBytes("system", []byte("["+strings.Join(blocks, ",")+"]"))
+}
+
+// claudeClassifierSystemBlocks rebuilds the classifier's system blocks with the
+// caller's cache_control only when it is a valid ephemeral marker with no ttl,
+// "5m", or "1h". Any other ttl would reach Anthropic as is, and TTL
+// normalization would also strip the 1h ttl from every later breakpoint.
+func claudeClassifierSystemBlocks(system ojson.Result) []string {
+	var blocks []string
+	for _, block := range collectForwardedClaudeSystemPromptBlocksWithCache(system) {
+		if ttl := ojson.Parse(block.RawCC).Get("ttl"); ttl.Exists() && (ttl.Type != ojson.String || (ttl.String() != "5m" && ttl.String() != "1h")) {
+			block.RawCC = ""
+		}
+		blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, true))
+	}
+	return blocks
+}
+
+// claudeKeepsClassifierShapeDoc reports whether a cloaked request is the
+// auto-mode classifier and keeps its own system blocks at the top level. The
+// shape is kept only when the prompt reaches Anthropic unchanged.
+func claudeKeepsClassifierShapeDoc(doc *ojson.Doc, strictMode bool, matcher *helps.SensitiveWordMatcher) bool {
+	return !strictMode && helps.IsClaudeAutoModeClassifierRequest(doc) && !claudeSystemTextRewrittenBy(doc.Get("system"), matcher)
 }
 
 // claudeSystemTextRewrittenBy reports whether the sensitive-word rules would
@@ -2810,7 +2820,7 @@ func applyCloakingInternalDoc(
 		prevReq,
 		promptID,
 		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
-		!claudeSystemTextRewrittenBy(doc.Get("system"), settings.buildSensitiveWordMatcher()),
+		claudeKeepsClassifierShapeDoc(doc, settings.strictMode, settings.buildSensitiveWordMatcher()),
 		turnOriginArgs...,
 	)
 
