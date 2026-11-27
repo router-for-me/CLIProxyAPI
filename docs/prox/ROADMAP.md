@@ -54,6 +54,13 @@ config, quota, router, session, store, telemetry, and mgmt packages are ported
 under `internal/prox/` with their tests; `internal/prox/engine` replaces the
 plugin ABI adapter; the existing dashboard is served at `/prox/ui/`.
 
+Status (2026-11-27, later): ignition (`internal/prox/ignite`) and notifications
+(`internal/prox/notify`, Bark + webhook) done for Claude/Codex as a clean-room
+implementation of lamplighter's documented behavior (lamplighter is AGPL; prox
+stays MIT). Remaining from phase 3: Kimi/Grok/Antigravity monitoring (endpoints
+from the MIT Management Center), plan weights. Dashboard pages for ignition and
+notifications come with phase 6.
+
 1. **Quota core.** `config`, `state`, `quota` (Claude + Codex first), `poller`.
    Read-only polling and passive headers. Unit tests with fixtures from both repos.
 2. **Router.** `session`, `router`, composite scheduler wiring, `shadow`/`active`

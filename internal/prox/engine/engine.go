@@ -14,12 +14,15 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/ignite"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/mgmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/notify"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/quota"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/router"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/store"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/prox/telemetry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -34,8 +37,11 @@ const (
 	historyEvery   = time.Minute
 	housekeepEvery = 5 * time.Minute
 	pollWorkers    = 3
+	notifyEvery    = 5 * time.Second
 	stateFile      = "state.json"
 	historyFile    = "history.json"
+	igniteFile     = "ignite.json"
+	notifyFile     = "notify.json"
 )
 
 // Host is the subset of CPA state the engine reads.
@@ -54,7 +60,10 @@ type Engine struct {
 
 	mu          sync.Mutex
 	host        Host
+	manager     *coreauth.Manager
 	enabled     bool
+	ign         *ignite.Igniter
+	ntf         *notify.Notifier
 	cfg         config.Config
 	router      *router.Router
 	tel         *telemetry.Recorder
@@ -127,6 +136,14 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 		return nil
 	}
 	cfg, err := config.Decode(raw)
+	var icfg ignite.Config
+	var ncfg notify.Config
+	if err == nil {
+		icfg, err = ignite.Decode(raw)
+	}
+	if err == nil {
+		ncfg, err = notify.Decode(raw)
+	}
 	if err != nil {
 		e.mu.Lock()
 		e.configErr = err.Error()
@@ -134,7 +151,56 @@ func (e *Engine) Apply(enabled bool, raw []byte) error {
 		return err
 	}
 	e.Configure(cfg)
+	e.configureExtras(icfg, ncfg)
 	return nil
+}
+
+// configureExtras applies ignition and notification settings.
+func (e *Engine) configureExtras(icfg ignite.Config, ncfg notify.Config) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ntf == nil {
+		e.ntf = notify.NewNotifier(ncfg)
+		if e.store != nil {
+			var ns notify.State
+			if res, _ := e.store.Load(notifyFile, &ns); res == store.Loaded {
+				e.ntf.Evaluator.Import(ns)
+			}
+		}
+	} else {
+		e.ntf.Configure(ncfg)
+	}
+	if e.ign == nil {
+		e.ign = ignite.New(igniteHost{e: e}, icfg)
+		e.ign.Now = e.Now
+		if e.store != nil {
+			var is ignite.State
+			if res, _ := e.store.Load(igniteFile, &is); res == store.Loaded {
+				e.ign.Import(is)
+			}
+		}
+		ntf := e.ntf
+		e.ign.Notify = func(ev ignite.Event) {
+			if ntf.ForwardIgnition() {
+				ntf.Enqueue(ignitionMessage(ev, e.accountLabel(ev.AuthID)))
+			}
+		}
+	} else {
+		e.ign.Configure(icfg)
+	}
+}
+
+func (e *Engine) authManager() *coreauth.Manager {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.manager
+}
+
+// SetManager installs CPA's auth manager for ignition requests.
+func (e *Engine) SetManager(m *coreauth.Manager) {
+	e.mu.Lock()
+	e.manager = m
+	e.mu.Unlock()
 }
 
 // Configure applies settings. The first call creates state (loading it from
@@ -221,10 +287,28 @@ func (e *Engine) Stop() {
 	e.Flush()
 }
 
+// IgniteNow fires one account outside the schedule.
+func (e *Engine) IgniteNow(authID string) bool {
+	e.mu.Lock()
+	ign := e.ign
+	e.mu.Unlock()
+	return ign != nil && ign.Ignite(authID)
+}
+
 // Shutdown stops, flushes, and releases the state lock.
 func (e *Engine) Shutdown() {
 	e.Stop()
 	e.mu.Lock()
+	ign, ntf := e.ign, e.ntf
+	e.mu.Unlock()
+	if ign != nil {
+		ign.Close()
+	}
+	if ntf != nil {
+		ntf.Close()
+	}
+	e.mu.Lock()
+	e.ign, e.ntf = nil, nil
 	if e.store != nil {
 		e.store.Close()
 		e.store = nil
@@ -244,6 +328,19 @@ func (e *Engine) Flush() {
 	e.recordSave(st.Save(stateFile, r.Export()))
 	tel.TakeDirty()
 	e.recordSave(st.Save(historyFile, tel.Export()))
+	e.saveExtras(st, true)
+}
+
+func (e *Engine) saveExtras(st *store.Store, force bool) {
+	e.mu.Lock()
+	ign, ntf := e.ign, e.ntf
+	e.mu.Unlock()
+	if ign != nil && (ign.TakeDirty() || force) {
+		e.recordSave(st.Save(igniteFile, ign.Export()))
+	}
+	if ntf != nil && (ntf.Evaluator.TakeDirty() || force) {
+		e.recordSave(st.Save(notifyFile, ntf.Evaluator.Export()))
+	}
 }
 
 func (e *Engine) recordSave(err error) {
@@ -262,7 +359,7 @@ func (e *Engine) loop(ctx context.Context, wake chan struct{}, fetcher quota.Fet
 	go e.pollLoop(ctx, wake, fetcher)
 	tick := time.NewTicker(saveEvery)
 	defer tick.Stop()
-	var lastHistory, lastHousekeep, lastSample time.Time
+	var lastHistory, lastHousekeep, lastSample, lastNotify time.Time
 	lastRoster := time.Now()
 	started := lastRoster
 	for {
@@ -285,8 +382,18 @@ func (e *Engine) loop(ctx context.Context, wake chan struct{}, fetcher quota.Fet
 			}
 		}
 		e.mu.Lock()
-		r, tel, st := e.router, e.tel, e.store
+		r, tel, st, ign, ntf := e.router, e.tel, e.store, e.ign, e.ntf
 		e.mu.Unlock()
+		if ign != nil {
+			ign.Tick()
+		}
+		if ntf != nil && now.Sub(lastNotify) >= notifyEvery {
+			lastNotify = now
+			ntf.Evaluate(r.Accounts(), e.now())
+		}
+		if st != nil {
+			e.saveExtras(st, false)
+		}
 		if now.Sub(lastSample) >= time.Minute {
 			lastSample = now
 			e.sampleQuota()

@@ -43,6 +43,7 @@ func ApplyConfig(cfg *config.Config, manager *coreauth.Manager) {
 	e := Default()
 	if manager != nil {
 		e.SetHost(ManagerHost{Manager: manager})
+		e.SetManager(manager)
 	}
 	enabled, raw := settingsFromConfig(cfg)
 	if err := e.Apply(enabled, raw); err != nil {
@@ -259,7 +260,12 @@ func metaString(a *coreauth.Auth, key string) string {
 // GinHandler serves the prox dashboard and JSON API. Requests under
 // mgmt.APIBase must already be authenticated by the caller's middleware.
 func GinHandler(c *gin.Context) {
-	srv := Default().Server()
+	e := Default()
+	if strings.HasPrefix(c.Request.URL.Path, APIBase+"/") && e.handleExtra(c) {
+		c.Abort()
+		return
+	}
+	srv := e.Server()
 	if srv == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "prox is not enabled; set plugins.configs.prox.enabled: true"})
 		return
