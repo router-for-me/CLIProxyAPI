@@ -486,7 +486,7 @@ func (s *Service) normalizeStoredCredentials(ctx context.Context, cfg *config.Co
 			continue
 		}
 		seenPaths[path] = struct{}{}
-		data, errRead := os.ReadFile(path)
+		data, errRead := readStartupAuthFile(path)
 		if errRead != nil {
 			log.Debugf("skipping startup normalization of %s: %v", path, errRead)
 			continue
@@ -512,8 +512,10 @@ func (s *Service) normalizeStoredCredentials(ctx context.Context, cfg *config.Co
 				auth.Attributes[coreauth.AttributeSourceBackend] = backend
 			}
 			// prepareCoreAuthForModelRegistration returns the unchanged credential
-			// when the update fails, so check that the attributes landed.
-			if applied := s.prepareCoreAuthForModelRegistration(updateCtx, auth); hasAttributes(applied, auth.Attributes) {
+			// when the update fails, or when the manager rejects the snapshot
+			// because the file changed after the read. Check that the file still
+			// matches the snapshot and that the attributes landed.
+			if applied := s.prepareCoreAuthForModelRegistration(updateCtx, auth); auth.FileSnapshotMatchesDisk() && hasAttributes(applied, auth.Attributes) {
 				normalizedIDs[applied.ID] = struct{}{}
 			}
 		}
@@ -529,6 +531,10 @@ func (s *Service) normalizeStoredCredentials(ctx context.Context, cfg *config.Co
 	}
 	return normalized
 }
+
+// readStartupAuthFile reads an auth file for startup normalization. Tests
+// replace it to simulate a file that changes after the read.
+var readStartupAuthFile = os.ReadFile
 
 func hasAttributes(auth *coreauth.Auth, want map[string]string) bool {
 	if auth == nil {

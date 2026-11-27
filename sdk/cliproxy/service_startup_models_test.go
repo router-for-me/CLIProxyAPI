@@ -287,3 +287,30 @@ func freeStartupTestPort(t *testing.T) int {
 	}
 	return port
 }
+
+// When an auth file changes after startup normalization reads it, the manager
+// rejects the stale snapshot and keeps the store-loaded credential, which has
+// no rules in its attributes. That credential must wait for the watcher's
+// first scan, not be published with its rules missing.
+func TestRunFirstModelListingSkipsCredentialRewrittenDuringNormalization(t *testing.T) {
+	const name = "claude-rewritten@example.com.json"
+	// The watcher registers this credential after the listing, and nothing
+	// unregisters it at shutdown, so a fixed prefix would leak under -count.
+	prefix := fmt.Sprintf("startuprewritten%d", time.Now().UnixNano())
+	before := `{"type":"claude","email":"rewritten@example.com","access_token":"fake","expired":"2099-01-01T00:00:00Z","prefix":"` + prefix + `"}`
+	after := `{"type":"claude","email":"rewritten@example.com","access_token":"fake","expired":"2099-01-01T00:00:00Z","prefix":"` + prefix + `","excluded_models":["claude-opus-5"]}`
+	original := readStartupAuthFile
+	readStartupAuthFile = func(path string) ([]byte, error) {
+		if filepath.Base(path) == name {
+			return []byte(before), nil
+		}
+		return original(path)
+	}
+	t.Cleanup(func() { readStartupAuthFile = original })
+
+	body := firstModelsListingWithWatcherHeld(t, map[string]string{name: after})
+
+	if strings.Contains(body, `"id":"`+prefix+`/claude-opus-5"`) {
+		t.Fatalf("first /v1/models listing exposes %s/claude-opus-5, which the rewritten file excludes:\n%s", prefix, body)
+	}
+}
