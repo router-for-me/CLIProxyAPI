@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -174,6 +175,33 @@ func (m *Manager) UnregisterExecutor(provider string) {
 
 // Register inserts a new auth entry into the manager.
 func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.register(ctx, auth, false)
+}
+
+// RegisterIfAbsent registers auth only if no auth with its ID is registered,
+// checked under the auth's mutation lock. It returns registered=false, and leaves
+// the existing auth untouched, when one is present: an unversioned snapshot read
+// before a concurrent registration must not replace it.
+//
+// A file snapshot (BindFileSnapshot) is also checked against its file under the
+// same lock, as Update checks one: if the file changed or is gone, it returns
+// registered=false. The auth can be absent because a registration and a removal
+// both completed after the snapshot was read; publishing the snapshot then would
+// undo the deletion.
+func (m *Manager) RegisterIfAbsent(ctx context.Context, auth *Auth) (current *Auth, registered bool, err error) {
+	current, err = m.register(ctx, auth, true)
+	if errors.Is(err, errAuthAlreadyRegistered) || errors.Is(err, errStaleFileSnapshot) {
+		return nil, false, nil
+	}
+	return current, err == nil && current != nil, err
+}
+
+var (
+	errAuthAlreadyRegistered = errors.New("auth already registered")
+	errStaleFileSnapshot     = errors.New("auth file snapshot no longer matches its file")
+)
+
+func (m *Manager) register(ctx context.Context, auth *Auth, onlyIfAbsent bool) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
@@ -189,6 +217,19 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, errMutation
 	}
 	defer releaseMutation()
+	if onlyIfAbsent {
+		// Under the mutation lock no other registration of this ID can interleave.
+		m.mu.RLock()
+		_, exists := m.auths[auth.ID]
+		m.mu.RUnlock()
+		if exists {
+			return nil, errAuthAlreadyRegistered
+		}
+		// File I/O under the mutation lock only, not m.mu, as in Update.
+		if auth.HasFileSnapshot() && !auth.FileSnapshotMatchesDisk() {
+			return nil, errStaleFileSnapshot
+		}
+	}
 	now := time.Now()
 	if auth.Generation == 0 {
 		auth.Generation = 1
