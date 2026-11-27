@@ -377,9 +377,13 @@ func TestResponseCompressionReusesPooledEncoders(t *testing.T) {
 func TestResponseCompressionReusesEncoderAfterWriteFailure(t *testing.T) {
 	for _, encoding := range []string{"zstd", "gzip"} {
 		t.Run(encoding, func(t *testing.T) {
-			original := responseCompressorPools[encoding]
-			responseCompressorPools[encoding] = &deterministicResponseCompressorPool{newCompressor: original.Get}
-			t.Cleanup(func() { responseCompressorPools[encoding] = original })
+			poolKey := encoding
+			if encoding == "zstd" {
+				poolKey = sseZstdCompressorKey
+			}
+			original := responseCompressorPools[poolKey]
+			responseCompressorPools[poolKey] = &deterministicResponseCompressorPool{newCompressor: original.Get}
+			t.Cleanup(func() { responseCompressorPools[poolKey] = original })
 
 			failedContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 			failedContext.Header("Content-Type", "text/event-stream")
@@ -403,9 +407,9 @@ func TestResponseCompressionReusesEncoderAfterWriteFailure(t *testing.T) {
 
 			recorder := httptest.NewRecorder()
 			context, _ := gin.CreateTestContext(recorder)
-			context.Header("Content-Type", "application/json")
+			context.Header("Content-Type", "text/event-stream")
 			writer := &responseCompressionWriter{ResponseWriter: context.Writer, encoding: encoding, minBytes: 1}
-			body := `{"message":"response after failure"}`
+			body := "data: response after failure\n\n"
 			if _, errWrite = writer.WriteString(body); errWrite != nil {
 				t.Fatal(errWrite)
 			}
