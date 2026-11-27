@@ -1,0 +1,133 @@
+@use '../../../styles/mixins' as *;
+
+/* 全局字段搜索 combobox：入场 160ms 淡入上浮，关闭瞬时 */
+
+.searchBox {
+  position: relative;
+  min-width: 0;
+  flex: 1 1 240px;
+  max-width: 420px;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+
+  :global(.input) {
+    height: 38px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+}
+
+.searchControl {
+  padding-right: 38px !important;
+}
+
+.searchIcon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.searchResults {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--floating-surface, var(--bg-primary));
+  box-shadow: var(
+    --floating-shadow,
+    0 14px 32px color-mix(in srgb, var(--text-primary) 16%, transparent)
+  );
+  transform-origin: top center;
+  animation: config-search-in var(--dur-press, 160ms) var(--ease-out-strong, ease-out) both;
+}
+
+@keyframes config-search-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.searchResultItem {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 8px;
+  text-align: left;
+  transition: background-color $transition-fast;
+
+  &:hover {
+    background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  }
+}
+
+/* Keyboard/pointer "active" option — the aria-activedescendant target. */
+.searchResultItemActive {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.searchResultLabel {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.searchResultQualifier {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.searchResultSection {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.searchEmpty {
+  padding: 12px 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+@include mobile {
+  .searchBox {
+    max-width: none;
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .searchResults {
+    animation: none;
+  }
+
+  .searchResultItem {
+    transition: none;
+  }
+}

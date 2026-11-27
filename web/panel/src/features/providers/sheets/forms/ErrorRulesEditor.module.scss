@@ -1,0 +1,59 @@
+.editor {
+  input,
+  textarea {
+    min-width: 0;
+  }
+}
+
+/* 规则卡：头部沿用条目卡，正文内容统一 12px 内缩 */
+.rule {
+  gap: 12px;
+
+  > :not(:first-child) {
+    margin-inline: 12px;
+  }
+
+  > :last-child {
+    margin-bottom: 12px;
+  }
+}
+
+.ruleFields {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 2fr);
+  gap: 10px;
+}
+
+.matchRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.editor .matchInput {
+  height: auto;
+  min-height: 40px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.editor .removeMatch {
+  margin-top: 30px;
+}
+
+@media (max-width: 520px) {
+  .ruleFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .matchRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+
+    > :first-child {
+      grid-column: 1 / -1;
+    }
+  }
+}

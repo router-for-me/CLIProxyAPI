@@ -1,0 +1,74 @@
+.wrap {
+  width: 100%;
+  min-width: 0;
+}
+
+.svg {
+  display: block;
+  overflow: visible;
+  font-variant-numeric: tabular-nums;
+}
+
+.grid {
+  stroke: var(--border-color);
+  stroke-width: 1;
+}
+
+.gridV {
+  stroke: color-mix(in srgb, var(--border-color) 45%, transparent);
+  stroke-width: 1;
+}
+
+.axisY {
+  fill: var(--text-tertiary);
+  font-size: 12px;
+  text-anchor: end;
+}
+
+.axisX {
+  fill: var(--text-tertiary);
+  font-size: 12px;
+  text-anchor: middle;
+}
+
+.now {
+  stroke: var(--text-tertiary);
+  stroke-width: 1;
+}
+
+.nowLabel {
+  fill: var(--text-secondary);
+  font-size: 12px;
+  text-anchor: middle;
+}
+
+.gain {
+  fill: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--bg-primary);
+  stroke-width: 4px;
+}
+
+.cross {
+  stroke: var(--text-quaternary);
+  stroke-dasharray: 3 3;
+}
+
+.tip {
+  fill: var(--floating-surface);
+  stroke: var(--border-color);
+}
+
+.tipValue {
+  fill: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tipTime {
+  fill: var(--text-tertiary);
+  font-size: 11px;
+}

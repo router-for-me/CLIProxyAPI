@@ -1,0 +1,359 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 添加提供商目录
+ * 快速接入合作方是「精选卡」：独立的暖色分区、协议一览、接入 + 注册；
+ * 官方 / 自定义是安静的瓷砖。所有新增都从这里出发。
+ * ============================================================ */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  min-width: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 精选分区：极淡的暖色纸面把合作方从目录里托起来，不靠高饱和色抢眼 */
+.sectionFeatured {
+  padding: 16px;
+  margin: -4px -4px 0;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--amber-color) 22%, var(--border-color));
+  background:
+    radial-gradient(
+      120% 90% at 0% 0%,
+      color-mix(in srgb, var(--amber-color) 9%, transparent),
+      transparent 60%
+    ),
+    color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+}
+
+.heading {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.badge {
+  font-family: $font-family;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+  line-height: 1.6;
+  padding: 0 8px;
+  border-radius: $radius-full;
+  color: var(--amber-text);
+  background: var(--amber-10);
+  border: 1px solid var(--amber-30);
+}
+
+/* ---------- 精选卡 ---------- */
+
+.features {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.feature {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 14px 14px 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    box-shadow var(--dur-hover) var(--ease-out-strong);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .feature:hover {
+    border-color: var(--border-hover);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--text-primary) 7%, transparent);
+  }
+}
+
+.featureMain {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+
+.featureTitleLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.featureTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+.featureLead {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.protocols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.protocol {
+  padding: 1px 7px;
+  border-radius: $radius-full;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  white-space: nowrap;
+}
+
+.featureActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.connectButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  height: 32px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: $radius-full;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform var(--dur-press) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong);
+
+  &:active {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+.registerLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .connectButton:hover {
+    background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-secondary));
+  }
+
+  .registerLink:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+}
+
+.connected {
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.6;
+  padding: 0 7px;
+  border-radius: $radius-full;
+  color: var(--viz-success);
+  background: color-mix(in srgb, var(--viz-success) 10%, transparent);
+}
+
+/* ---------- 瓷砖 ---------- */
+
+.tiles {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:active {
+    transform: scale(0.98);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tile:hover {
+    border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--bg-tertiary) 40%, var(--bg-primary));
+  }
+
+  .tile:hover .tileChevron {
+    color: var(--text-secondary);
+    transform: scaleX(-1) translateX(-2px);
+  }
+}
+
+.tileName {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  @include text-ellipsis;
+}
+
+.tileChevron {
+  flex-shrink: 0;
+  color: var(--text-quaternary);
+  transform: scaleX(-1);
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-hover) var(--ease-out-strong);
+}
+
+/* ---------- 首次引导：铺开成宽目录 ---------- */
+
+.pickerPage {
+  gap: 30px;
+
+  .sectionFeatured {
+    margin: 0;
+    padding: 20px;
+  }
+
+  .sectionFeatured .features {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  }
+
+  /* 宽目录里卡片等高：内容在上、动作贴底，三张卡的按钮对齐成一条线 */
+  .sectionFeatured .feature {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    grid-template-rows: 1fr auto;
+    align-items: start;
+    column-gap: 14px;
+    row-gap: 16px;
+  }
+
+  .sectionFeatured .featureActions {
+    grid-column: 2;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .tiles {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feature {
+    flex-wrap: wrap;
+  }
+
+  .featureMain {
+    flex-basis: calc(100% - 60px);
+  }
+
+  .featureActions {
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
+    padding-left: 54px;
+    gap: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feature,
+  .connectButton,
+  .tile,
+  .tileChevron {
+    transition: none;
+  }
+
+  .connectButton:active,
+  .tile:active {
+    transform: none;
+  }
+}

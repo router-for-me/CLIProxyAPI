@@ -1,0 +1,35 @@
+.page {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  background: var(--bg-secondary);
+}
+
+.frame {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: var(--bg-secondary);
+}
+
+.stateShell {
+  display: flex;
+  width: 100%;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 70px clamp(20px, 3vw, 48px) 40px;
+  background: var(--bg-secondary);
+}
+
+.statusPanel {
+  color: var(--text-secondary);
+  font-size: 14px;
+}

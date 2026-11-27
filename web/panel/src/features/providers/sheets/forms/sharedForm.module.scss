@@ -1,0 +1,1391 @@
+@use '../../../../styles/mixins' as *;
+
+/* ============================================================
+ * 提供商表单语汇
+ * 分区标题（mono eyebrow）→ 常驻字段 → 设置式折叠分组。
+ * 控件统一 36px / 9px 圆角；按钮沿用页面的药丸语汇。
+ * ============================================================ */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  min-width: 0;
+}
+
+.quickStartForm {
+  gap: 20px;
+}
+
+/* ---------- 分区 ---------- */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.sectionHeading {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+
+  /* 标题后的发丝线把分区切开，不再需要卡片边框 */
+  &::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: color-mix(in srgb, var(--border-color) 80%, transparent);
+  }
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.sectionDesc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* ---------- 字段 ---------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.label {
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.labelLine {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 18px;
+}
+
+.fieldRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.input,
+.textarea {
+  width: 100%;
+  min-width: 0;
+  /* 与共享 Select 触发器同高同圆角，表单行在视觉上对齐 */
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  box-sizing: border-box;
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    box-shadow var(--dur-hover) var(--ease-out-strong);
+
+  &::placeholder {
+    color: var(--text-quaternary);
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--border-hover);
+    box-shadow: 0 0 0 3px var(--primary-10);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  &[aria-invalid='true'] {
+    border-color: color-mix(in srgb, var(--danger-color) 55%, transparent);
+  }
+}
+
+.textarea {
+  height: auto;
+  min-height: 76px;
+  padding: 9px 11px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* ---------- 开关行（复选框以开关形态呈现，语义仍为 checkbox） ---------- */
+
+.checkboxRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  min-height: 24px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.checkboxBox {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 16%, transparent);
+  cursor: pointer;
+  transition: background-color var(--dur-hover) var(--ease-out-strong);
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+    transition: transform var(--dur-hover) var(--ease-out-strong);
+  }
+
+  &:checked {
+    background: var(--text-primary);
+  }
+
+  &:checked::before {
+    transform: translateX(12px);
+    background: var(--bg-secondary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+}
+
+.checkboxText {
+  line-height: 1.45;
+}
+
+.checkboxLine {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 连续的开关行：比字段间距更紧，读作一组 */
+.switchList {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+
+  &:empty {
+    display: none;
+  }
+}
+
+/* ---------- 密码 ---------- */
+
+.passwordField {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.passwordInput {
+  padding-right: 40px;
+  font-family: $font-mono;
+  font-size: 12.5px;
+
+  &::placeholder {
+    font-family: $font-family;
+    font-size: 13px;
+  }
+}
+
+.passwordToggle {
+  position: absolute;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .passwordToggle:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+}
+
+/* ---------- 错误 ---------- */
+
+.errorBox {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--danger-color);
+  background: var(--bg-error-light);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 设置式折叠分组 ---------- */
+
+.disclosureGroup {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+  overflow: hidden;
+
+  &:empty {
+    display: none;
+  }
+
+  > .disclosure + .disclosure {
+    border-top: 1px solid var(--border-color);
+  }
+
+  > .disclosure {
+    border: 0;
+    border-radius: 0;
+    background: none;
+  }
+}
+
+.disclosure {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+  min-width: 0;
+}
+
+.disclosureSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 0 14px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  transition: background-color var(--dur-hover) var(--ease-out-strong);
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+    border-radius: 12px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .disclosureSummary:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent);
+  }
+}
+
+.disclosureLabel {
+  min-width: 0;
+  @include text-ellipsis;
+}
+
+.disclosureCount {
+  font-family: $font-mono;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  padding: 0 7px;
+  border-radius: $radius-full;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+}
+
+.disclosureChevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-hover) var(--ease-out-strong);
+
+  .disclosure[open] > .disclosureSummary > & {
+    transform: rotate(180deg);
+  }
+}
+
+.disclosureBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 14px 16px;
+  min-width: 0;
+}
+
+.disclosure[open] > .disclosureBody {
+  animation: disclosure-in var(--dur-press) var(--ease-out-strong);
+}
+
+@keyframes disclosure-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---------- 条目列表（密钥 / 模型 / 规则） ---------- */
+
+.entriesList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.inlineKeyRow {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 6px;
+
+  /* 停用的密钥只弱化输入，开关与操作保持清晰 */
+  &[data-off] > .passwordField,
+  &[data-off] > .keyIndex {
+    opacity: 0.5;
+  }
+}
+
+.keySwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 6px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* 组开关：表单顶部的高频热区，独立于各配置分区 */
+.groupSwitch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 2.5%, transparent);
+  cursor: pointer;
+}
+
+.groupSwitchText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.groupSwitchLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.groupSwitchHint {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* 序号固定列宽，输入框左缘不随位数抖动；完整标签仅供辅助技术 */
+.keyIndex {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+/* 单密钥覆盖项：嵌在输入列下方的内嵌面板，层级低于连接设置 */
+.memberPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  margin: 8px 0 4px 26px;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 2.5%, transparent);
+}
+
+.memberPanelHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.entriesToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.entriesToolbarSplit {
+  justify-content: space-between;
+}
+
+.entryCard {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+}
+
+.entryCardHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 6px 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.entryCardToggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  border: 0;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+}
+
+.entryCardHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.entryCardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
+  min-width: 0;
+}
+
+/* 合作方分组卡：正文承载多个分区，留白更宽 */
+.entryCardBodyRoomy {
+  gap: 24px;
+  padding: 16px 14px 18px;
+}
+
+.entryCardIconBtn,
+.removeBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-hover) var(--ease-out-strong),
+    color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.94);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .entryCardIconBtn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+
+  .removeBtn:hover:not(:disabled) {
+    color: var(--danger-color);
+    background: var(--destructive-10);
+  }
+}
+
+.entryCardChevron {
+  transition: transform var(--dur-hover) var(--ease-out-strong);
+}
+
+.entryCardChevronOpen {
+  transform: rotate(180deg);
+}
+
+.entrySummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.entrySummaryKey {
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  @include text-ellipsis;
+}
+
+.entryBadge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: $radius-full;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+}
+
+.showMoreBtn {
+  align-self: center;
+  border: 0;
+  background: none;
+  padding: 4px 10px;
+  border-radius: $radius-full;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .showMoreBtn:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+}
+
+/* 添加：虚线行按钮，占满宽度，暗示「在这里追加一行」 */
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px dashed var(--border-primary);
+  border-radius: 9px;
+  background: none;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .addBtn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--text-tertiary);
+    background: color-mix(in srgb, var(--bg-tertiary) 45%, transparent);
+  }
+}
+
+/* ---------- 次级动作按钮（测试 / 发现 / 查询） ---------- */
+
+.connectivityRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.connectivityBtn,
+.connectivityBtnGhost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: $radius-full;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.connectivityBtn {
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.connectivityBtnGhost {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text-secondary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .connectivityBtn:hover:not(:disabled) {
+    border-color: var(--text-tertiary);
+  }
+
+  .connectivityBtnGhost:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+}
+
+.connectivityError {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger-color);
+  background: var(--bg-error-light);
+  border-radius: 8px;
+  padding: 7px 10px;
+  overflow-wrap: anywhere;
+
+  .entryCard > & {
+    margin: 0 10px 10px;
+  }
+}
+
+.connectivityHintSuccess {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--viz-success);
+}
+
+.statusIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.statusIconLoading {
+  color: var(--text-tertiary);
+  animation: provider-form-spin 0.8s linear infinite;
+}
+
+.statusIconSuccess {
+  color: var(--viz-success);
+}
+
+.statusIconError {
+  color: var(--danger-color);
+}
+
+@keyframes provider-form-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 测试模型：选择器与测试按钮同一行 ---------- */
+
+.inlineControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  > :first-child {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.mono {
+  font-family: $font-mono;
+  font-size: 12.5px;
+}
+
+/* ---------- 请求头行 ---------- */
+
+.headerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ---------- 模型条目 ---------- */
+
+.modelEntry {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+}
+
+.modelAliasRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 6px 6px 6px;
+
+  .input {
+    height: 32px;
+    border-color: transparent;
+    background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
+
+    &:focus {
+      border-color: var(--border-hover);
+    }
+  }
+}
+
+.modelEntryActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.modelEntryDetails {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
+}
+
+.thinkingFieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  min-width: 0;
+
+  > legend {
+    padding: 0 6px;
+  }
+}
+
+.thinkingLevelGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 6px;
+}
+
+.thinkingLevelOption {
+  padding: 7px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong);
+}
+
+.thinkingLevelOptionSelected {
+  border-color: color-mix(in srgb, var(--text-primary) 40%, transparent);
+  background: color-mix(in srgb, var(--text-primary) 5%, var(--bg-secondary));
+}
+
+.thinkingLevelLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+
+  code {
+    font-family: $font-mono;
+    font-size: 10.5px;
+    color: var(--text-tertiary);
+  }
+}
+
+/* ---------- 模型发现面板 ---------- */
+
+.discoveryPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.discoveryToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.discoverySearchWrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.discoverySearchIcon {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  display: inline-flex;
+  transform: translateY(-50%);
+  color: var(--text-quaternary);
+  pointer-events: none;
+}
+
+.discoverySearch {
+  height: 32px;
+  padding-left: 30px;
+}
+
+.discoveryCount {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.discoveryEmpty {
+  padding: 18px 8px;
+  font-size: 12.5px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.discoveryBatchRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.discoveryBatchLabel {
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.discoveryList {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  border-radius: 9px;
+  background: var(--bg-secondary);
+}
+
+.discoveryItem {
+  padding: 5px 6px;
+  border-radius: 7px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .discoveryItem:hover {
+    background: var(--bg-tertiary);
+  }
+}
+
+.discoveryNameGroup {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.discoveryName {
+  font-family: $font-mono;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.discoveryAlias {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.discoveryFooter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.discoveryApplyBtn {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+
+/* ---------- 合作方分组密钥 ---------- */
+
+.sponsorGroupTitle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-tertiary);
+
+  strong {
+    font-size: 13.5px;
+    font-weight: 650;
+    color: var(--text-primary);
+  }
+}
+
+.sponsorGroupSummary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  min-width: 0;
+  margin-left: auto;
+  padding: 7px 0;
+}
+
+.sponsorSummaryKey,
+.sponsorSummaryUrl {
+  max-width: 100%;
+  font-family: $font-mono;
+  line-height: 1.4;
+  @include text-ellipsis;
+}
+
+.sponsorSummaryKey {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+}
+
+.sponsorSummaryUrl {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.sponsorUrlOptions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.sponsorUrlOption {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong);
+
+  input {
+    margin: 3px 0 0;
+    accent-color: var(--text-primary);
+  }
+
+  &:focus-within {
+    box-shadow: 0 0 0 3px var(--primary-10);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sponsorUrlOption:hover {
+    border-color: var(--border-hover);
+  }
+}
+
+.sponsorUrlOptionActive {
+  border-color: color-mix(in srgb, var(--text-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--text-primary) 4%, var(--bg-secondary));
+}
+
+.sponsorUrlOptionText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+
+  small {
+    font-family: $font-mono;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+    overflow-wrap: anywhere;
+  }
+
+  .sponsorUrlOptionDescription {
+    font-family: $font-family;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+  }
+}
+
+.sponsorProtocolGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.sponsorProtocolCard {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.sponsorProtocolName {
+  font-family: $font-mono;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.sponsorProtocolUrl {
+  font-family: $font-mono;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.sponsorUsageSection {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sponsorUsageResult {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--viz-success) 9%, transparent);
+}
+
+.sponsorUsageResultWarning {
+  background: var(--amber-10);
+}
+
+.sponsorUsageMain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sponsorUsageMeta {
+  font-family: $font-mono;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* ---------- 底部按钮（抽屉 / 快速开始） ---------- */
+
+.footerBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 18px;
+  border-radius: $radius-full;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    transform var(--dur-press) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    color var(--dur-hover) var(--ease-out-strong),
+    opacity var(--dur-hover) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.footerBtnGhost {
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+}
+
+.footerBtnPrimary {
+  border: 0;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .footerBtnGhost:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+
+  .footerBtnPrimary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-secondary));
+  }
+}
+
+.spin {
+  animation: provider-form-spin 0.8s linear infinite;
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 560px) {
+  .fieldRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .modelAliasRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+
+    > :nth-child(2) {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    > .modelEntryActions {
+      grid-row: 1 / span 2;
+      grid-column: 2;
+    }
+  }
+
+  .headerRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+
+    > :nth-child(2) {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    > :last-child {
+      grid-row: 1 / span 2;
+      grid-column: 2;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input,
+  .textarea,
+  .checkboxBox,
+  .checkboxBox::before,
+  .disclosureSummary,
+  .disclosureChevron,
+  .entryCardChevron,
+  .entryCardIconBtn,
+  .removeBtn,
+  .addBtn,
+  .connectivityBtn,
+  .connectivityBtnGhost,
+  .thinkingLevelOption,
+  .sponsorUrlOption,
+  .footerBtn {
+    transition: none;
+  }
+
+  .disclosure[open] > .disclosureBody {
+    animation: none;
+  }
+
+  .statusIconLoading,
+  .spin {
+    animation-duration: 2.4s;
+  }
+
+  .entryCardIconBtn:active:not(:disabled),
+  .removeBtn:active:not(:disabled),
+  .addBtn:active:not(:disabled),
+  .connectivityBtn:active:not(:disabled),
+  .connectivityBtnGhost:active:not(:disabled),
+  .footerBtn:active:not(:disabled) {
+    transform: none;
+  }
+}

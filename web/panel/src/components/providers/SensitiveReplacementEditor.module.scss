@@ -1,0 +1,365 @@
+/* Sensitive replacement rule lists: one rule = one line, `match → replacement [actions]`.
+   Rows and the column header are subgrids of `.list`, so the header lines up with the rows
+   whatever width the auto index / action columns end up with. The editor root is its own
+   inline-size container: below 460px each rule stacks into two lines. */
+
+$cell-height: 36px;
+
+.editor {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.list {
+  display: grid;
+  column-gap: 8px;
+  row-gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.unordered .list {
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto;
+}
+
+.ordered .list {
+  grid-template-columns: auto minmax(0, 1fr) 16px minmax(0, 1fr) auto;
+}
+
+.header,
+.row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: start;
+  min-width: 0;
+}
+
+.header {
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.row {
+  row-gap: 4px;
+}
+
+/* ---------- Cell placement (wide) ---------- */
+
+.cellIndex,
+.cellMatch,
+.cellArrow,
+.cellValue,
+.cellActions {
+  grid-row: 1;
+  min-width: 0;
+}
+
+.cellError {
+  grid-row: 2;
+}
+
+.unordered {
+  .cellMatch,
+  .cellError {
+    grid-column: 1;
+  }
+
+  .cellArrow {
+    grid-column: 2;
+  }
+
+  .cellValue {
+    grid-column: 3;
+  }
+
+  .cellActions {
+    grid-column: 4;
+  }
+}
+
+.ordered {
+  .cellIndex {
+    grid-column: 1;
+  }
+
+  .cellMatch,
+  .cellError {
+    grid-column: 2;
+  }
+
+  .cellArrow {
+    grid-column: 3;
+  }
+
+  .cellValue {
+    grid-column: 4;
+  }
+
+  .cellActions {
+    grid-column: 5;
+  }
+}
+
+/* ---------- Cells ---------- */
+
+/* Index, arrow and actions are one field-line tall so they sit on the first text line of a
+   textarea that has grown. */
+.index,
+.arrow,
+.actions {
+  display: flex;
+  align-items: center;
+  height: $cell-height;
+}
+
+.index {
+  justify-content: flex-end;
+  min-width: 18px;
+  color: var(--text-tertiary);
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.arrow {
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+
+.arrowNarrow {
+  display: none;
+}
+
+.actions {
+  gap: 2px;
+}
+
+/* Hosts style the field through their own input class (config fieldsRoot `.input`, sheet
+   `form.input`); the extra selector weight beats `.fieldsRoot textarea.input`'s 112px floor.
+   Vertical padding is derived so one line is exactly one 36px field line in either host. */
+.list .row textarea.codeInput {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: $cell-height;
+  max-height: 160px;
+  padding-block: calc((#{$cell-height} - 2px - 1.45em) / 2);
+  line-height: 1.45;
+  font-family: $font-mono;
+  font-size: 12.5px;
+  resize: vertical;
+  field-sizing: content;
+
+  &[aria-invalid='true'] {
+    border-color: var(--error-color);
+  }
+}
+
+.error {
+  margin: 0;
+  color: var(--error-color);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.addRow {
+  display: flex;
+  justify-content: flex-start;
+}
+
+/* ---------- Icon buttons ---------- */
+
+.iconBtn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: $radius-md;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -1px;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+/* A destructive action stays as quiet as its neighbours until it is aimed at. */
+.deleteBtn:focus-visible {
+  background: var(--destructive-10);
+  color: var(--error-color);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .iconBtn:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .deleteBtn:hover:not(:disabled) {
+    background: var(--destructive-10);
+    color: var(--error-color);
+  }
+}
+
+@media (pointer: coarse) {
+  .iconBtn {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* ---------- Enter motion: rows created by the add button only ---------- */
+
+.row[data-new] {
+  transition:
+    opacity var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  @starting-style {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* ---------- Narrow: each rule stacks into match + actions / ↳ replacement ---------- */
+
+@container (max-width: 460px) {
+  .header {
+    display: none;
+  }
+
+  /* Extra air between rules so each two-line pair reads as one unit. */
+  .list {
+    row-gap: 12px;
+  }
+
+  .row {
+    row-gap: 8px;
+  }
+
+  .rowInvalid .cellError {
+    margin-top: -4px;
+  }
+
+  .arrowWide {
+    display: none;
+  }
+
+  .arrowNarrow {
+    display: inline;
+  }
+
+  .unordered {
+    .list {
+      grid-template-columns: 16px minmax(0, 1fr) auto;
+    }
+
+    .cellMatch,
+    .cellError {
+      grid-column: 1 / 3;
+    }
+
+    .cellActions {
+      grid-column: 3;
+    }
+
+    .cellArrow {
+      grid-column: 1;
+    }
+
+    .cellValue {
+      grid-column: 2 / 4;
+    }
+  }
+
+  .ordered {
+    .list {
+      grid-template-columns: auto 16px minmax(0, 1fr) auto;
+    }
+
+    .cellMatch,
+    .cellError {
+      grid-column: 2 / 4;
+    }
+
+    .cellActions {
+      grid-column: 4;
+    }
+
+    .cellArrow {
+      grid-column: 2;
+    }
+
+    .cellValue {
+      grid-column: 3 / 5;
+    }
+  }
+
+  .cellArrow,
+  .cellValue {
+    grid-row: 2;
+  }
+
+  /* The duplicate-key line stays directly under the field it describes. */
+  .rowInvalid {
+    .cellArrow,
+    .cellValue {
+      grid-row: 3;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row[data-new] {
+    transition: opacity var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+    @starting-style {
+      transform: none;
+    }
+  }
+
+  .iconBtn {
+    transition:
+      background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+      color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+    &:active:not(:disabled) {
+      transform: none;
+    }
+  }
+}

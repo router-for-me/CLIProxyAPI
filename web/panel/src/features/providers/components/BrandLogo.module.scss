@@ -1,0 +1,59 @@
+/* 品牌标：中性底座，品牌色只留在图标本身 */
+
+.tile {
+  --brand-logo-size: 24px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--brand-logo-size);
+  height: var(--brand-logo-size);
+  border-radius: calc(var(--brand-logo-size) * 0.28);
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  box-sizing: border-box;
+}
+
+.tileTransparent {
+  background: transparent;
+}
+
+/* Kimi 的标需要反差底座：浅色主题墨底，深色主题白底 */
+.tileThemeSurface {
+  background: #111;
+
+  :global([data-theme='dark']) & {
+    background: #fff;
+  }
+}
+
+.mark {
+  display: block;
+  width: 72%;
+  height: 72%;
+  object-fit: contain;
+
+  .tileTransparent > & {
+    width: 82%;
+    height: 82%;
+  }
+
+  .tileThemeSurface > & {
+    width: 62%;
+    height: 62%;
+  }
+}
+
+.markDark {
+  display: none;
+}
+
+:global([data-theme='dark']) {
+  .markLight {
+    display: none;
+  }
+
+  .markDark {
+    display: block;
+  }
+}

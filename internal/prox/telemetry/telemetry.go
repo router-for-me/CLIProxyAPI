@@ -420,3 +420,15 @@ func (r *Recorder) ForgetAccount(authID string) {
 		}
 	}
 }
+
+// Samples returns a copy of the quota observations of one window, oldest first.
+func (r *Recorder) Samples(authID, windowKey string) []Sample {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	list := r.samples[authID+"|"+windowKey]
+	out := make([]Sample, len(list))
+	for i, s := range list {
+		out[i] = Sample{At: s.At, Used: s.Used, ResetsAt: copyTime(s.ResetsAt)}
+	}
+	return out
+}

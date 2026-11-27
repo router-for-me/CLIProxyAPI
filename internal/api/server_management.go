@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	proxpanel "github.com/router-for-me/CLIProxyAPI/v8/internal/prox/panel"
 	"net/http"
 	"os"
 	"strings"
@@ -314,6 +315,10 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	cfg := s.getConfig()
 	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	// prox: serve the embedded prox panel instead of the downloaded asset.
+	if proxpanel.Serve(c) {
 		return
 	}
 	filePath := managementasset.FilePath(s.configFilePath)

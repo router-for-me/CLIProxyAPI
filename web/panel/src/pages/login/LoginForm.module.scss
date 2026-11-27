@@ -1,0 +1,359 @@
+$field-height: 44px;
+$field-radius: 10px;
+
+@keyframes fieldRise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes fieldFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+
+  > [data-stagger] {
+    animation: fieldRise 420ms var(--ease-out-strong) both;
+  }
+
+  @for $i from 1 through 4 {
+    > [data-stagger]:nth-child(#{$i}) {
+      animation-delay: #{180 + $i * 50}ms;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    > [data-stagger] {
+      animation-name: fieldFade;
+      animation-duration: 200ms;
+    }
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.labelRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.textButton {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-primary);
+  opacity: 0.7;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: opacity var(--dur-hover) ease;
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      opacity: 1;
+    }
+  }
+
+  &:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--login-outline);
+    outline-offset: 3px;
+  }
+  &:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+}
+
+.input,
+.readout {
+  width: 100%;
+  height: $field-height;
+  padding: 0 14px;
+  border-radius: $field-radius;
+  border: 1px solid var(--border-color);
+  background: var(--login-field-bg);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.input {
+  transition:
+    border-color var(--dur-hover) ease,
+    background-color var(--dur-hover) ease,
+    box-shadow var(--dur-hover) ease;
+
+  &::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      border-color: var(--border-hover);
+    }
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--login-focus-border);
+    background: var(--login-field-bg-focus);
+    box-shadow: 0 0 0 4px var(--login-focus-ring);
+  }
+
+  &[aria-invalid='true'] {
+    border-color: color-mix(in srgb, var(--login-error) 55%, transparent);
+  }
+}
+
+.readout {
+  display: flex;
+  align-items: center;
+  border-color: transparent;
+  background: var(--login-readout-bg);
+  color: var(--text-secondary);
+}
+
+.readoutText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: $font-mono;
+  font-size: 13px;
+}
+
+.inputWrap {
+  position: relative;
+}
+
+.inputWithAction {
+  padding-right: 48px;
+}
+
+.iconButton {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition:
+    color var(--dur-hover) ease,
+    background-color var(--dur-hover) ease,
+    transform var(--dur-press) var(--ease-out-strong);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      color: var(--text-primary);
+      background: var(--login-hover-bg);
+    }
+  }
+
+  &:active {
+    transform: translateY(-50%) scale(0.92);
+  }
+
+  &:focus-visible {
+    color: var(--text-primary);
+    outline: 2px solid var(--login-outline);
+    outline-offset: 0;
+  }
+}
+
+.options {
+  display: flex;
+  align-items: center;
+}
+
+.checkboxLabel {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.submit {
+  width: 100%;
+  height: $field-height;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: $field-radius;
+  background: var(--login-submit-bg);
+  color: var(--login-submit-fg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition:
+    transform var(--dur-press) var(--ease-out-strong),
+    background-color var(--dur-hover) ease,
+    opacity var(--dur-hover) ease;
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(:disabled) {
+      background: var(--login-submit-hover);
+    }
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--login-outline);
+    outline-offset: 3px;
+  }
+
+  &:disabled {
+    cursor: progress;
+    opacity: 0.7;
+  }
+
+  &[data-state='success'] {
+    cursor: default;
+    opacity: 1;
+  }
+}
+
+@keyframes submitContentIn {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translate3d(0, 2px, 0);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes checkDraw {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.submitContent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  animation: submitContentIn 200ms var(--ease-out-strong);
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: fieldFade 150ms ease;
+  }
+}
+
+.successIcon {
+  stroke-width: 2.4;
+
+  path,
+  polyline {
+    stroke-dasharray: 24;
+    animation: checkDraw 280ms var(--ease-out-strong) 40ms both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    path,
+    polyline {
+      animation: none;
+      stroke-dasharray: none;
+    }
+  }
+}
+
+@keyframes errorIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--login-error);
+  animation: errorIn 200ms var(--ease-out-strong);
+
+  svg {
+    flex-shrink: 0;
+    margin-top: 3px;
+  }
+
+  span {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: fieldFade 200ms ease;
+  }
+}

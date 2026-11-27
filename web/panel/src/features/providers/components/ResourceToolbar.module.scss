@@ -1,0 +1,321 @@
+@use '../../../styles/mixins' as *;
+
+/* 工具栏：高频操作区，无入场动画；控件统一 32px 高的药丸语汇 */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+
+/* ---------- 搜索 ---------- */
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 240px;
+  min-width: 180px;
+  max-width: 340px;
+  height: 34px;
+  padding: 0 10px 0 32px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  box-sizing: border-box;
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    box-shadow var(--dur-hover) var(--ease-out-strong);
+
+  &:focus-within {
+    border-color: var(--border-hover);
+    box-shadow: 0 0 0 3px var(--primary-10);
+  }
+}
+
+.searchIcon {
+  position: absolute;
+  left: 11px;
+  color: var(--text-quaternary);
+  pointer-events: none;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+
+  &::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  &::-webkit-search-cancel-button {
+    display: none;
+  }
+}
+
+.searchClear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -4px;
+  border: 0;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+/* ---------- 排序 ---------- */
+
+.sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.iconToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    border-color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:active {
+    transform: scale(0.95);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+/* ---------- 模型筛选 ---------- */
+
+.models {
+  position: relative;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+
+  &[aria-expanded='true'] .pillChevron {
+    transform: rotate(180deg);
+  }
+}
+
+.pillChevron {
+  transition: transform var(--dur-hover) var(--ease-out-strong);
+}
+
+/* 有筛选生效：墨色描边 + 实色文字，一眼可见「列表被收窄了」 */
+.pillActive {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--text-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--text-primary) 5%, var(--bg-secondary));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .pill:hover:not(:disabled),
+  .iconToggle:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+  }
+
+  .searchClear:hover {
+    color: var(--text-primary);
+  }
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: $z-dropdown;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--floating-surface);
+  box-shadow: var(--floating-shadow);
+  transform-origin: top left;
+  animation: toolbar-popover-in var(--dur-hover) var(--ease-out-strong) both;
+}
+
+@keyframes toolbar-popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+}
+
+.popoverSearch {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+
+  &:focus {
+    border-color: var(--border-hover);
+  }
+}
+
+.popoverList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.popoverItem {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 7px;
+  box-sizing: border-box;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .popoverItem:hover {
+    background: var(--bg-tertiary);
+  }
+}
+
+.popoverItemLabel {
+  font-family: $font-mono;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.popoverEmpty {
+  padding: 14px 8px;
+  font-size: 12.5px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.popoverFooter {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.popoverAction {
+  border: 0;
+  background: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  cursor: pointer;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .popoverAction:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+}
+
+@media (max-width: 900px) {
+  .search {
+    flex-basis: 100%;
+    max-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search,
+  .iconToggle,
+  .pill,
+  .pillChevron {
+    transition: none;
+  }
+
+  .iconToggle:active,
+  .pill:active:not(:disabled) {
+    transform: none;
+  }
+
+  .popover {
+    animation: none;
+  }
+}

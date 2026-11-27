@@ -293,8 +293,6 @@ func GinHandler(c *gin.Context) {
 	c.Abort()
 }
 
-// UIBase and APIBase are the dashboard and API mount points.
-const (
-	UIBase  = mgmt.ResourceBase
-	APIBase = mgmt.APIBase
-)
+// APIBase is the JSON API mount point. The dashboard is the embedded
+// management panel (internal/prox/panel) served at /management.html.
+const APIBase = mgmt.APIBase

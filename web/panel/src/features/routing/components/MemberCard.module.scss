@@ -1,0 +1,263 @@
+@use '../../../styles/mixins' as *;
+
+/* One schedulable member: drag handle, brand mark, name/kind, share or state chip, menu. */
+
+.card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  height: 48px;
+  padding: 0 6px 0 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: grab;
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    box-shadow var(--dur-hover) var(--ease-out-strong),
+    opacity var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:active {
+    cursor: grabbing;
+  }
+
+  &:focus-within {
+    border-color: var(--border-hover);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .card:hover {
+    border-color: var(--border-hover);
+  }
+
+  .card:hover .handle {
+    color: var(--text-secondary);
+  }
+}
+
+.card:focus-within .handle {
+  color: var(--text-secondary);
+}
+
+.serving {
+  border-color: color-mix(in srgb, var(--viz-success) 55%, var(--border-color));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--viz-success) 18%, transparent);
+}
+
+.muted {
+  opacity: 0.5;
+}
+
+.dragging {
+  opacity: 0.35;
+  transform: scale(0.98);
+}
+
+.locked {
+  cursor: default;
+
+  &:active {
+    cursor: default;
+  }
+}
+
+.handle {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 32px;
+  border-radius: 6px;
+  color: var(--text-quaternary);
+  cursor: inherit;
+  transition: color var(--dur-hover) var(--ease-out-strong);
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--bg-primary);
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+
+  img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+  }
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-width: 220px;
+}
+
+.name {
+  @include text-ellipsis;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.kind {
+  @include text-ellipsis;
+  font-size: 11.5px;
+  line-height: 1.2;
+  color: var(--text-tertiary);
+}
+
+.weight {
+  color: var(--text-secondary);
+}
+
+.share {
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--viz-success);
+}
+
+.chip {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: $radius-full;
+  background: var(--bg-tertiary);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.menuWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.menuButton {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-hover) var(--ease-out-strong),
+    color var(--dur-hover) var(--ease-out-strong);
+
+  &[aria-expanded='true'] {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .menuButton:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: $z-dropdown;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  max-width: 240px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--floating-surface);
+  box-shadow: var(--floating-shadow);
+  cursor: default;
+  transform-origin: top right;
+  animation: menuIn var(--dur-hover) var(--ease-out-strong);
+
+  button {
+    @include button-reset;
+    padding: 8px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    text-align: left;
+    color: var(--text-primary);
+    cursor: pointer;
+
+    &:disabled {
+      color: var(--text-quaternary);
+      cursor: not-allowed;
+    }
+
+    &:focus-visible {
+      outline: none;
+      background: var(--bg-tertiary);
+    }
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .menu button:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+  }
+}
+
+.menuNote {
+  margin: 0;
+  padding: 6px 10px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+
+@keyframes menuIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .handle,
+  .menuButton {
+    transition: none;
+  }
+
+  .menu {
+    animation: none;
+  }
+}

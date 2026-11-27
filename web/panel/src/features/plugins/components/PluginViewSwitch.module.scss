@@ -1,0 +1,104 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 已安装 / 商店 分段控件：与 ModeSwitch 同语汇（胶囊底 + 浮起的激活段），
+ * 激活底块是一块独立的指示器，只用 transform 滑动。两段等宽，位移恒为自身宽度。
+ * ============================================================ */
+
+.segmented {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex-shrink: 0;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-full;
+  background: var(--bg-tertiary);
+  isolation: isolate;
+}
+
+.indicator {
+  position: absolute;
+  z-index: -1;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border-radius: $radius-full;
+  background: var(--floating-surface, var(--bg-primary));
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: transform var(--dur-hover) var(--ease-out-strong);
+
+  .segmented[data-active='store'] & {
+    transform: translateX(100%);
+  }
+}
+
+.segment {
+  @include button-reset;
+
+  display: inline-flex;
+  min-width: 0;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 16px;
+  border-radius: $radius-full;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover) ease,
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: -1px;
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .segment:hover:not(.segmentActive) {
+    color: var(--text-primary);
+  }
+}
+
+.segmentActive {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.count {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.updateDot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--amber-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indicator {
+    transition: none;
+  }
+
+  .segment:active {
+    transform: none;
+  }
+}

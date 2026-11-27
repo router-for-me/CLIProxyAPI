@@ -1,0 +1,209 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 插件配置抽屉：iOS 设置式分组列表。
+ * 每个分区一个圆角分组，行间发丝线分隔；字段本身不再各自加框。
+ * ============================================================ */
+
+.form,
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+}
+
+.section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.sectionTitle {
+  margin: 0;
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+
+.group {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-secondary);
+  overflow: hidden;
+
+  > * + * {
+    border-top: 1px solid var(--border-color);
+  }
+}
+
+// ─── Rows ───────────────────────────────────────────────
+
+.switchRow,
+.fieldRow,
+.detailRow,
+.emptyRow,
+.skeletonRow {
+  min-width: 0;
+  padding: 12px $spacing-md;
+}
+
+.switchRow {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+}
+
+/* Field name + InfoTip on one line (the field's description lives in the tooltip). */
+.labelRow {
+  min-width: 0;
+}
+
+.fieldRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  :global(.form-group) {
+    margin: 0;
+  }
+
+  :global(.form-group label) {
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+}
+
+.rowLabel {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.textarea {
+  min-height: 148px;
+  resize: vertical;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  padding: 10px 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: $font-mono;
+  font-size: 13px;
+  line-height: 1.5;
+
+  &:focus {
+    border-color: var(--primary-color);
+    outline: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 18%, transparent);
+  }
+}
+
+.fieldError {
+  padding: 8px 10px;
+  border-radius: $radius-sm;
+  background: var(--bg-error-light);
+  color: var(--danger-color);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.emptyRow {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.skeletonRow {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+}
+
+// ─── Details ────────────────────────────────────────────
+
+.details {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.detailRow {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: $spacing-md;
+  padding-top: 10px;
+  padding-bottom: 10px;
+
+  dt {
+    color: var(--text-secondary);
+  }
+
+  dd {
+    min-width: 0;
+    margin: 0;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+
+.mono {
+  font-family: $font-mono;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.link {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--border-primary);
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+  transition: text-decoration-color var(--dur-hover) ease;
+
+  &:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      text-decoration-color: currentColor;
+    }
+  }
+}
+
+// ─── Footer ─────────────────────────────────────────────
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: $spacing-sm;
+
+  @include mobile {
+    width: 100%;
+    flex-direction: column-reverse;
+
+    :global(.btn) {
+      width: 100%;
+    }
+  }
+}

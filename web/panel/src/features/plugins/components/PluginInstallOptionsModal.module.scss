@@ -1,0 +1,198 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 安装选项对话框：版本方式是一个分组列表（与配置抽屉同语汇），
+ * 选中行只换底色，不再用描边卡片。
+ * ============================================================ */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.message {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.fieldLabel {
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+
+.modes {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-secondary);
+
+  > * + * {
+    border-top: 1px solid var(--border-color);
+  }
+}
+
+.mode {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px $spacing-md;
+  cursor: pointer;
+  transition: background-color var(--dur-hover) ease;
+
+  input {
+    flex: 0 0 auto;
+    margin: 3px 0 0;
+    accent-color: var(--text-primary);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(.modeDisabled) {
+      background: color-mix(in srgb, var(--bg-hover) 55%, var(--bg-secondary));
+    }
+  }
+}
+
+.modeActive {
+  background: var(--bg-primary);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(.modeDisabled) {
+      background: var(--bg-primary);
+    }
+  }
+}
+
+.modeDisabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.modeText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  small {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+}
+
+.panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: $spacing-sm;
+
+  :global(.form-group) {
+    margin: 0;
+  }
+}
+
+.hint,
+.warning {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--text-secondary);
+}
+
+.warning {
+  color: var(--warning-color);
+}
+
+.checkbox {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+
+  input {
+    flex: 0 0 auto;
+    margin: 0;
+    accent-color: var(--text-primary);
+  }
+}
+
+.releaseLink {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-decoration: none;
+  transition: color var(--dur-hover) ease;
+
+  svg {
+    flex: 0 0 auto;
+  }
+
+  &:focus-visible {
+    border-radius: $radius-sm;
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      color: var(--text-primary);
+      text-decoration: underline;
+    }
+  }
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: $spacing-sm;
+
+  @include mobile {
+    flex-direction: column-reverse;
+  }
+}

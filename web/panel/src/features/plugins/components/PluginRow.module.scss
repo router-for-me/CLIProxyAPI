@@ -1,0 +1,407 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 插件行：logo | 文本两行 | 操作。
+ * 一行一个状态、一个主控件（开关）；其余操作是安静的图标按钮。
+ * ============================================================ */
+
+.row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px $spacing-md;
+  background: var(--bg-primary);
+  transition: background-color var(--dur-hover) ease;
+
+  & + & {
+    border-top: 1px solid var(--border-color);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      background: color-mix(in srgb, var(--bg-hover) 55%, var(--bg-primary));
+    }
+  }
+
+  @include mobile {
+    grid-template-columns: 36px minmax(0, 1fr);
+    row-gap: 10px;
+    column-gap: 12px;
+    padding: 12px;
+  }
+}
+
+.logo {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  @include mobile {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+  }
+}
+
+// ─── Text ───────────────────────────────────────────────
+
+.text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.titleLine,
+.metaLine {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+}
+
+.titleLine {
+  gap: 8px;
+}
+
+.metaLine {
+  gap: 4px 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.name {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  @include text-ellipsis;
+}
+
+.version {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.versionChange {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.versionArrow {
+  color: var(--text-quaternary);
+  font-size: 12px;
+}
+
+.versionNext {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tag {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-sm;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  letter-spacing: 0.01em;
+}
+
+.id {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-tertiary);
+  font-family: $font-mono;
+  font-size: 11.5px;
+  @include text-ellipsis;
+}
+
+.author {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-tertiary);
+  @include text-ellipsis;
+}
+
+.tagCaution {
+  border-color: var(--amber-30);
+  color: var(--amber-text);
+}
+
+// ─── Status ─────────────────────────────────────────────
+
+.status {
+  --status-dot: var(--text-quaternary);
+
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color var(--dur-hover) ease;
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--status-dot);
+  transition: background-color var(--dur-hover) ease;
+}
+
+.toneSuccess {
+  --status-dot: var(--success-color);
+
+  color: var(--text-primary);
+}
+
+.toneMuted {
+  --status-dot: var(--text-quaternary);
+
+  color: var(--text-secondary);
+}
+
+.toneWarning {
+  --status-dot: var(--amber-color);
+
+  color: var(--amber-text);
+}
+
+.tonePending {
+  --status-dot: var(--text-secondary);
+
+  color: var(--text-secondary);
+
+  .statusDot {
+    animation: statusPulse 1s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes statusPulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.3;
+  }
+}
+
+// ─── Actions ────────────────────────────────────────────
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+
+  @include mobile {
+    grid-column: 2 / -1;
+    margin-left: -8px;
+  }
+}
+
+// Fixed three-slot width, right-aligned: a row without a repository link leaves its empty slot
+// on the left, so the Update button lands in the same column on every row.
+.iconGroup {
+  display: inline-flex;
+  min-width: 100px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+
+  @include mobile {
+    min-width: 0;
+  }
+}
+
+.toggle {
+  display: inline-flex;
+  margin-left: 10px;
+
+  @include mobile {
+    margin-left: auto;
+  }
+}
+
+.iconButton {
+  @include button-reset;
+
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: $radius-md;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    color var(--dur-hover) ease,
+    background-color var(--dur-hover) ease,
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+    color: var(--text-primary);
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  svg {
+    display: block;
+  }
+}
+
+.pill {
+  @include button-reset;
+
+  display: inline-flex;
+  min-width: 80px;
+  height: 28px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-left: 10px;
+  padding: 0 14px;
+  border-radius: $radius-full;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-hover) ease,
+    opacity var(--dur-hover) ease,
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  &[aria-busy='true'] {
+    opacity: 1;
+    cursor: progress;
+  }
+
+  @include mobile {
+    margin-left: auto;
+
+    + .toggle {
+      margin-left: 10px;
+    }
+  }
+}
+
+// Installed rows: Update sits left of the icon buttons so those stay in fixed columns.
+.updateSlot {
+  display: inline-flex;
+  margin-right: 8px;
+
+  .pill {
+    margin-left: 0;
+  }
+
+  @include mobile {
+    margin-left: 8px;
+  }
+}
+
+.pillProminent {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+}
+
+.pill .pillSpinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
+.danger:focus-visible {
+  color: var(--danger-color);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .iconButton:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .danger:hover:not(:disabled) {
+    background: var(--destructive-10);
+    color: var(--danger-color);
+  }
+
+  .pill:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-tertiary));
+  }
+
+  .pillProminent:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-primary));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .iconButton:active:not(:disabled),
+  .pill:active:not(:disabled) {
+    transform: none;
+  }
+
+  .tonePending .statusDot {
+    animation: none;
+    opacity: 0.6;
+  }
+}

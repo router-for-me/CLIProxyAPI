@@ -1895,6 +1895,7 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 	})
 
 	t.Run("management button query opens control panel", func(t *testing.T) {
+		t.Setenv("PROX_PANEL", "upstream") // prox: test the downloaded asset, not the embedded panel
 		req := httptest.NewRequest(http.MethodGet, "/management.html?safe-mode=configure", nil)
 		rr := httptest.NewRecorder()
 		server.engine.ServeHTTP(rr, req)

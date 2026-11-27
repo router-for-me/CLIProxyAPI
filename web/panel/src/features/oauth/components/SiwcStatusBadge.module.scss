@@ -1,0 +1,47 @@
+/* SIWC 状态药丸：配方同凭证卡片的 priority 药丸（mono / 全圆角 / 淡底细边）。 */
+
+.badge {
+  --siwc-tone: var(--text-quaternary);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--siwc-tone) 26%, transparent);
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--siwc-tone) 9%, transparent);
+  font-family: $font-mono;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  color: var(--text-secondary);
+
+  &[data-status='active'] {
+    --siwc-tone: var(--viz-success);
+    color: color-mix(in srgb, var(--viz-success) 78%, var(--text-primary));
+  }
+
+  &[data-status='bound'] {
+    --siwc-tone: var(--amber-color);
+    color: color-mix(in srgb, var(--amber-color) 72%, var(--text-primary));
+  }
+
+  &[data-status='unbound'] {
+    color: var(--text-tertiary);
+  }
+}
+
+.dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--siwc-tone);
+}
+
+.label {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  opacity: 0.78;
+}

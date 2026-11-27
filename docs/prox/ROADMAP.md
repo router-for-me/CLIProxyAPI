@@ -24,7 +24,7 @@ quota/usage/cost dashboard.
 | Failure + passive quota feedback, token usage | `usage.RegisterNamedPlugin` (`usage.Record`) | none |
 | Response rate-limit headers | `sdk/cliproxy/auth/quota_signals.go` | small hook if headers are not already on the record |
 | Ignition requests | core `Manager` execute with pinned auth | none (expose a narrow accessor if needed) |
-| Dashboard + JSON API | Gin routes `/prox/ui/*` and `/prox/api/*` (management-key auth), embedded assets | one route registration in `internal/api` |
+| Dashboard + JSON API | embedded Management Center at `/management.html`, Gin routes `/prox/api/*` (management-key auth) | route registration and panel hook in `internal/api` |
 
 ## Package layout
 
@@ -67,6 +67,11 @@ cost ledger, pooled limits endpoint, ClickHouse usage sink, and dashboard pages
 response body logging to ClickHouse (needs a request-logger hook), dashboard
 settings forms for the ignition/notify/usage blocks, live verification against
 real accounts.
+
+Status (2026-11-27, UI): the quota-router dashboard is replaced by the
+vendored Management Center (`web/panel`) with a pool chart, ledger view, live
+strip, and Scheduler / Cost / Ignition pages, embedded and served at
+`/management.html`.
 
 1. **Quota core.** `config`, `state`, `quota` (Claude + Codex first), `poller`.
    Read-only polling and passive headers. Unit tests with fixtures from both repos.

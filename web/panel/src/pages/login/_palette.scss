@@ -1,0 +1,124 @@
+// 登录页配色：左右同底、极简，跟随应用主题（html[data-theme]）。
+// - 浅色（默认，无 data-theme）：与应用浅色主题同一张暖纸底
+// - 纯白（data-theme='white'，含 auto 的浅色解析）：纯白底
+// - 深色（data-theme='dark'，含 auto 的深色解析）：纯黑底
+//
+// 组件只消费 --login-* 变量；同时覆盖少量主题 token，让共享组件（复选框等）自动跟随。
+// 色值对比度见 tests/loginPalette.test.ts。
+
+@mixin login-tokens-light {
+  color-scheme: light;
+
+  --login-bg: #faf9f5;
+  --login-dot-color: #1c1917;
+  --login-title: #1c1917;
+
+  --login-text: #1c1917;
+  --login-text-muted: #57534e;
+  --login-text-faint: #8a847e;
+
+  --login-field-bg: rgba(28, 25, 23, 0.025);
+  --login-field-bg-focus: #ffffff;
+  --login-readout-bg: rgba(28, 25, 23, 0.045);
+  --login-border: rgba(28, 25, 23, 0.12);
+  --login-border-hover: rgba(28, 25, 23, 0.24);
+  --login-focus-border: rgba(28, 25, 23, 0.55);
+  --login-focus-ring: rgba(28, 25, 23, 0.07);
+  --login-hover-bg: rgba(28, 25, 23, 0.06);
+  --login-outline: rgba(28, 25, 23, 0.5);
+
+  --login-submit-bg: #1c1917;
+  --login-submit-hover: #000000;
+  --login-submit-fg: #fafaf9;
+
+  --login-error: #b3402f;
+
+  --login-dropdown-bg: #ffffff;
+  --login-dropdown-hover: rgba(28, 25, 23, 0.05);
+  --login-dropdown-active: rgba(28, 25, 23, 0.08);
+  --login-dropdown-border: rgba(28, 25, 23, 0.1);
+  --login-dropdown-shadow: 0 16px 36px rgba(28, 25, 23, 0.12);
+
+  --login-loader-track: rgba(28, 25, 23, 0.1);
+  --login-loader-bar: #1c1917;
+
+  // 共享组件 token
+  --bg-secondary: var(--login-bg);
+  --bg-primary: #ffffff;
+  --text-primary: var(--login-text);
+  --text-secondary: var(--login-text-muted);
+  --text-tertiary: var(--login-text-faint);
+  --border-color: var(--login-border);
+  --border-hover: var(--login-border-hover);
+  --primary-color: #1c1917;
+  --primary-hover: #000000;
+  --primary-active: #292524;
+  --primary-contrast: #ffffff;
+  --shadow: none;
+  --shadow-lg: var(--login-dropdown-shadow);
+}
+
+@mixin login-tokens-dark {
+  color-scheme: dark;
+
+  --login-bg: #000000;
+  --login-dot-color: #e2e8f0;
+  --login-title: #ffffff;
+
+  --login-text: #f5f5f4;
+  --login-text-muted: #a3a3a3;
+  --login-text-faint: #6b6b6b;
+
+  --login-field-bg: rgba(255, 255, 255, 0.03);
+  --login-field-bg-focus: rgba(255, 255, 255, 0.05);
+  --login-readout-bg: rgba(255, 255, 255, 0.045);
+  --login-border: rgba(255, 255, 255, 0.1);
+  --login-border-hover: rgba(255, 255, 255, 0.22);
+  --login-focus-border: rgba(255, 255, 255, 0.5);
+  --login-focus-ring: rgba(255, 255, 255, 0.06);
+  --login-hover-bg: rgba(255, 255, 255, 0.06);
+  --login-outline: rgba(255, 255, 255, 0.55);
+
+  --login-submit-bg: #f5f5f4;
+  --login-submit-hover: #ffffff;
+  --login-submit-fg: #0a0a0a;
+
+  --login-error: #f2a59a;
+
+  --login-dropdown-bg: #111111;
+  --login-dropdown-hover: rgba(255, 255, 255, 0.07);
+  --login-dropdown-active: rgba(255, 255, 255, 0.1);
+  --login-dropdown-border: rgba(255, 255, 255, 0.1);
+  --login-dropdown-shadow: 0 18px 40px rgba(0, 0, 0, 0.6);
+
+  --login-loader-track: rgba(255, 255, 255, 0.1);
+  --login-loader-bar: #f5f5f4;
+
+  --bg-secondary: var(--login-bg);
+  --bg-primary: #0e0e0e;
+  --text-primary: var(--login-text);
+  --text-secondary: var(--login-text-muted);
+  --text-tertiary: var(--login-text-faint);
+  --border-color: var(--login-border);
+  --border-hover: var(--login-border-hover);
+  --primary-color: #f5f5f4;
+  --primary-hover: #ffffff;
+  --primary-active: #e7e5e4;
+  --primary-contrast: #0a0a0a;
+  --shadow: none;
+  --shadow-lg: var(--login-dropdown-shadow);
+}
+
+// 在 CSS Module 中使用：按 html[data-theme] 选择配色
+@mixin login-palette {
+  @include login-tokens-light;
+
+  :global(html[data-theme='white']) & {
+    --login-bg: #ffffff;
+    --bg-primary: #ffffff;
+  }
+
+  :global(html[data-theme='dark']) & {
+    @include login-tokens-dark;
+  }
+}

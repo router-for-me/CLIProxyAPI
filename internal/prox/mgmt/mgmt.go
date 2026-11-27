@@ -18,7 +18,6 @@ import (
 
 const (
 	APIBase      = "/prox/api"
-	ResourceBase = "/prox/ui"
 	maxBodyBytes = 64 << 10
 	clearPhrase  = "clear sessions"
 )
@@ -83,9 +82,6 @@ func Routes() []pluginapi.ManagementRoute {
 
 // Handle dispatches one management or resource request.
 func (s *Server) Handle(req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
-	if strings.HasPrefix(req.Path, ResourceBase+"/") {
-		return serveAsset(req)
-	}
 	path := strings.TrimPrefix(req.Path, APIBase)
 	for _, r := range routes {
 		if r.path == path && r.method == req.Method {

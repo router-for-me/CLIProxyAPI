@@ -1,0 +1,181 @@
+.container {
+  position: fixed;
+  z-index: $z-notification;
+  top: max(1rem, env(safe-area-inset-top));
+  inset-inline: 0;
+  max-height: calc(100dvh - max(1rem, env(safe-area-inset-top)) - 1rem);
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem max(1rem, env(safe-area-inset-right)) 1.5rem max(1rem, env(safe-area-inset-left));
+  overflow-y: auto;
+  scrollbar-width: thin;
+  pointer-events: none;
+
+  &:empty {
+    display: none;
+  }
+}
+
+.notification {
+  --notification-accent: var(--text-secondary);
+  --notification-tint: var(--bg-tertiary);
+
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  flex-shrink: 0;
+  width: fit-content;
+  max-width: min(26rem, 100%);
+  padding: 0.625rem 0.625rem 0.625rem 0.875rem;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--floating-surface);
+  box-shadow: var(--shadow-lg), var(--shadow);
+  color: var(--text-primary);
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 200ms var(--ease-out-strong),
+    transform 200ms var(--ease-out-strong);
+
+  @starting-style {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+
+  &[data-exiting] {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+    transition-duration: 160ms;
+    pointer-events: none;
+  }
+}
+
+.success {
+  --notification-accent: var(--success-badge-text);
+  --notification-tint: var(--success-badge-bg);
+}
+
+.warning {
+  --notification-accent: var(--amber-text);
+  --notification-tint: var(--amber-10);
+}
+
+.error {
+  --notification-accent: var(--failure-badge-text);
+  --notification-tint: var(--failure-badge-bg);
+}
+
+.info {
+  --notification-accent: var(--text-secondary);
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-top: 0.125rem;
+  border-radius: 50%;
+  background: var(--notification-tint);
+  color: var(--notification-accent);
+}
+
+.message {
+  min-width: 0;
+  flex: 1;
+  padding-block: 0.3125rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.closeButton {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: $radius-md;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms var(--ease-out-strong);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+  }
+
+  &:active {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--text-secondary);
+    outline-offset: 2px;
+  }
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (pointer: coarse) {
+  .closeButton {
+    width: 2.75rem;
+    height: 2.75rem;
+    margin: -0.375rem;
+    margin-inline-start: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notification,
+  .notification[data-exiting] {
+    transform: none;
+    transition: opacity 120ms ease;
+
+    @starting-style {
+      transform: none;
+    }
+  }
+
+  .closeButton {
+    transition: none;
+
+    &:active {
+      transform: none;
+    }
+  }
+}
+
+@media (prefers-contrast: more) {
+  .notification {
+    border-color: var(--text-primary);
+  }
+}

@@ -1,0 +1,187 @@
+/* 共享提示气泡 + InfoTip 按钮。
+   气泡走 portal + fixed 定位；配色沿用侧栏收起时的导航提示（深色墨底、浅色字），
+   但全部改用主题 tokens：浅色主题墨底取 --text-primary，深色主题取浮层面 --floating-surface。 */
+
+/* ---------- 气泡 ---------- */
+
+.tooltip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  /* Sheet 遮罩 / Modal 均为 2000，Select 下拉 2010（selectPosition.ts）；
+     提示要压在它们之上，但低于通知（$z-notification 3000）。 */
+  z-index: $z-modal + 20;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+  box-shadow: var(--floating-shadow);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: normal;
+  text-align: start;
+  text-transform: none;
+  white-space: normal;
+  overflow-wrap: break-word;
+  cursor: default;
+
+  /* 指针从触发器移向气泡时跨过 6px 间隙的「桥」，免得中途触发 pointerleave。 */
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 8px;
+  }
+
+  &[data-placement='top'] {
+    animation: tooltip-in-top var(--dur-press, 160ms) var(--ease-out-strong, ease-out) both;
+
+    &::before {
+      top: 100%;
+    }
+  }
+
+  &[data-placement='bottom'] {
+    animation: tooltip-in-bottom var(--dur-press, 160ms) var(--ease-out-strong, ease-out) both;
+
+    &::before {
+      bottom: 100%;
+    }
+  }
+
+  /* 首帧量尺寸：已挂载但不可见，布局效果里定位后才显示。 */
+  &[data-measuring] {
+    visibility: hidden;
+  }
+
+  /* 相邻提示之间快速移动时直接切换，不再重播入场。 */
+  &[data-instant] {
+    animation: none;
+  }
+
+  code {
+    padding: 0 3px;
+    border-radius: 4px;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+    font-family: $font-mono;
+    font-size: 0.95em;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+:global([data-theme='dark']) .tooltip {
+  border-color: var(--border-color);
+  background: var(--floating-surface);
+  color: var(--text-primary);
+}
+
+/* 由触发器一侧滑入 4px：在上方时自下而上，在下方时自上而下。 */
+@keyframes tooltip-in-top {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+}
+
+@keyframes tooltip-in-bottom {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0);
+  }
+}
+
+@keyframes tooltip-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---------- InfoTip 按钮 ---------- */
+
+/* 安静：14px 图标、静止时第三级文字色；悬停/聚焦/打开时转为主文字色。
+   自带 0.35em 前导间距与按字号换算的垂直对齐（图标中心落在约 0.36em 处，
+   即文字的视觉中线），负的上下外边距让它不撑高所在行。 */
+.infoTip {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin: -2px 0 -2px 0.35em;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  line-height: 0;
+  vertical-align: calc(0.36em - 8px);
+  cursor: help;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  /* 命中区扩到约 26×28px（触屏可点），左侧少扩一点，不抢标签文字的点击。 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -6px -6px -6px -4px;
+    border-radius: 999px;
+  }
+
+  svg {
+    display: block;
+    flex: 0 0 auto;
+  }
+
+  &[data-state='open'] {
+    color: var(--text-primary);
+  }
+
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible {
+    color: var(--text-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-primary) 40%, transparent);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .infoTip:hover {
+    color: var(--text-primary);
+  }
+}
+
+/* ---------- 无障碍 ---------- */
+
+/* 减少动效：保留淡入，去掉位移。 */
+@media (prefers-reduced-motion: reduce) {
+  .tooltip[data-placement] {
+    animation-name: tooltip-fade;
+  }
+
+  .tooltip[data-instant] {
+    animation: none;
+  }
+
+  .infoTip {
+    transition: none;
+  }
+}

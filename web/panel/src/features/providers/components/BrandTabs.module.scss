@@ -1,0 +1,247 @@
+@use '../../../styles/mixins' as *;
+
+/* 品牌分段：安静的下划线式 tabs，与认证文件页 ProviderTabs 同配方。
+   高频切换，不做入场动画；只有颜色与下划线随状态过渡。 */
+
+.bar {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  /* 压住外层底线，让激活下划线与发丝线重合 */
+  margin-bottom: -1px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  --fade-start: 0px;
+  --fade-end: 0px;
+  /* 边缘渐隐只出现在确有品牌被遮住的一侧，不画硬分隔 */
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start),
+    #000 calc(100% - var(--fade-end)),
+    transparent
+  );
+
+  &[data-overflow-start] {
+    --fade-start: 32px;
+  }
+
+  &[data-overflow-end] {
+    --fade-end: 32px;
+  }
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 8px 11px 11px;
+  border-radius: 8px 8px 0 0;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong);
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: 0;
+    height: 2px;
+    border-radius: $radius-full;
+    background: transparent;
+    transition: background-color var(--dur-hover) var(--ease-out-strong);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tab:hover:not(.tabActive) {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  }
+}
+
+.tabActive {
+  color: var(--text-primary);
+  font-weight: 650;
+
+  &::after {
+    background: var(--text-primary);
+  }
+}
+
+.label {
+  line-height: 1.4;
+}
+
+.count {
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  min-width: 18px;
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 0 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+
+  .tabActive & {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  }
+}
+
+/* 合作方分组：发丝线 + mono 小标，与常规品牌分开 */
+.divider {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  align-self: center;
+  height: 18px;
+  margin: 0 4px 3px 6px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-color);
+  font-family: $font-mono;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber-text);
+  white-space: nowrap;
+}
+
+/* ---------- 快速接入邀请：右端常驻，品牌头像叠放 ---------- */
+
+.partners {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  margin: 3px 0 6px auto;
+  padding: 0 5px 0 12px;
+  border: 1px solid color-mix(in srgb, var(--amber-color) 26%, var(--border-color));
+  border-radius: $radius-full;
+  background:
+    radial-gradient(
+      140% 160% at 0% 0%,
+      color-mix(in srgb, var(--amber-color) 10%, transparent),
+      transparent 70%
+    ),
+    var(--bg-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color var(--dur-hover) var(--ease-out-strong),
+    box-shadow var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+.partnersLabel {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--amber-text);
+}
+
+.partnersStack {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 头像叠放：每个标带一圈页面底色的描边，读作一组而不是一排图标 */
+.partnersStack .partnerLogo {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 0 0 2px var(--bg-primary);
+  border-radius: 50%;
+
+  img {
+    width: 60%;
+    height: 60%;
+  }
+
+  & + .partnerLogo {
+    margin-left: -4px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .partners:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--amber-color) 45%, var(--border-color));
+    box-shadow: 0 6px 16px color-mix(in srgb, var(--amber-color) 14%, transparent);
+  }
+}
+
+@include mobile {
+  .bar {
+    flex-wrap: wrap;
+  }
+
+  .strip {
+    flex-basis: 100%;
+  }
+
+  .partners {
+    margin-top: 8px;
+    height: 32px;
+  }
+
+  .partners {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .tab::after,
+  .partners {
+    transition: none;
+  }
+
+  .partners:active:not(:disabled) {
+    transform: none;
+  }
+}

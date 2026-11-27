@@ -183,6 +183,9 @@ func (e *Engine) handleUsage(c *gin.Context, path string) bool {
 	case path == "/sink" && c.Request.Method == http.MethodGet:
 		c.JSON(http.StatusOK, e.SinkStatus())
 		return true
+	case path == "/pool/chart" && c.Request.Method == http.MethodGet:
+		e.handlePoolChart(c)
+		return true
 	case path == "/pool" && c.Request.Method == http.MethodGet:
 		c.JSON(http.StatusOK, gin.H{"now": e.now(), "providers": e.Pool()})
 		return true
@@ -222,7 +225,13 @@ func (e *Engine) handleUsage(c *gin.Context, path string) bool {
 			v := float64(total.Tokens.CacheRead) / float64(in)
 			cacheShare = &v
 		}
-		c.JSON(http.StatusOK, gin.H{"now": now, "range": span.String(), "step": strconv.FormatInt(int64(step/time.Second), 10), "rows": rows, "total": total, "cache_read_share": cacheShare})
+		labels := map[string]string{}
+		for _, r := range rows {
+			if r.AuthID != "" {
+				labels[r.AuthID] = e.accountLabel(r.AuthID)
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"now": now, "range": span.String(), "step": strconv.FormatInt(int64(step/time.Second), 10), "rows": rows, "total": total, "cache_read_share": cacheShare, "labels": labels})
 		return true
 	}
 	return false

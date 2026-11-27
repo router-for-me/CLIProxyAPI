@@ -1,0 +1,35 @@
+/* 抽屉标题：品牌标 + 「模式 / 品牌」两级文字，代替「模式 · 品牌」的单行拼接 */
+
+.sheetTitle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sheetTitleText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.sheetTitleMode {
+  font-family: $font-mono;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.deleteConnection {
+  margin-inline-end: auto;
+  color: var(--danger-color);
+  background: transparent;
+  border: 1px solid var(--border-color);
+}

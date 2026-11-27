@@ -1,0 +1,234 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * SIWC 绑定对话框的专属部件：凭证选择 + 锁定摘要。
+ * 壳层、步骤、按钮、状态条全部复用 OAuthFlowDialog.module.scss。
+ * ============================================================ */
+
+/* ---------- 凭证选择 ---------- */
+
+.picker {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.legend {
+  margin-bottom: 8px;
+  padding: 0;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* 一组行共用一个圆角容器，行间细分隔线：比一摞独立卡片更安静 */
+.options {
+  display: flex;
+  flex-direction: column;
+  max-height: 264px;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  overscroll-behavior: contain;
+}
+
+.option {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 9px 14px;
+  cursor: pointer;
+  transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  & + & {
+    border-top: 1px solid var(--border-color);
+  }
+
+  &[data-checked] {
+    background: var(--bg-secondary);
+  }
+
+  &:has(.radioInput:focus-visible) {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+    border-radius: 12px;
+  }
+}
+
+/* 视觉隐藏但保留原生 radio 的键盘与读屏语义 */
+.radioInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.radio {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-primary);
+  background: var(--bg-primary);
+  transition: border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    opacity: 0;
+    transform: scale(0.5);
+    transition:
+      opacity var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+      transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+  }
+}
+
+.option[data-checked] .radio {
+  border-color: var(--text-primary);
+
+  &::after {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.optionText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.optionName {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+.optionNameMono {
+  font-family: $font-mono;
+  font-size: 12.5px;
+  letter-spacing: -0.01em;
+}
+
+.optionMeta {
+  font-family: $font-mono;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  @include text-ellipsis;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .option:not([data-checked]):hover {
+    background: color-mix(in srgb, var(--bg-secondary) 60%, var(--bg-primary));
+  }
+
+  .option:hover .radio {
+    border-color: var(--border-hover);
+  }
+
+  .option[data-checked]:hover .radio {
+    border-color: var(--text-primary);
+  }
+}
+
+/* ---------- 加载 / 空态 ---------- */
+
+.skeletonRow {
+  display: block;
+  height: 52px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-secondary) 0%,
+    color-mix(in srgb, var(--bg-tertiary) 50%, var(--bg-secondary)) 50%,
+    var(--bg-secondary) 100%
+  );
+  background-size: 200% 100%;
+  animation: siwc-skeleton 1.2s linear infinite;
+
+  & + & {
+    border-top: 1px solid var(--border-color);
+  }
+}
+
+@keyframes siwc-skeleton {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+.empty {
+  margin: 0;
+  padding: 18px 16px;
+  border-radius: 12px;
+  border: 1px dashed var(--border-color);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+/* ---------- 锁定摘要 ---------- */
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.summaryLabel {
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.summaryName {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonRow {
+    animation: none;
+  }
+
+  .option,
+  .radio,
+  .radio::after {
+    transition: none;
+  }
+}

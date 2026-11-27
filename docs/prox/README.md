@@ -162,17 +162,26 @@ code is included.
 
 ## Dashboard
 
-Pages: Overview (pooled headroom per provider, next-session account, Claude/Codex
-accounts, monitored Kimi/Grok accounts), Accounts & Quotas, Sessions, Activity
-(decision explorer), Cost & Tokens (API-equivalent cost and tokens by model,
-account, client, provider), Routing Usage (affinity, failovers), Ignition &
-Alerts (ignition plans and events, notification log, ClickHouse status), and
-Settings.
+The dashboard is the CLIProxyAPI Management Center (vendored in `web/panel`,
+MIT) with prox additions, embedded in the binary and served at
+`http://<host>:8317/management.html`. Log in with the management key.
 
-Open `http://<host>:8317/prox/ui/index.html` and enter the management key
-(`remote-management.secret-key`). The JSON API is under `/prox/api/*` and
-requires the same key. Settings saved from the dashboard go through
-`PATCH /v0/management/plugins/prox/config` and apply via hot reload.
+- **Quota Management** gains a live strip (routing mode, next-session account
+  per provider, traffic, cache-read share, burn, cost today), a pooled card
+  per provider on the All tab, and on a provider tab a pool chart: recorded
+  pool up to now, projected pool after it (last-24h burn, a full window after
+  each reset), the gain each reset returns, pool empty, first account empty,
+  next reset, burn over the last 3 hours, and a drain-rate view. Each account
+  counts 100%.
+- A **Ledger** view (default) shows one row per credential, grouped by
+  provider and sorted by soonest recovery, with unused windows muted. The
+  upstream card layouts are still under View > Cards.
+- New pages: **Scheduler** (next pick and why, live decisions, sticky
+  sessions), **Cost & Tokens**, and **Ignition & Alerts**.
+
+Set `PROX_PANEL=upstream` to serve CPA's downloaded panel instead. The JSON
+API is under `/prox/api/*` with the same key (`GET /prox/api/pool/chart?window=weekly|five_hour`
+returns the chart data).
 
 ## How it plugs in
 
@@ -191,13 +200,19 @@ Upstream files touched (each marked `// prox:`):
 |---|---|
 | `sdk/cliproxy/service_plugins.go` | apply prox config, wrap the plugin scheduler |
 | `sdk/cliproxy/service_lifecycle.go` | flush prox state on shutdown |
-| `internal/api/server_management.go` | register `/prox` routes |
+| `internal/api/server_management.go` | register `/prox` routes, serve the embedded panel |
 
 ## Dashboard development
 
 ```sh
-cd web/prox
+cd web/panel
 bun install
-bun run dev     # proxies /prox/api to 127.0.0.1:8317
-bun run build   # writes internal/prox/mgmt/dist (embedded in the binary)
+bun run dev         # Vite dev server; log in against a running prox
+bun run build:prox  # writes internal/prox/panel/dist/management.html.gz
 ```
+
+prox code lives in `web/panel/src/prox/`; edits to upstream panel files are
+marked `prox:`. `web/panel/UPSTREAM` records the vendored Management Center
+commit. A demo with synthetic data:
+`go test -tags proxdemo -run TestDemoServer -timeout 0 ./internal/prox/engine`,
+then open `http://127.0.0.1:18420/management.html` with any key.

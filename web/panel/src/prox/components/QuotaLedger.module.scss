@@ -1,0 +1,69 @@
+.ledger {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.group {
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.groupHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.groupName {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.groupCount {
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+.groupPool {
+  margin-left: 10px;
+  font-size: 14px;
+  color: var(--text-secondary);
+
+  strong {
+    color: var(--text-primary);
+    font-weight: 650;
+  }
+}
+
+.groupReset {
+  font-size: 14px;
+  color: var(--text-tertiary);
+}
+
+.collapse {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+
+  &[aria-expanded='true'] svg {
+    transform: rotate(180deg);
+  }
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+}

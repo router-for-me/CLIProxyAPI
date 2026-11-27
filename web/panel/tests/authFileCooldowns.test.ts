@@ -1,0 +1,272 @@
+import { describe, expect, spyOn, test } from 'bun:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import i18n from '../src/i18n/index';
+import { authFilesApi, normalizeAuthFilesResponse } from '../src/services/api/authFiles';
+import { normalizeAuthFileCooldowns } from '../src/services/api/authFileCooldowns';
+import { apiClient } from '../src/services/api/client';
+import {
+  cooldownReasonKey,
+  cooldownRemainingSeconds,
+  summarizeCooldowns,
+} from '../src/features/authFiles/cooldowns';
+import { AuthFileCooldownSection } from '../src/features/authFiles/components/AuthFileCooldownSection';
+import type { AuthFileCooldownSnapshot, AuthFilesResponse } from '../src/types/authFile';
+
+const observedAt = '2026-07-17T10:00:00.000Z';
+const receivedAtMs = Date.now();
+const modelRecord = {
+  scope: 'model',
+  model_key: 'model-a',
+  reason: 'quota',
+  retry_at: '2026-07-17T10:00:32Z',
+  remaining_seconds: 32,
+  backoff_level: 6,
+  http_status: 429,
+};
+const normalize = (value: unknown) => normalizeAuthFileCooldowns(value, observedAt, receivedAtMs);
+const snapshot = normalize([modelRecord])!;
+const record = snapshot.records![0];
+const render = (
+  value?: AuthFileCooldownSnapshot,
+  options: { resetting?: boolean; resetDisabled?: boolean; onReset?: () => void } = {}
+) => renderToStaticMarkup(createElement(AuthFileCooldownSection, { snapshot: value, ...options }));
+
+function response(files: Record<string, unknown>[]): AuthFilesResponse {
+  return { observed_at: observedAt, files } as unknown as AuthFilesResponse;
+}
+
+describe('cooldown API normalization', () => {
+  test('posts the auth index as a raw v8 operation payload', async () => {
+    const post = spyOn(apiClient, 'post').mockResolvedValue({
+      status: 'ok',
+      auth_index: 'auth-index-1',
+      models: ['model-a'],
+    });
+    try {
+      expect(await authFilesApi.resetCooldown('auth-index-1')).toEqual({
+        status: 'ok',
+        auth_index: 'auth-index-1',
+        models: ['model-a'],
+      });
+      expect(post).toHaveBeenCalledWith('/routing/cooldown/reset', {
+        auth_index: 'auth-index-1',
+      });
+    } finally {
+      post.mockRestore();
+    }
+  });
+
+  test('distinguishes old servers, unknown state, and known empty state', () => {
+    expect(normalize(undefined)).toBeUndefined();
+    expect(normalize(null)?.records).toBeNull();
+    expect(normalize([])?.records).toEqual([]);
+  });
+
+  test('normalizes model fields, diagnostic zero, and response observation time', () => {
+    const result = normalizeAuthFilesResponse(
+      response([{ name: 'a.json', cooldowns: [{ ...modelRecord, backoff_level: 0 }] }]),
+      receivedAtMs
+    );
+    expect(result.observedAt).toBe(observedAt);
+    expect(result.files[0].cooldownSnapshot).toEqual({
+      observedAt,
+      receivedAtMs,
+      records: [{ ...record, backoffLevel: 0 }],
+    });
+    expect(record).toEqual({
+      scope: 'model',
+      modelKey: 'model-a',
+      reason: 'quota',
+      retryAt: '2026-07-17T10:00:32.000Z',
+      remainingSeconds: 32,
+      backoffLevel: 6,
+      httpStatus: 429,
+    });
+  });
+
+  test('preserves credential and model restrictions without fabricating diagnostics', () => {
+    const result = normalize([
+      {
+        scope: 'credential',
+        reason: 'credential_quota',
+        retry_at: modelRecord.retry_at,
+        remaining_seconds: 10,
+      },
+      modelRecord,
+    ])!;
+    expect(result.records).toHaveLength(2);
+    expect(result.records![0].modelKey).toBeUndefined();
+    expect(result.records![0].httpStatus).toBeUndefined();
+    expect(result.records![0].backoffLevel).toBeUndefined();
+    expect(summarizeCooldowns(result, receivedAtMs)).toMatchObject({
+      modelCount: 1,
+      credentialWide: true,
+      earliestSeconds: 10,
+    });
+    expect(summarizeCooldowns(result, receivedAtMs + 11_000)).toMatchObject({
+      modelCount: 1,
+      credentialWide: false,
+      earliestSeconds: 21,
+    });
+  });
+
+  test('treats malformed records as unknown rather than known empty', () => {
+    for (const value of [
+      {},
+      'invalid',
+      [null],
+      [{ ...modelRecord, scope: 'future' }],
+      [{ ...modelRecord, model_key: '' }],
+      [{ ...modelRecord, retry_at: 'invalid' }],
+      [{ ...modelRecord, remaining_seconds: 0 }],
+      [{ ...modelRecord, remaining_seconds: -1 }],
+      [{ ...modelRecord, remaining_seconds: 1.5 }],
+      [{ ...modelRecord, remaining_seconds: Infinity }],
+      [modelRecord, { ...modelRecord, scope: 'future' }],
+    ]) {
+      expect(normalize(value)?.records).toBeNull();
+    }
+    const diagnostics = normalize([{ ...modelRecord, backoff_level: -1, http_status: 200 }]);
+    expect(diagnostics?.records?.[0].backoffLevel).toBeUndefined();
+    expect(diagnostics?.records?.[0].httpStatus).toBeUndefined();
+  });
+
+  test('duplicate merging does not replace [] or null with a stale restriction', () => {
+    for (const cooldowns of [[], null]) {
+      const result = normalizeAuthFilesResponse(
+        response([
+          { name: 'a.json', source: 'file', path: '/synthetic/a.json', cooldowns },
+          { name: 'a.json', source: 'memory', cooldowns: [modelRecord] },
+        ]),
+        receivedAtMs
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].cooldownSnapshot?.records).toEqual(cooldowns);
+    }
+  });
+
+  test('tolerates missing/invalid observed_at without inventing a server time', () => {
+    const result = normalizeAuthFilesResponse(
+      {
+        observed_at: 'bad-date',
+        files: [{ name: 'a.json', cooldowns: [modelRecord] }],
+      },
+      receivedAtMs
+    );
+    expect(result.observedAt).toBeUndefined();
+    expect(result.files[0].cooldownSnapshot?.records).toHaveLength(1);
+  });
+});
+
+describe('cooldown timer semantics', () => {
+  test('uses receipt-relative seconds even with server/client clock skew', () => {
+    expect(cooldownRemainingSeconds(record, receivedAtMs, receivedAtMs)).toBe(32);
+    expect(cooldownRemainingSeconds(record, receivedAtMs, receivedAtMs + 1_001)).toBe(31);
+    expect(cooldownRemainingSeconds(record, receivedAtMs, receivedAtMs - 5_000)).toBe(32);
+    expect(cooldownRemainingSeconds(record, receivedAtMs, receivedAtMs + 32_000)).toBe(0);
+    expect(cooldownRemainingSeconds(record, receivedAtMs, receivedAtMs + 100_000)).toBe(0);
+    expect(
+      cooldownRemainingSeconds({ ...record, backoffLevel: 100 }, receivedAtMs, receivedAtMs)
+    ).toBe(32);
+  });
+
+  test('keeps expired rows for confirmation instead of claiming recovery', () => {
+    const result = summarizeCooldowns(snapshot, receivedAtMs + 33_000);
+    expect(result).toMatchObject({ modelCount: 0, credentialWide: false, earliestSeconds: 0 });
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].remainingSeconds).toBe(0);
+  });
+
+  test('new snapshots replace, rather than retain, prior timers', () => {
+    const first = normalizeAuthFilesResponse(
+      response([{ name: 'a.json', cooldowns: [modelRecord] }]),
+      receivedAtMs
+    );
+    const cleared = normalizeAuthFilesResponse(
+      response([{ name: 'a.json', cooldowns: [] }]),
+      receivedAtMs + 1000
+    );
+    expect(first.files[0].cooldownSnapshot?.records).toHaveLength(1);
+    expect(cleared.files[0].cooldownSnapshot?.records).toEqual([]);
+  });
+
+  test('future reason codes use a generic label, never a dynamic translation path', () => {
+    expect(normalize([{ ...modelRecord, reason: 'future_reason' }])?.records?.[0].reason).toBe(
+      'future_reason'
+    );
+    for (const reason of ['future_reason', '__proto__', 'constructor', '<script>']) {
+      expect(cooldownReasonKey(reason)).toBe('auth_files.cooldown_reason_unknown');
+    }
+  });
+});
+
+describe('cooldown section rendering', () => {
+  test('does not add a panel for old servers or known-empty state', () => {
+    expect(render()).toBe('');
+    expect(render(normalize([]))).toBe('');
+    expect(render(normalize(null))).toContain(i18n.t('auth_files.cooldown_unknown'));
+  });
+
+  test('offers native keyboard-accessible disclosure with scope, reason and deadline', () => {
+    const markup = render(snapshot);
+    expect(markup).toContain('<details');
+    expect(markup).toContain('<summary');
+    expect(markup).not.toContain(' open=""');
+    expect(markup).toContain('model-a');
+    expect(markup).toContain(i18n.t('auth_files.cooldown_reason_quota'));
+    expect(markup).toContain('429');
+    expect(markup).toContain('dateTime="2026-07-17T10:00:32.000Z"');
+  });
+
+  test('carries the interpretation caveat in an InfoTip on the snapshot line, not a paragraph', () => {
+    const note = Bun.escapeHTML(i18n.t('auth_files.cooldown_note'));
+    const markup = render(snapshot);
+    const button = markup.match(/<button\b[^>]*data-info-tip=""[^>]*>/)?.[0];
+    expect(button).toBeDefined();
+    // Named after the snapshot label it sits beside, and described by a hidden copy of the note.
+    expect(button).toContain(
+      Bun.escapeHTML(
+        i18n.t('common.more_info_about', { label: i18n.t('auth_files.cooldown_observed') })
+      )
+    );
+    const describedBy = button!.match(/aria-describedby="([^"]+)"/)?.[1];
+    expect(markup).toContain(`<span id="${describedBy}" hidden="">${note}</span>`);
+    // The note text appears only in that hidden copy.
+    expect(markup.split(note)).toHaveLength(2);
+    // The tip sits on the snapshot line, after the observed timestamp.
+    const snapshotLine = markup.slice(markup.indexOf(i18n.t('auth_files.cooldown_observed')));
+    expect(snapshotLine.indexOf(`dateTime="${observedAt}"`)).toBeLessThan(
+      snapshotLine.indexOf('data-info-tip')
+    );
+
+    // Without a snapshot time the caveat stays reachable through a generically named tip.
+    const untimed = render({ ...snapshot, observedAt: undefined });
+    expect(untimed).not.toContain(i18n.t('auth_files.cooldown_observed'));
+    expect(untimed).toContain('data-info-tip=""');
+    expect(untimed).toContain(`aria-label="${Bun.escapeHTML(i18n.t('common.more_info'))}"`);
+    expect(untimed).toContain(note);
+  });
+
+  test('keeps the reset action contextual and exposes pending state', () => {
+    expect(render(snapshot)).not.toContain(i18n.t('auth_files.cooldown_reset_button'));
+
+    const available = render(snapshot, { onReset: () => {} });
+    expect(available).toContain(i18n.t('auth_files.cooldown_reset_button'));
+    expect(available).toContain(Bun.escapeHTML(i18n.t('auth_files.cooldown_reset_hint')));
+    expect(available).not.toContain('disabled=""');
+
+    const pending = render(snapshot, { onReset: () => {}, resetting: true });
+    expect(pending).toContain('disabled=""');
+    expect(pending).toContain('loading-spinner');
+  });
+
+  test('shows elapsed / refresh confirmation and safely escapes model keys', () => {
+    const expired = { ...snapshot, receivedAtMs: receivedAtMs - 100_000 };
+    expect(render(expired)).toContain(i18n.t('auth_files.cooldown_elapsed'));
+    expect(render(expired)).toContain(i18n.t('auth_files.cooldown_refresh_hint'));
+    const markup = render(normalize([{ ...modelRecord, model_key: '<script>example</script>' }]));
+    expect(markup).not.toContain('<script>');
+    expect(markup).toContain('&lt;script&gt;');
+  });
+});

@@ -1,0 +1,211 @@
+/* Codex "use credits after the usage limit": card row state/action and dialog body.
+ * The state badge mirrors QuotaBody's Claude extra-usage badge so both overage
+ * settings read alike; tones only separate "unknown" and "spending" from neutral. */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text-primary);
+  white-space: nowrap;
+
+  // Unknown is the honest default and stays quieter than any confirmed state.
+  &[data-state='unknown'],
+  &[data-state='writing'] {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-color);
+    color: var(--text-tertiary);
+  }
+
+  // Allowed means the account may spend credits; unconfirmed needs another look.
+  &[data-state='allowed'],
+  &[data-state='unconfirmed'] {
+    background: var(--warning-bg);
+    color: color-mix(in srgb, var(--warning-text) 70%, var(--text-primary));
+  }
+}
+
+.confirmedAt {
+  font-family: $font-mono;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* Same quiet outline-pill family as the card footer actions, one size down. */
+.manage {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-full;
+  background: none;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    transform var(--dur-press) var(--ease-out-strong),
+    border-color var(--dur-hover) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    color var(--dur-hover) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .manage:hover:not(:disabled) {
+    border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+    color: var(--text-primary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .manage {
+    transition: none;
+  }
+
+  .manage:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* ---------- dialog ---------- */
+
+.facts {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 $spacing-md;
+}
+
+.fact {
+  display: grid;
+  grid-template-columns: minmax(7em, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+
+  dt {
+    color: var(--text-tertiary);
+  }
+
+  dd {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    min-width: 0;
+    margin: 0;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+}
+
+.intro {
+  margin: 0 0 $spacing-sm;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+/* Scope is part of the decision; reserve the feedback panel for an actual outcome. */
+.scope {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  margin-top: $spacing-md;
+  color-scheme: light;
+
+  :global([data-theme='dark']) & {
+    color-scheme: dark;
+  }
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  min-height: 36px;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+
+  input {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--primary-color);
+    cursor: inherit;
+  }
+
+  input:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 3px;
+  }
+
+  &:has(input:disabled) {
+    cursor: not-allowed;
+    color: var(--text-secondary);
+  }
+}
+
+.feedback {
+  margin-top: $spacing-md;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+
+  p {
+    margin: 0;
+  }
+
+  p + p {
+    margin-top: $spacing-sm;
+  }
+
+  &[data-tone='error'] {
+    border: 1px solid color-mix(in srgb, var(--viz-failure) 28%, transparent);
+    background: color-mix(in srgb, var(--viz-failure) 8%, transparent);
+    color: color-mix(in srgb, var(--viz-failure) 82%, var(--text-primary));
+  }
+
+  &[data-tone='warning'] {
+    border: 1px solid var(--warning-border);
+    background: var(--warning-bg);
+    color: color-mix(in srgb, var(--warning-text) 70%, var(--text-primary));
+  }
+}
