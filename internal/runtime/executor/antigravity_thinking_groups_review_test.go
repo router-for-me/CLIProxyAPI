@@ -658,6 +658,172 @@ func drainThinkingGroupUsage(t *testing.T, capture *antigravityUsageCapture) []u
 	}
 }
 
+func TestAntigravityThinkingGroupsReviewRefreshReselectsChangedPrefix(t *testing.T) {
+	for _, mode := range []string{"generate", "stream", "count"} {
+		for _, tc := range []struct {
+			name          string
+			initialPrefix string
+			prefix        string
+			excluded      string
+			wantLow       bool
+			wantExcluded  bool
+			direct        bool
+		}{
+			{name: "exact exclusion", prefix: "team", excluded: "team/gemini-review-low"},
+			{name: "wildcard exclusion", prefix: "team", excluded: "team/gemini-review-l*"},
+			{name: "normalized prefix", prefix: " /TEAM/ ", excluded: "team/gemini-review-low"},
+			{name: "different prefix remains allowed", prefix: "another", excluded: "team/gemini-review-low", wantLow: true},
+			{name: "allowed target despite excluded source", prefix: "team", excluded: "team/gemini-review-high", wantLow: true},
+			{name: "published prefix changes", initialPrefix: "team", prefix: "team/", excluded: "team//gemini-review-low"},
+			{name: "whole group excluded", prefix: "team", excluded: "team/gemini-review-*", wantExcluded: true},
+			{name: "whole credential excluded", prefix: "team", excluded: "team/*", wantExcluded: true},
+			{name: "whole published group excluded", initialPrefix: "team", prefix: "team/", excluded: "team//gemini-review-*", wantExcluded: true},
+			{name: "direct model excluded", prefix: "team", excluded: "team/gemini-review-high", direct: true, wantExcluded: true},
+		} {
+			if mode != "generate" && !tc.wantExcluded {
+				continue
+			}
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				client := newFakeAntigravityKVClient()
+				useFakeAntigravityKVClient(t, client, true, nil)
+				cfg := &config.Config{}
+				manager := cliproxyauth.NewManager(nil, nil, nil)
+				manager.SetConfig(cfg)
+				manager.SetRetryConfig(0, 0, 1)
+				manager.RegisterExecutor(NewAntigravityExecutor(cfg))
+				auth := newIssue7865TestAuth(t.Name())
+				auth.Prefix = tc.initialPrefix
+				if auth.Prefix == "" {
+					auth.Prefix = "other"
+				}
+				auth.Attributes = map[string]string{"excluded_models": tc.excluded}
+				auth.Metadata["expired"] = time.Now().Add(time.Minute).Format(time.RFC3339)
+				registered, errRegister := manager.Register(t.Context(), auth)
+				if errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				if !manager.StoreAntigravityModelCatalog(t.Context(), registered,
+					map[string]string{reviewHigh: "HIGH_ENUM", reviewLow: "LOW_ENUM"},
+					map[string]map[string]int{reviewGroup: {"low": 50000, "high": 60000}},
+					map[string]bool{reviewLow: true},
+				) {
+					t.Fatal("failed to publish local catalog")
+				}
+				reg := registry.GetGlobalRegistry()
+				reg.RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: reviewHigh}, {ID: reviewLow}})
+				t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+				capture := &antigravityUsageCapture{authID: auth.ID, records: make(chan usage.Record, 8)}
+				usage.RegisterNamedPlugin(t.Name(), capture)
+				t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), antigravityUsageNoop{}) })
+				var upstream ojson.Result
+				ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					raw, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						return nil, errRead
+					}
+					upstream = ojson.ParseBytes(raw)
+					if r.URL.Path != antigravityGeneratePath {
+						return nil, errors.New("unexpected request path: " + r.URL.Path)
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}`)),
+					}, nil
+				}))
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatClaude,
+					Stream:       mode == "stream",
+					RequestAfterAuthInterceptor: func(callCtx context.Context, _ cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+						updated := registered.Clone()
+						updated.Prefix = tc.prefix
+						updated.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+						if _, errUpdate := manager.Update(callCtx, updated); errUpdate != nil {
+							t.Fatal(errUpdate)
+						}
+						if antigravitySignatureCacheScope(registered) != antigravitySignatureCacheScope(updated) {
+							t.Fatal("prefix update unexpectedly changed the signature scope")
+						}
+						return cliproxyexecutor.RequestAfterAuthInterceptResponse{}
+					},
+				}
+				req := cliproxyexecutor.Request{
+					Model:   reviewHigh,
+					Payload: []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"web_search","type":"web_search_20250305"}]}`),
+				}
+				if tc.direct {
+					req.Payload = []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+				}
+				var errExecute error
+				switch mode {
+				case "stream":
+					var result *cliproxyexecutor.StreamResult
+					result, errExecute = manager.ExecuteStream(ctx, []string{"antigravity"}, req, opts)
+					if result != nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								errExecute = chunk.Err
+							}
+						}
+					}
+				case "count":
+					_, errExecute = manager.ExecuteCount(ctx, []string{"antigravity"}, req, opts)
+				default:
+					_, errExecute = manager.Execute(ctx, []string{"antigravity"}, req, opts)
+				}
+				if tc.wantExcluded {
+					var rejected *cliproxyauth.Error
+					if !errors.As(errExecute, &rejected) || rejected.HTTPStatus != http.StatusServiceUnavailable || !strings.Contains(rejected.Message, "excluded") {
+						t.Fatalf("excluded model returned %v, want an exclusion error", errExecute)
+					}
+					if upstream.Raw != "" {
+						t.Fatalf("excluded model was sent upstream: %s", upstream.Raw)
+					}
+					current, _ := manager.GetByID(auth.ID)
+					if current.Unavailable || len(current.ModelStates) != 0 {
+						t.Fatalf("exclusion generated credential or model cooldown: %+v", current.ModelStates)
+					}
+					if records := drainThinkingGroupUsage(t, capture); len(records) != 0 {
+						t.Fatalf("exclusion generated upstream usage: %+v", records)
+					}
+					return
+				}
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				model, enum, level, limit := reviewHigh, "HIGH_ENUM", "", int64(0)
+				if tc.wantLow {
+					// Search envelopes do not carry agent model enums.
+					model, enum, level, limit = reviewLow, "", "LOW", 50000
+				}
+				assertAntigravityThinkingGroupRequest(t, upstream, "model", model, enum, level, limit)
+				if gotSearch := upstream.Get("requestType").Str == "web_search"; gotSearch != tc.wantLow {
+					t.Errorf("web search = %v, want %v; body=%s", gotSearch, tc.wantLow, upstream.Raw)
+				}
+				if gotSearchTool := upstream.Get("request.tools.0.googleSearch").Exists(); gotSearchTool != tc.wantLow {
+					t.Errorf("search tool present = %v, want %v; body=%s", gotSearchTool, tc.wantLow, upstream.Raw)
+				}
+			})
+		}
+	}
+}
+
+func TestAntigravityThinkingGroupsReviewExcludedModelPrecedesRefresh(t *testing.T) {
+	auth := reviewThinkingGroupAuth(t)
+	auth.Prefix = "team/"
+	auth.Attributes["excluded_models"] = "team//*"
+	auth.Metadata["expired"] = time.Now().Add(-time.Hour).Format(time.RFC3339)
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("excluded model made an upstream request: %s", r.URL.Path)
+		return nil, errors.New("unexpected upstream request")
+	}))
+	req := cliproxyexecutor.Request{Model: reviewHigh, Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)}
+	_, errExecute := NewAntigravityExecutor(&config.Config{}).Execute(ctx, auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	var rejected *cliproxyauth.Error
+	if !errors.As(errExecute, &rejected) || rejected.Code != "model_excluded" {
+		t.Fatalf("expected exclusion before refresh, got %v", errExecute)
+	}
+}
+
 func TestAntigravityThinkingGroupsReviewRefreshReselectsChangedGrant(t *testing.T) {
 	client := newFakeAntigravityKVClient()
 	useFakeAntigravityKVClient(t, client, true, nil)

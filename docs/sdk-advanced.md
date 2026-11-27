@@ -129,6 +129,7 @@ The embedded server calls this automatically for built‑in providers; for custo
   core.SetRoundTripperProvider(myProvider) // returns transport per auth
   ```
 - For raw HTTP flows, implement `PrepareRequest` and/or call `Manager.InjectCredentials(req, authID)` to set headers.
+- Antigravity exclusions apply to the final upstream model, including a fallback selected after credential refresh. Matching accepts canonical IDs, the actual published credential-prefixed IDs, and the slash-trimmed prefix form. Existing published route names are preserved. Reuse compares case-folded, whitespace-trimmed prefixes without removing slashes, because slash changes can affect published-ID rules. A fully excluded selection is rejected without sending an upstream request or recording upstream usage or cooldown feedback.
 
 ## Testing Tips
 

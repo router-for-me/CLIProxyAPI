@@ -68,6 +68,81 @@ func TestRegisterModelsForAuth_CredentialExcludedModelsOverrideGlobal(t *testing
 	}
 }
 
+func TestApplyExcludedModels_MatchesCredentialPrefix(t *testing.T) {
+	for _, model := range []*ModelInfo{
+		{ID: "gpt-6-astra", SourceModelID: "gpt-6-astra"},
+		{ID: "public-alias", SourceModelID: "gpt-6-astra"},
+	} {
+		t.Run(model.ID, func(t *testing.T) {
+			for _, tc := range []struct {
+				name   string
+				rule   string
+				prefix string
+				want   int
+			}{
+				{name: "canonical rule", rule: "gpt-6-astra", prefix: "team", want: 0},
+				{name: "prefixed exact rule", rule: "team/gpt-6-astra", prefix: "team", want: 0},
+				{name: "prefixed wildcard rule", rule: "team/gpt-6-*", prefix: "team", want: 0},
+				{name: "published prefix", rule: "team//gpt-6-astra", prefix: "team/", want: 0},
+				{name: "normalized prefix", rule: "team/gpt-6-astra", prefix: " /TEAM/ ", want: 0},
+				{name: "published wildcard", rule: "team//*", prefix: "team/", want: 0},
+				{name: "different published prefix", rule: "team//gpt-6-astra", prefix: "team", want: 1},
+				{name: "different prefix", rule: "other/gpt-6-astra", prefix: "team", want: 1},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					got := applyExcludedModels([]*ModelInfo{model}, []string{tc.rule}, tc.prefix)
+					if len(got) != tc.want {
+						t.Fatalf("remaining models = %d, want %d", len(got), tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRegisterModelsForAuth_PrefixedCredentialExcludedModel(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-codex-prefixed-exclusion",
+		Provider: "codex",
+		Prefix:   "team",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"plan_type": "pro",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(t.Context(), auth)
+	if !registry.ClientSupportsModel(auth.ID, "gpt-6-astra") || !registry.ClientSupportsModel(auth.ID, "team/gpt-6-astra") {
+		t.Fatal("target model must be registered before applying exclusions")
+	}
+	var allowedID string
+	for _, model := range registry.GetModelsForClient(auth.ID) {
+		if model != nil && model.ID != "gpt-6-astra" && !strings.HasPrefix(model.ID, "team/") {
+			allowedID = model.ID
+			break
+		}
+	}
+	if allowedID == "" {
+		t.Fatal("expected another model to remain available")
+	}
+	auth.Attributes["excluded_models"] = "team/gpt-6-astra"
+	service.registerModelsForAuth(t.Context(), auth)
+	if registry.ClientSupportsModel(auth.ID, "gpt-6-astra") || registry.ClientSupportsModel(auth.ID, "team/gpt-6-astra") {
+		t.Fatal("excluded model was registered")
+	}
+	if !registry.ClientSupportsModel(auth.ID, allowedID) || !registry.ClientSupportsModel(auth.ID, "team/"+allowedID) {
+		t.Fatalf("excluding gpt-6-astra also removed allowed model %q", allowedID)
+	}
+}
+
 func TestRegisterModelsForAuth_MetaOAuthAliasAndExcludedModels(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{

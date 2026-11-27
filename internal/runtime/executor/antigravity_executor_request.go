@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
@@ -32,7 +33,7 @@ type antigravityPreparedRequest struct {
 	originalPayload    []byte
 	originalTranslated []byte
 	translated         []byte
-	cooldownRejected   bool
+	targetRejected     bool
 }
 
 func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string, stream, countTokens bool) (antigravityPreparedRequest, error) {
@@ -44,7 +45,7 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 	prepared := antigravityPreparedRequest{auth: auth}
 	useCredits := !countTokens && antigravityShouldBypassShortCooldown(ctx, e.cfg)
 	rejectCooldown := func(model string, err error) error {
-		prepared.cooldownRejected = true
+		prepared.targetRejected = true
 		if model != baseModel {
 			return cliproxyauth.RejectAntigravityTarget(err)
 		}
@@ -53,13 +54,21 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 	translate := func(credential *cliproxyauth.Auth) error {
 		translateCtx := cache.WithSignatureCacheScope(ctx, antigravitySignatureCacheScope(credential))
 		model := helps.SelectAntigravityRequestModel(translateCtx, e.cfg, credential, req.Model, baseModel, from.String(), source, countTokens)
+		if credential != nil && modelconfig.IsModelExcluded(model.ID, cliproxyauth.AntigravityExcludedModels(credential, e.cfg), credential.Prefix) {
+			prepared.targetRejected = true
+			return cliproxyauth.RejectAntigravityTarget(&cliproxyauth.Error{
+				Code:       "model_excluded",
+				Message:    "selected Antigravity model is excluded",
+				HTTPStatus: http.StatusServiceUnavailable,
+			})
+		}
 		if model.ID != baseModel {
 			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, credential, model.ID, time.Now(), useCredits); errCooldown != nil {
 				return rejectCooldown(model.ID, errCooldown)
 			}
 		} else if useCredits {
 			if errCooldown := cliproxyauth.CheckAntigravityDirectCreditsModel(ctx, credential, model.ID, time.Now()); errCooldown != nil {
-				prepared.cooldownRejected = true
+				prepared.targetRejected = true
 				return cliproxyauth.RejectAntigravityTarget(errCooldown)
 			}
 		}
@@ -106,7 +115,7 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 			}
 		} else if useCredits {
 			if errCooldown := cliproxyauth.CheckAntigravityDirectCreditsModel(ctx, updatedAuth, prepared.model.ID, time.Now()); errCooldown != nil {
-				prepared.cooldownRejected = true
+				prepared.targetRejected = true
 				return prepared, cliproxyauth.RejectAntigravityTarget(errCooldown)
 			}
 		}

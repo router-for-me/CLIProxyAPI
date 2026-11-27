@@ -58,7 +58,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	to := sdktranslator.FromString("antigravity")
 
 	prepared, errPrepare := e.prepareAntigravityRequest(ctx, auth, req, opts, baseModel, true, false)
-	if !prepared.cooldownRejected {
+	if !prepared.targetRejected {
 		defer reporter.TrackFailure(ctx, &err)
 	}
 	if errPrepare != nil {

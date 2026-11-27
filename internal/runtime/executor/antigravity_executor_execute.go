@@ -60,7 +60,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	to := sdktranslator.FromString("antigravity")
 
 	prepared, errPrepare := e.prepareAntigravityRequest(ctx, auth, req, opts, baseModel, false, false)
-	if !prepared.cooldownRejected {
+	if !prepared.targetRejected {
 		defer reporter.TrackFailure(ctx, &err)
 	}
 	if errPrepare != nil {
@@ -252,7 +252,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	to := sdktranslator.FromString("antigravity")
 
 	prepared, errPrepare := e.prepareAntigravityRequest(ctx, auth, req, opts, baseModel, true, false)
-	if !prepared.cooldownRejected {
+	if !prepared.targetRejected {
 		defer reporter.TrackFailure(ctx, &err)
 	}
 	if errPrepare != nil {
