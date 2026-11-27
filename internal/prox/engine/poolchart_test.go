@@ -80,3 +80,18 @@ func TestBuildPoolChartFirstEmpty(t *testing.T) {
 		t.Fatalf("pool empty = %v", c.PoolEmpty)
 	}
 }
+
+func TestBuildPoolChartPlanWeights(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	in := []chartInput{
+		{id: "a", label: "a", plan: "max_20x", weight: PlanWeight("claude", "max_20x"), remaining: 50, period: 7 * 24 * time.Hour},
+		{id: "b", label: "b", plan: "max_5x", weight: PlanWeight("claude", "max_5x"), remaining: 100, period: 7 * 24 * time.Hour},
+	}
+	c := buildPoolChart("claude", "weekly", in, now, spanFor("weekly"))
+	if c.Capacity != 125 || c.Current != 75 {
+		t.Fatalf("capacity/current = %v/%v, want 125/75", c.Capacity, c.Current)
+	}
+	if len(c.Weights) != 1 || c.Weights[0].Plan != "Max 5x" || c.Weights[0].Weight != 0.25 {
+		t.Fatalf("weights = %+v", c.Weights)
+	}
+}

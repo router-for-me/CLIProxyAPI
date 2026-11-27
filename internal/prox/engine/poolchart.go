@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +33,16 @@ type ChartAccount struct {
 	ResetsAt    *time.Time `json:"resets_at,omitempty"`
 	RatePerHour float64    `json:"rate_percent_per_hour"`
 	EmptyAt     *time.Time `json:"empty_at,omitempty"`
+	Plan        string     `json:"plan,omitempty"`
+	// Weight is the account's share of a full account in the pool (the
+	// provider's largest plan counts 1).
+	Weight float64 `json:"weight"`
+}
+
+// PlanWeightNote explains a weight below 1, e.g. Max 5x = 0.25x.
+type PlanWeightNote struct {
+	Plan   string  `json:"plan"`
+	Weight float64 `json:"weight"`
 }
 
 // FirstEmpty is the first account projected to run out before its reset.
@@ -41,29 +52,33 @@ type FirstEmpty struct {
 	At      time.Time `json:"at"`
 }
 
-// PoolChart is the recorded and projected pool of one provider window, where
-// every account counts 100%.
+// PoolChart is the recorded and projected pool of one provider window. Each
+// account counts 100% times its plan weight relative to the provider's
+// largest plan, so a Max 5x next to Max 20x accounts counts 25%.
 type PoolChart struct {
-	Provider   string         `json:"provider"`
-	Window     string         `json:"window"`
-	Now        time.Time      `json:"now"`
-	Capacity   float64        `json:"capacity_percent"`
-	Current    float64        `json:"current_percent"`
-	Accounts   []ChartAccount `json:"accounts"`
-	Recorded   []ChartPoint   `json:"recorded"`
-	Projected  []ChartPoint   `json:"projected"`
-	Events     []ChartEvent   `json:"events"`
-	Drain      []ChartPoint   `json:"drain"`
-	DrainPeak  float64        `json:"drain_peak_percent_per_hour"`
-	BurnLast3h float64        `json:"burn_last_3h_percent_per_hour"`
-	PoolEmpty  *time.Time     `json:"pool_empty_at,omitempty"`
-	Horizon    time.Time      `json:"horizon"`
-	FirstEmpty *FirstEmpty    `json:"first_empty,omitempty"`
-	NextReset  *ChartEvent    `json:"next_reset,omitempty"`
+	Provider   string           `json:"provider"`
+	Window     string           `json:"window"`
+	Now        time.Time        `json:"now"`
+	Capacity   float64          `json:"capacity_percent"`
+	Current    float64          `json:"current_percent"`
+	Accounts   []ChartAccount   `json:"accounts"`
+	Recorded   []ChartPoint     `json:"recorded"`
+	Projected  []ChartPoint     `json:"projected"`
+	Events     []ChartEvent     `json:"events"`
+	Drain      []ChartPoint     `json:"drain"`
+	DrainPeak  float64          `json:"drain_peak_percent_per_hour"`
+	BurnLast3h float64          `json:"burn_last_3h_percent_per_hour"`
+	PoolEmpty  *time.Time       `json:"pool_empty_at,omitempty"`
+	Horizon    time.Time        `json:"horizon"`
+	FirstEmpty *FirstEmpty      `json:"first_empty,omitempty"`
+	NextReset  *ChartEvent      `json:"next_reset,omitempty"`
+	Weights    []PlanWeightNote `json:"weights,omitempty"`
 }
 
 type chartInput struct {
 	id, label string
+	plan      string
+	weight    float64 // 0 means 1
 	remaining float64
 	resetsAt  *time.Time
 	period    time.Duration
@@ -125,7 +140,7 @@ func (e *Engine) PoolCharts(kind string) []PoolChart {
 			if label == "" {
 				label = a.Display
 			}
-			in := chartInput{id: a.ID, label: label, remaining: rem, period: windowPeriod(kind)}
+			in := chartInput{id: a.ID, label: label, plan: a.Plan, weight: PlanWeight(a.Provider, a.Plan), remaining: rem, period: windowPeriod(kind)}
 			if w.ResetsAt != nil && !w.Passed {
 				t := *w.ResetsAt
 				in.resetsAt = &t
@@ -209,17 +224,68 @@ func clampPct(v float64) float64 { return math.Max(0, math.Min(100, v)) }
 
 func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
+// planDisplay turns plan ids like "max_20x" into "Max 20x".
+func planDisplay(plan string) string {
+	words := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(strings.TrimSpace(plan)))
+	for i, w := range words {
+		if w != "" {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// normalizeWeights scales plan weights so the largest is 1 and lists the
+// plans that count less.
+func normalizeWeights(in []chartInput) []PlanWeightNote {
+	top := 0.0
+	for _, a := range in {
+		if a.weight <= 0 {
+			continue
+		}
+		top = math.Max(top, a.weight)
+	}
+	if top <= 0 {
+		for i := range in {
+			in[i].weight = 1
+		}
+		return nil
+	}
+	seen := map[string]bool{}
+	var notes []PlanWeightNote
+	for i := range in {
+		if in[i].weight <= 0 {
+			in[i].weight = top
+		}
+		in[i].weight /= top
+		if in[i].weight < 0.999 {
+			label := planDisplay(in[i].plan)
+			if label == "" {
+				label = "Unknown plan"
+			}
+			if !seen[label] {
+				seen[label] = true
+				notes = append(notes, PlanWeightNote{Plan: label, Weight: math.Round(in[i].weight*1000) / 1000})
+			}
+		}
+	}
+	sort.Slice(notes, func(i, j int) bool { return notes[i].Weight > notes[j].Weight })
+	return notes
+}
+
 func buildPoolChart(provider, kind string, in []chartInput, now time.Time, span chartSpan) PoolChart {
 	sort.Slice(in, func(i, j int) bool { return in[i].label < in[j].label })
-	c := PoolChart{Provider: provider, Window: kind, Now: now, Capacity: float64(100 * len(in)), Horizon: now.Add(span.ahead)}
+	c := PoolChart{Provider: provider, Window: kind, Now: now, Horizon: now.Add(span.ahead)}
+	c.Weights = normalizeWeights(in)
 	rates := make([]float64, len(in))
 	for i, a := range in {
-		c.Current += a.remaining
+		c.Capacity += 100 * a.weight
+		c.Current += a.remaining * a.weight
 		// Project with the last day's average so a short burst does not
 		// empty the pool on paper.
 		rates[i] = consumed(a.samples, now.Add(-24*time.Hour), now) / 24
-		c.BurnLast3h += consumed(a.samples, now.Add(-3*time.Hour), now) / 3
-		ca := ChartAccount{ID: a.id, Label: a.label, Remaining: round1(a.remaining), ResetsAt: a.resetsAt, RatePerHour: round1(rates[i])}
+		c.BurnLast3h += consumed(a.samples, now.Add(-3*time.Hour), now) / 3 * a.weight
+		ca := ChartAccount{ID: a.id, Label: a.label, Remaining: round1(a.remaining), ResetsAt: a.resetsAt, RatePerHour: round1(rates[i]), Plan: planDisplay(a.plan), Weight: math.Round(a.weight*1000) / 1000}
 		if rates[i] > 0 {
 			at := now.Add(time.Duration(a.remaining / rates[i] * float64(time.Hour)))
 			if a.resetsAt == nil || at.Before(*a.resetsAt) {
@@ -232,13 +298,14 @@ func buildPoolChart(provider, kind string, in []chartInput, now time.Time, span 
 		c.Accounts = append(c.Accounts, ca)
 	}
 	c.Current = round1(c.Current)
+	c.Capacity = round1(c.Capacity)
 	c.BurnLast3h = round1(c.BurnLast3h)
 
 	// Recorded: the pool at each step, then the live value at now.
 	for t := now.Add(-span.back).Truncate(span.step); t.Before(now); t = t.Add(span.step) {
 		var v float64
 		for _, a := range in {
-			v += remainingAt(a, t)
+			v += remainingAt(a, t) * a.weight
 		}
 		c.Recorded = append(c.Recorded, ChartPoint{At: t, Value: round1(v)})
 	}
@@ -253,7 +320,7 @@ func buildPoolChart(provider, kind string, in []chartInput, now time.Time, span 
 	for t := now; !t.After(c.Horizon); t = t.Add(span.step) {
 		var v float64
 		for i, a := range in {
-			v += projectedAt(a, rates[i], now, t)
+			v += projectedAt(a, rates[i], now, t) * a.weight
 		}
 		c.Projected = append(c.Projected, ChartPoint{At: t, Value: round1(v)})
 		if c.PoolEmpty == nil && len(in) > 0 && v < 0.5 {
@@ -267,7 +334,7 @@ func buildPoolChart(provider, kind string, in []chartInput, now time.Time, span 
 			continue
 		}
 		for r := *a.resetsAt; !r.After(c.Horizon); r = r.Add(a.period) {
-			if gain := 100 - projectedAt(a, rates[i], now, r.Add(-time.Second)); gain >= 0.5 {
+			if gain := (100 - projectedAt(a, rates[i], now, r.Add(-time.Second))) * a.weight; gain >= 0.5 {
 				future = append(future, ChartEvent{At: r, Gain: gain, Projected: true})
 			}
 			if a.period <= 0 {
@@ -299,7 +366,7 @@ func buildPoolChart(provider, kind string, in []chartInput, now time.Time, span 
 	for t := now.Add(-span.back).Truncate(drainStep); !t.After(now); t = t.Add(drainStep) {
 		var v float64
 		for _, a := range in {
-			v += consumed(a.samples, t.Add(-time.Hour), t)
+			v += consumed(a.samples, t.Add(-time.Hour), t) * a.weight
 		}
 		c.Drain = append(c.Drain, ChartPoint{At: t, Value: round1(v)})
 		c.DrainPeak = math.Max(c.DrainPeak, round1(v))

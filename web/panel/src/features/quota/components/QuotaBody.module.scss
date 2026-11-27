@@ -576,8 +576,7 @@
         transparent 72%
       )
       padding-box,
-    radial-gradient(48% 100% at 50% 58%, var(--jade-glow) 0%, transparent 72%)
-      padding-box,
+    radial-gradient(48% 100% at 50% 58%, var(--jade-glow) 0%, transparent 72%) padding-box,
     radial-gradient(64% 46% at 50% 112%, var(--jade-caustic) 0%, transparent 80%) padding-box,
     radial-gradient(14% 34% at 72% 36%, var(--jade-cotton) 0%, transparent 100%) padding-box,
     radial-gradient(10% 26% at 13% 68%, var(--jade-cotton) 0%, transparent 100%) padding-box,
@@ -816,5 +815,81 @@
     &::before {
       content: none;
     }
+  }
+}
+
+/* Ledger: limits first, then a compact "Manual resets" summary; no
+   extra-usage or credit-overage rows. */
+[data-quota-ledger] .quotaRow {
+  order: 1;
+}
+
+[data-quota-ledger] .quotaRow:has(.claudeExtraUsageTitle) {
+  display: none;
+}
+
+[data-quota-ledger] .codexResetCredits {
+  order: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+[data-quota-ledger] .codexResetCreditsTitle {
+  font-size: 0;
+
+  &::before {
+    content: 'Manual resets';
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+}
+
+[data-quota-ledger] .codexResetCredits::before {
+  content: attr(data-count) ' available';
+  order: 1;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+[data-quota-ledger] .codexResetCreditRow {
+  order: 2;
+  display: flex;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12.5px;
+  white-space: nowrap;
+
+  & ~ .codexResetCreditRow {
+    display: none;
+  }
+}
+
+[data-quota-ledger] .codexResetCreditTime {
+  display: inline-flex;
+  flex-direction: row-reverse;
+  gap: 0;
+
+  .quotaReset,
+  .quotaResetRelative {
+    grid-area: auto;
+    font-size: 12.5px;
+  }
+}
+
+[data-quota-ledger] .codexResetCreditLabel {
+  color: var(--text-tertiary);
+
+  &::after {
+    content: ' ·';
   }
 }

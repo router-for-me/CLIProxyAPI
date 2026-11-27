@@ -10,7 +10,16 @@ import { ProviderArtwork } from '@/components/common/ProviderArtwork';
 import { getAuthFileIcon } from '@/features/authFiles/constants';
 import { useThemeStore } from '@/stores';
 import { useProx } from '../api';
-import { pct, providerColor, providerLabel, relative, usd, when, WINDOW_LABELS } from '../format';
+import {
+  pct,
+  providerColor,
+  providerLabel,
+  relative,
+  usd,
+  weightNote,
+  when,
+  WINDOW_LABELS,
+} from '../format';
 import type { Overview, Pool, PoolChart as PoolChartData, PoolCharts, Usage } from '../types';
 import { DrainChart } from './DrainChart';
 import { PoolChart } from './PoolChart';
@@ -168,12 +177,16 @@ export function PoolSummary({
             <div className={styles.summaryValue}>
               <strong>{Math.round(c.current_percent)}%</strong>
               <span>of {Math.round(c.capacity_percent)}%</span>
+              {weightNote(c.weights) && (
+                <span className={styles.weightNote}>{weightNote(c.weights)}</span>
+              )}
             </div>
             <div className={styles.segments}>
               {accounts.map((a) => (
                 <span
                   key={a.id}
                   className={styles.segment}
+                  style={{ flexGrow: a.weight || 1 }}
                   title={`${a.label}: ${pct(a.remaining_percent)}`}
                 >
                   <span
@@ -260,6 +273,9 @@ export function PoolPanel({
           </strong>
           <span>
             {tab === 'drain' ? 'burn, last 3h' : `of ${Math.round(chart.capacity_percent)}%`}
+            {tab !== 'drain' && weightNote(chart.weights) && (
+              <em className={styles.weightNote}>{weightNote(chart.weights)}</em>
+            )}
           </span>
         </div>
         <dl className={styles.stats}>
@@ -344,7 +360,9 @@ export function PoolPanel({
               <i data-dashed="" style={{ borderColor: color }} /> Projected
             </span>
             <span className={styles.legendNote}>
-              Each account counts 100%. Projection uses the last 24h burn.
+              Each account counts 100% of its plan
+              {weightNote(chart.weights) ? ` (${weightNote(chart.weights)})` : ''}. Projection uses
+              the last 24h burn.
             </span>
           </div>
         </>

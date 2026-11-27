@@ -18,6 +18,8 @@ export interface ChartAccount {
   resets_at?: string;
   rate_percent_per_hour: number;
   empty_at?: string;
+  plan?: string;
+  weight: number;
 }
 
 export interface PoolChart {
@@ -37,6 +39,7 @@ export interface PoolChart {
   horizon: string;
   first_empty?: { account: string; label: string; at: string };
   next_reset?: ChartEvent;
+  weights?: { plan: string; weight: number }[] | null;
 }
 
 export interface PoolCharts {

@@ -408,7 +408,8 @@ export function QuotaPage() {
         {/* 提供商导航与搜索工具栏分层，避免不同控件争夺视觉焦点。 */}
         <div className={styles.tabsRow} data-reveal>
           <ProviderTabs
-            types={TAB_IDS}
+            // prox: hide providers with no credentials.
+            types={TAB_IDS.filter((id) => id === 'all' || id === tab || (tabCounts[id] ?? 0) > 0)}
             counts={tabCounts}
             active={tab}
             resolvedTheme={resolvedTheme}

@@ -160,7 +160,7 @@
 }
 
 .segment {
-  flex: 1;
+  flex: 1 1 0;
   height: 5px;
   border-radius: 3px;
   background: var(--bg-tertiary);
@@ -396,4 +396,11 @@
     border-right: 0;
     border-bottom: 1px solid var(--border-color);
   }
+}
+
+.weightNote {
+  font-size: 13px;
+  font-style: normal;
+  color: var(--text-tertiary);
+  white-space: nowrap;
 }

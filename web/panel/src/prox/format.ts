@@ -69,3 +69,7 @@ export function relative(iso: string | undefined | null, now = Date.now()): stri
   const label = `${n} ${u}${n === 1 || u === 'min' ? '' : 's'}`;
   return diff >= 0 ? `in ${label}` : `${label} ago`;
 }
+
+/** "Max 5x = 0.25x · Plus = 0.1x" for plans that count less than a full account. */
+export const weightNote = (weights?: { plan: string; weight: number }[] | null) =>
+  (weights ?? []).map((w) => `${w.plan} = ${+w.weight.toFixed(2)}x`).join(' · ');

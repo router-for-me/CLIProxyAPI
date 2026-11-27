@@ -127,7 +127,8 @@ export function CodexQuotaBody({
       )}
       {afterPlan}
       {rateLimitResetCredits.length > 0 ? (
-        <div className={classes.codexResetCredits}>
+        // prox: data-count feeds the ledger's "N available" summary.
+        <div className={classes.codexResetCredits} data-count={rateLimitResetCredits.length}>
           <div className={classes.codexResetCreditsTitle}>
             {t('codex_quota.reset_credits_expiry_label', { timezone: resolveTimeZoneLabel() })}
           </div>
