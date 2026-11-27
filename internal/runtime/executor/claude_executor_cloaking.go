@@ -3029,6 +3029,20 @@ func lastCacheableClaudeSystemIndex(system ojson.Result) int {
 	return lastEligible
 }
 
+// claudeNativeMainCacheTTL1h reports whether a confirmed native Claude Code
+// main-conversation request should be upgraded to the 1h cache. Claude Code picks
+// 1h itself only when logged in with a subscription; through the proxy it sees an
+// API key and picks 5m, although the upstream credential is a subscription. The
+// extended-cache-ttl beta is already sent for these requests. It uses the
+// detection itself, not the policy-promoted confirmation: only a confirmed
+// native client counts. Helper profiles (such as Haiku 5.5 Agent SDK helpers)
+// are not main conversations and may lack that beta, so they are excluded too.
+func claudeNativeMainCacheTTL1h(cfg *config.Config, fp claudeFingerprintPolicy, detection helps.ClaudeCodeRequestDetection, isSubagent, isProbeOrHelper bool) bool {
+	return cfg != nil && cfg.ClaudeCode.MainCacheTTL1h && fp.AuthIsOAuthToken &&
+		detection.Confirmed && detection.NativeClient && !detection.HelperProfile &&
+		!isSubagent && !isProbeOrHelper
+}
+
 // upgradeClaudeCacheControlTTL mirrors the native ttl upgrade helper, which only
 // touches blocks that already carry a cache_control without a ttl:
 //
@@ -3091,6 +3105,15 @@ func upgradeClaudeCacheControlTTLDoc(doc *ojson.Doc, ttl string) bool {
 		if scope := cacheControl.Get("scope"); scope.Exists() {
 			upgraded += `,"scope":` + scope.Raw
 		}
+		// Keep any other caller fields, such as evict_on_complete, after them.
+		cacheControl.ForEach(func(key, value ojson.Result) bool {
+			switch key.String() {
+			case "type", "ttl", "scope":
+			default:
+				upgraded += `,` + marshalJSONStringWithoutHTMLEscape(key.String()) + `:` + value.Raw
+			}
+			return true
+		})
 		upgraded += "}"
 		if errSet := doc.SetRawBytes(claudeCacheControlPath(path), []byte(upgraded)); errSet == nil {
 			changed = true

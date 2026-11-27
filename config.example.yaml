@@ -579,6 +579,11 @@ upstream:
     # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
     disable-cloaking-model-list: false
 
+    # When true, native Claude Code main-conversation requests on Claude OAuth credentials use the
+    # 1h prompt cache, as Claude Code does on a subscription login (through the proxy it sees an
+    # API key and picks 5m). Subagents, probes, API-key credentials, and explicit ttls are untouched.
+    main-cache-ttl-1h: false
+
     # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
     # Claude Code: context-1m sits right after claude-code, mid-conversation-system
     # is added only for models that accept a role=system turn, advanced-tool-use only when
