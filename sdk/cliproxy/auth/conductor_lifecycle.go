@@ -714,6 +714,9 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 				auth.Status = existing.Status
 			}
 		}
+		if isFileSnapshot && reconcileOrphanedAuthUnavailable(auth, now) {
+			cooldownStateChanged = true
+		}
 	} else {
 		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 		applyPreservedRenewalState(existing, auth, mode, now)
@@ -729,6 +732,11 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 				} else {
 					auth.NextRefreshAfter = time.Time{}
 				}
+			}
+		}
+		if (existing.Disabled || existing.Status == StatusDisabled) && !auth.Disabled && auth.Status != StatusDisabled {
+			if reconcileReenabledAuthState(auth, existing, now) {
+				cooldownStateChanged = true
 			}
 		}
 	}
@@ -812,6 +820,15 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			}
 		}
 	}
+	if (existingBeforeSave.Disabled || existingBeforeSave.Status == StatusDisabled) && !auth.Disabled && auth.Status != StatusDisabled {
+		if reconcileReenabledAuthState(auth, existing, now) {
+			cooldownStateChanged = true
+		}
+	} else if isFileSnapshot && !auth.Disabled && auth.Status != StatusDisabled {
+		if reconcileOrphanedAuthUnavailable(auth, now) {
+			cooldownStateChanged = true
+		}
+	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
 	}
@@ -836,6 +853,142 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 		m.forgetWeightedAuthUpTo(authClone.ID, forgetEpoch, forgetGen)
 	}
 	return auth.Clone(), true, baseSuperseded, cooldownStateChanged, nil
+}
+
+// reconcileReenabledAuthState reconciles availability and status when a
+// credential transitions from disabled back to enabled. It clears disabled-era
+// unavailability and disabled model states while keeping unresolved sign-in or
+// rejected-token failures explicitly marked as StatusError.
+func reconcileReenabledAuthState(auth, existing *Auth, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	changed := false
+	for _, state := range auth.ModelStates {
+		if state == nil || state.Status != StatusDisabled {
+			continue
+		}
+		resetModelState(state, now)
+		changed = true
+	}
+	requiresSignInBlocked := auth.RequiresSignIn && !auth.HasValidAccessToken(now)
+	rejectedAccessBlocked := hasRejectedActiveAccessToken(auth)
+	if requiresSignInBlocked || rejectedAccessBlocked || hasUnauthorizedAuthFailure(auth) {
+		auth.Unavailable = true
+		auth.Status = StatusError
+		if auth.StatusMessage == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(auth.StatusMessage)), "disabled") {
+			if existing != nil && existing.StatusMessage != "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(existing.StatusMessage)), "disabled") {
+				auth.StatusMessage = existing.StatusMessage
+			} else {
+				auth.StatusMessage = "unauthorized (refresh token invalid)"
+			}
+		}
+		if auth.RefreshError != nil && auth.RefreshError.Code == "refresh_outcome_unknown" {
+			// Use refreshAccessError so a diagnostic 401 from an unknown SIWC refresh
+			// does not escalate into a terminal unauthorized block for valid outer tokens.
+			auth.LastError = refreshAccessError(auth, auth.RefreshError.Message, rejectedAccessBlocked, hasUnauthorizedAuthFailure(existing))
+			if auth.LastError != nil && auth.LastError.Code == "refresh_outcome_unknown" {
+				auth.StatusMessage = auth.LastError.Message
+			}
+		} else if auth.LastError == nil {
+			if auth.RefreshError != nil {
+				auth.LastError = refreshAccessError(auth, auth.RefreshError.Message, rejectedAccessBlocked, hasUnauthorizedAuthFailure(existing))
+			} else if existing != nil && existing.LastError != nil && !isTOSViolationResultError(existing.LastError) {
+				auth.LastError = cloneError(existing.LastError)
+			}
+		}
+		return true
+	}
+	prevUnavailable := auth.Unavailable
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+	} else if auth.Unavailable &&
+		!auth.NextRetryAfter.After(now) &&
+		!(auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)) &&
+		!auth.credentialRetryAfter.After(now) &&
+		!effectiveAuthForceUntil(auth).After(now) {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		applyCooldownFields(&auth.Quota, QuotaState{})
+	}
+	if auth.Unavailable != prevUnavailable {
+		changed = true
+	}
+	if !auth.Unavailable && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+		auth.LastError = nil
+	}
+	return changed
+}
+
+func hasRejectedActiveAccessToken(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if IsCodexUseSIWC(auth) {
+		token := authSIWCTokenField(auth, "access_token")
+		return (auth.RejectedSIWCAccessToken != "" && token == auth.RejectedSIWCAccessToken) ||
+			(auth.RejectedAccessToken != "" && token == auth.RejectedAccessToken)
+	}
+	token := authOuterAccessToken(auth)
+	return auth.RejectedAccessToken != "" && token == auth.RejectedAccessToken
+}
+
+// IsOrphanedAuthUnavailable reports whether auth carries an unexplained
+// auth-level Unavailable=true flag with StatusActive, empty error details,
+// no quota exhaustion, no retry/cooldown deadline, no model errors, and no
+// unresolved sign-in or token-rejection block.
+func IsOrphanedAuthUnavailable(auth *Auth, now time.Time) bool {
+	return isOrphanedAuthUnavailable(auth, now)
+}
+
+func isOrphanedAuthUnavailable(auth *Auth, now time.Time) bool {
+	if auth == nil || !auth.Unavailable || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if auth.Status != StatusActive {
+		return false
+	}
+	if strings.TrimSpace(auth.StatusMessage) != "" || auth.LastError != nil {
+		return false
+	}
+	if auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() || !auth.NextRetryAfter.IsZero() {
+		return false
+	}
+	if auth.credentialRetryAfter.After(now) || effectiveAuthForceUntil(auth).After(now) {
+		return false
+	}
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return false
+	}
+	if hasUnauthorizedAuthFailure(auth) || (auth.RequiresSignIn && !auth.HasValidAccessToken(now)) {
+		return false
+	}
+	if hasRejectedActiveAccessToken(auth) {
+		return false
+	}
+	if hasModelError(auth, now) {
+		return false
+	}
+	return true
+}
+
+// reconcileOrphanedAuthUnavailable clears a stale auth.Unavailable flag carried
+// across file-snapshot reloads when an enabled credential has StatusActive, no
+// active cooldown deadline, no model errors, and no unresolved auth/token block.
+func reconcileOrphanedAuthUnavailable(auth *Auth, now time.Time) bool {
+	if !isOrphanedAuthUnavailable(auth, now) {
+		return false
+	}
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+		return !auth.Unavailable
+	}
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	return true
 }
 
 func equalErrorPtr(a, b *Error) bool {

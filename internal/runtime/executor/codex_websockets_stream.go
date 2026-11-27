@@ -483,7 +483,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// can deliver anything.
 				overloadFailover := isCodexOverloadBootstrapFailure(terminalBody)
 				usageLimitFailover := isCodexUsageLimitError(terminalBody)
-				failoverPending := overloadFailover || usageLimitFailover
+				billingQuotaFailover := isCodexBillingQuotaError(terminalBody)
+				failoverPending := overloadFailover || usageLimitFailover || billingQuotaFailover
 				if failoverPending && timeoutReached {
 					failoverPending = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
@@ -518,6 +519,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					// Fail the attempt before the downstream headers are committed so the
 					// conductor can transparently retry on another credential, and report the
 					// status the upstream refused to put on the wire.
+					if billingQuotaFailover || usageLimitFailover {
+						helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap quota rejection after %d messages read, failing over", bufferedFrames)
+						return nil, streamErr
+					}
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read, failing over", bufferedFrames)
 					if overloadFailover {
 						if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
