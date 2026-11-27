@@ -3689,3 +3689,152 @@ func TestCoolingDisabledRetryAtMatchesModelCaseInsensitively(t *testing.T) {
 		t.Fatalf("coolingDisabledRetryAt(other model) = %v, want zero", got)
 	}
 }
+
+// A normal success resets the model state, which zeroes the reset before the
+// success-clears-reset step runs. That step must still advance the watermark:
+// otherwise a 429 dispatched after the reset was recorded but before the
+// success, completing after it, counts as newer and reinstalls a stale hint.
+func TestManager_MarkResult_DisableCooling_SuccessResetAdvancesWatermark(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-success-reset-watermark", "test-model-success-reset-watermark"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	retryAfter := 2 * time.Hour
+	m.executionSeq.Store(2)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 2,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.mu.RLock()
+	recorded := coolingDisabledRetryAt(m.auths[id], model)
+	m.mu.RUnlock()
+	if !recorded.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("reset = %v, want the 2h hint recorded", recorded)
+	}
+
+	// Call 3 is dispatched after the reset was recorded; call 4 after that.
+	// Call 4 succeeds first.
+	m.executionSeq.Store(4)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 4, Success: true})
+	m.mu.RLock()
+	cleared := coolingDisabledRetryAt(m.auths[id], model)
+	m.mu.RUnlock()
+	if !cleared.IsZero() {
+		t.Fatalf("reset = %v, want it cleared by the success", cleared)
+	}
+
+	// Call 3's 429 completes last: it predates the success and must not revive the reset.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 3,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if revived := coolingDisabledRetryAt(m.auths[id], model); !revived.IsZero() {
+		t.Fatalf("reset = %v after a 429 dispatched before the success, want it to stay cleared", revived)
+	}
+}
+
+// While a credential-wide quota wraps the credential, a model's own 429 goes to
+// the independent layer. With cooling disabled that layer has no ordinary
+// cooldown and is dropped when the layers are composed, so its reset must reach
+// the state retry scheduling reads; otherwise, once the quota ends, a retry is
+// sent before the upstream's reset.
+func TestManager_MarkResult_DisableCooling_ResetKeptUnderCredentialQuota(t *testing.T) {
+	newWrapped := func(t *testing.T, id, model string) *Manager {
+		t.Helper()
+		m := NewManager(nil, nil, nil)
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		return m
+	}
+	wrap := func(m *Manager, id string) {
+		m.mu.Lock()
+		m.auths[id].Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: time.Now().Add(time.Minute)}
+		m.mu.Unlock()
+	}
+	retryAfter := 2 * time.Hour
+
+	t.Run("new 429 is recorded", func(t *testing.T) {
+		const id, model = "auth-reset-under-quota", "test-model-reset-under-quota"
+		m := newWrapped(t, id, model)
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(), Success: true})
+		wrap(m, id)
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		auth := m.auths[id]
+		if got := coolingDisabledRetryAt(auth, model); !got.After(time.Now().Add(time.Hour)) {
+			t.Fatalf("reset under the credential quota = %v, want the 2h hint", got)
+		}
+		// The quota ends; the model's own reset must still hold.
+		auth.Quota.NextRecoverAt = time.Now().Add(-time.Second)
+		if got := m.coolingDisabledRetryAtForRoute(auth, model, model, time.Now()); !got.After(time.Now().Add(time.Hour)) {
+			t.Fatalf("reset after the quota ended = %v, want the 2h hint", got)
+		}
+	})
+
+	t.Run("stale 429 does not revive a cleared reset", func(t *testing.T) {
+		const id, model = "auth-stale-under-quota", "test-model-stale-under-quota"
+		m := newWrapped(t, id, model)
+		m.executionSeq.Store(2)
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 2,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+		wrap(m, id)
+		m.executionSeq.Store(4)
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 4, Success: true})
+		// Call 3 predates the success that cleared the reset.
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 3,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		if got := coolingDisabledRetryAt(m.auths[id], model); !got.IsZero() {
+			t.Fatalf("reset = %v after a 429 dispatched before the success, want it to stay cleared", got)
+		}
+	})
+}
+
+// Restoring the independent layer when a credential quota is cleared under
+// disable-cooling must not bring back a reset the outer state cleared later (a
+// success while wrapped clears only the outer state).
+func TestClearDisabledCooldownState_ShadowRestoreKeepsLaterResetClear(t *testing.T) {
+	now := time.Now()
+	live := now.Add(2 * time.Hour)
+	force := now.Add(time.Hour)
+	const model = "test-model-shadow-restore-reset"
+	auth := &Auth{
+		ID:       "auth-shadow-restore-reset",
+		Provider: "claude",
+		Quota:    QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Minute)},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:                    StatusError,
+				Unavailable:               true,
+				credentialQuotaPropagated: true,
+				// Cleared by a success after the shadow's 429: later stamp.
+				coolingDisabledRetrySeq:   5,
+				coolingDisabledRetryStamp: 10,
+				credentialQuotaShadow: &ModelState{
+					Status:                    StatusError,
+					Unavailable:               true,
+					NextRetryAfter:            force,
+					forceCooldownUntil:        force,
+					forceCooldownSeeded:       true,
+					coolingDisabledRetryAt:    live,
+					coolingDisabledRetrySeq:   2,
+					coolingDisabledRetryStamp: 3,
+				},
+			},
+		},
+	}
+	clearDisabledCooldownStateForAuth(auth, now)
+	state := auth.ModelStates[model]
+	if state.credentialQuotaShadow != nil || !state.forceCooldownUntil.Equal(force) {
+		t.Fatalf("state = %+v, want the independent layer restored", state)
+	}
+	if !state.coolingDisabledRetryAt.IsZero() || state.coolingDisabledRetrySeq != 5 || state.coolingDisabledRetryStamp != 10 {
+		t.Fatalf("reset = %v seq %d stamp %d, want the later clear (seq 5, stamp 10) kept",
+			state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq, state.coolingDisabledRetryStamp)
+	}
+}

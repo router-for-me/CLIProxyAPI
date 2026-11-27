@@ -982,7 +982,11 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			if shadow := state.credentialQuotaShadow; shadow != nil {
 				if keptShadow, _ := clampStateToForceDeadline(shadow, now); keptShadow {
 					preservedSeq := shadow.cooldownRecordedSeq
+					outerReset := state.cloneShallow()
 					*state = *shadow.cloneShallow()
+					// The outer state may hold a reset written after the shadow's (a
+					// success cleared it while wrapped); keep the later one.
+					keepLaterCoolingDisabledReset(state, outerReset)
 					state.cooldownRecordedSeq = preservedSeq
 					state.credentialQuotaPropagated = false
 					state.credentialQuotaShadow = nil
@@ -1762,6 +1766,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				staleSuccessRetryAt, staleSuccessRetrySeq, staleSuccessRetryStamp = existing.coolingDisabledRetryAt, existing.coolingDisabledRetrySeq, existing.coolingDisabledRetryStamp
 			}
 		}
+		// Whether this success clears a reset, decided before the state reset below
+		// zeroes it: the clear must still advance the watermark afterwards.
+		successClearsRetry := false
+		if result.Success && modelKey != "" {
+			if existing := existingModelState(auth, modelKey); existing != nil && !existing.coolingDisabledRetryAt.IsZero() &&
+				(result.ExecutionSeq == 0 || result.ExecutionSeq > existing.coolingDisabledRetrySeq) {
+				successClearsRetry = true
+			}
+		}
 		retainCredentialRetry := !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			!auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) &&
 			auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
@@ -1851,6 +1864,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							fresh := &ModelState{}
 							*state = *fresh
 						}
+						// The cooling-disabled reset belongs to the model, not to a
+						// cooldown layer: start from the one written last, so the
+						// ordering guard below sees the real reset and watermark.
+						keepLaterCoolingDisabledReset(state, savedOuterState)
 					}
 					seedInitialForceCooldownDeadlines(auth)
 					seedModelForceCooldownDeadline(state)
@@ -2226,6 +2243,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						} else {
 							outer.credentialQuotaShadow = nil
 						}
+						// Retry scheduling reads the outer state, and a disabled-cooling
+						// independent layer has no ordinary cooldown to keep it: carry
+						// the reset this result wrote into the outer state.
+						keepLaterCoolingDisabledReset(outer, independent)
 						outer.cooldownRecordedSeq = cooldownSeq
 						// A composed outer state is wrapped by definition; stamp it so
 						// a later credential report cannot mistake it for unwrapped.
@@ -2411,9 +2432,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			// a newer ordinary cooldown or a credential quota keeps the rest of the
 			// state above. An unknown sequence (zero, direct MarkResult callers) is
 			// exempt from the ordering guard and counts as newer, as for a 429. The
-			// watermark stays, so a 429 dispatched earlier cannot bring it back.
-			if state := existingModelState(auth, modelKey); state != nil && !state.coolingDisabledRetryAt.IsZero() &&
-				(result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq) {
+			// clear is written under the current watermark, so a 429 dispatched
+			// earlier cannot bring it back. A state reset above may already have
+			// zeroed the deadline without moving the watermark, so it is written
+			// whenever this success cleared one (successClearsRetry).
+			if state := existingModelState(auth, modelKey); state != nil &&
+				(successClearsRetry || (!state.coolingDisabledRetryAt.IsZero() &&
+					(result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq))) {
 				m.writeCoolingDisabledReset(state, time.Time{})
 			}
 		}
@@ -2727,6 +2752,16 @@ func (m *Manager) writeCoolingDisabledReset(state *ModelState, until time.Time) 
 	state.coolingDisabledRetryAt = until
 	state.coolingDisabledRetrySeq = m.currentExecutionSeq()
 	state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
+}
+
+// keepLaterCoolingDisabledReset copies source's cooling-disabled reset, watermark
+// and write stamp into target when source's was written later.
+func keepLaterCoolingDisabledReset(target, source *ModelState) {
+	if target == nil || source == nil || !coolingDisabledResetWrittenLater(source, target) {
+		return
+	}
+	target.coolingDisabledRetryAt, target.coolingDisabledRetrySeq, target.coolingDisabledRetryStamp =
+		source.coolingDisabledRetryAt, source.coolingDisabledRetrySeq, source.coolingDisabledRetryStamp
 }
 
 // coolingDisabledResetWrittenLater reports whether source's cooling-disabled reset
