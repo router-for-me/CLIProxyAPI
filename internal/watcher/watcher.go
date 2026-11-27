@@ -4,6 +4,7 @@ package watcher
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,6 +38,11 @@ type Watcher struct {
 	authDir                    string
 	watchMu                    sync.Mutex
 	started                    bool
+	watchedConfigFile          string
+	watchedConfigTarget        string
+	watchedConfigIsSymlink     bool
+	watchedConfigInfo          os.FileInfo
+	watchedConfigDir           string
 	watchedAuthDir             string
 	config                     *config.Config
 	clientsMutex               sync.RWMutex
