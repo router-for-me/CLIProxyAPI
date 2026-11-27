@@ -46,6 +46,46 @@ func TestClaudeOAuthToolAliasRestoresContinuationWithoutDeclarations(t *testing.
 	}
 }
 
+// Turning disable-mcp-tool-alias on by hot reload must not strand threads that
+// were created with aliases: their continuations keep the stored aliases.
+func TestClaudeOAuthToolAliasDisabledKeepsAliasedThreads(t *testing.T) {
+	secret := "disable-reload-caller"
+	executor := &ClaudeExecutor{}
+	createBody := []byte(`{"thread":{"type":"create"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`)
+	reverseMap, errPrepare := executor.prepareClaudeOAuthToolNamesForRequestDoc(ojson.NewDoc(createBody), claudeMCPAliasOptions{secret: secret})
+	if errPrepare != nil || len(reverseMap) == 0 {
+		t.Fatalf("create request aliases = %v, err = %v", reverseMap, errPrepare)
+	}
+	executor.rememberClaudeOAuthToolAliases(createBody, reverseMap, "msg-aliased")
+	disabled := claudeMCPAliasOptions{secret: secret, keepThreadAliasesOnly: true}
+
+	withoutTools := []byte(`{"thread":{"type":"continue","previous_message_id":"msg-aliased"},"messages":[{"role":"user","content":"next"}]}`)
+	got, errContinue := executor.prepareClaudeOAuthToolNamesForRequestDoc(ojson.NewDoc(withoutTools), disabled)
+	if errContinue != nil || !maps.Equal(got, reverseMap) {
+		t.Fatalf("continuation without tools aliases = %v, err = %v; want %v", got, errContinue, reverseMap)
+	}
+
+	withToolsDoc := ojson.NewDoc([]byte(`{"thread":{"type":"continue","previous_message_id":"msg-aliased"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`))
+	got, errContinue = executor.prepareClaudeOAuthToolNamesForRequestDoc(withToolsDoc, disabled)
+	if errContinue != nil || !maps.Equal(got, reverseMap) {
+		t.Fatalf("continuation with tools aliases = %v, err = %v; want %v", got, errContinue, reverseMap)
+	}
+	if name := withToolsDoc.Get("tools.0.name").String(); reverseMap[name] != "Read" {
+		t.Fatalf("continuation with tools sent %q, want the thread's alias for Read", name)
+	}
+
+	newDoc := ojson.NewDoc([]byte(`{"thread":{"type":"create"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`))
+	got, errNew := executor.prepareClaudeOAuthToolNamesForRequestDoc(newDoc, disabled)
+	if errNew != nil || len(got) != 0 || newDoc.Get("tools.0.name").String() != "Read" {
+		t.Fatalf("new thread aliases = %v, err = %v, tool = %q; want no aliases", got, errNew, newDoc.Get("tools.0.name").String())
+	}
+
+	unknown := []byte(`{"thread":{"type":"continue","previous_message_id":"msg-unknown"}}`)
+	if got, errUnknown := executor.prepareClaudeOAuthToolNamesForRequestDoc(ojson.NewDoc(unknown), disabled); errUnknown != nil || len(got) != 0 {
+		t.Fatalf("unknown continuation aliases = %v, err = %v; want none", got, errUnknown)
+	}
+}
+
 func TestClaudeOAuthToolAliasMissingContinuationStateIsRequestScopedNotFound(t *testing.T) {
 	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"missing-message"}}`)
 	_, _, errPrepare := (&ClaudeExecutor{}).prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "missing-state-caller"})

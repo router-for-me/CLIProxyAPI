@@ -582,6 +582,7 @@ upstream:
     # When true, disable opaque mcp__<server>__<tool> aliasing for custom tools on cloaked Claude OAuth
     # and claude-code-cli fingerprint requests, sending caller tool names through unchanged while keeping
     # the rest of Claude Code CLI cloaking active. Default false preserves MCP tool aliasing.
+    # Threads that started with aliases keep them after this is turned on by hot reload.
     disable-mcp-tool-alias: false
 
     # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching

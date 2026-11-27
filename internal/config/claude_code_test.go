@@ -220,6 +220,7 @@ func TestParseConfigBytesClaudeDisableMCPToolAlias(t *testing.T) {
 		{name: "legacy layout", yaml: "claude:\n  disable-mcp-tool-alias: true\n", want: true},
 		{name: "v8 layout", yaml: "config-version: 8\nupstream:\n  claude:\n    disable-mcp-tool-alias: true\n", want: true},
 		{name: "v8 explicit false", yaml: "config-version: 8\nupstream:\n  claude:\n    disable-mcp-tool-alias: false\n", want: false},
+		{name: "v8 oauth provider layout", yaml: "config-version: 8\noauth:\n  providers:\n    claude:\n      disable-mcp-tool-alias: true\n", want: true},
 	}
 
 	for _, tt := range tests {
