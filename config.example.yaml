@@ -1317,6 +1317,9 @@ oauth:
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
       #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2; <= 0 disables idle pooling)
+      # upstream-request-compression: false  # optional: gzip request bodies for large Antigravity requests
+      #                                      # (the endpoint accepts identity/gzip only; zstd is rejected with HTTP 415)
+      # upstream-request-compression-min-bytes: 1024  # bodies below this size are sent uncompressed (default: 1024)
       # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
                                     # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
       # Use credits as a last resort after free-tier Claude quota is exhausted.

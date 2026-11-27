@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -221,13 +222,11 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 		isAgent = !requestType.Exists() || strings.TrimSpace(requestType.String()) == "agent"
 	}
 	finalPayload := helps.SerializeAntigravityPayload(doc, isAgent)
-	var (
-		bodyReader io.Reader = bytes.NewReader(finalPayload)
-		payloadLog []byte
-	)
+	var payloadLog []byte
 	if e.cfg != nil && e.cfg.RequestLog {
 		payloadLog = append([]byte(nil), finalPayload...)
 	}
+	bodyReader, compressed := e.encodeAntigravityRequestBody(finalPayload)
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
@@ -248,6 +247,9 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if compressed {
+		httpReq.Header.Set("Content-Encoding", "gzip")
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -268,6 +270,59 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	})
 
 	return httpReq, finalPayload, nil
+}
+
+// encodeAntigravityRequestBody compresses payload with gzip when enabled and the
+// body reaches the configured threshold. The Antigravity endpoint accepts
+// identity/gzip only and rejects zstd with HTTP 415. Large agent payloads spend
+// most of their TTFT on upload, so compression above the threshold is worthwhile.
+func (e *AntigravityExecutor) encodeAntigravityRequestBody(payload []byte) (io.Reader, bool) {
+	if e.cfg == nil || !e.cfg.Antigravity.UpstreamRequestCompression ||
+		len(payload) < e.cfg.Antigravity.RequestCompressionMinBytes() {
+		return bytes.NewReader(payload), false
+	}
+	var buf bytes.Buffer
+	encoder, errNewWriter := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	if errNewWriter != nil {
+		log.Errorf("antigravity executor: create request encoder error: %v", errNewWriter)
+		return bytes.NewReader(payload), false
+	}
+	if _, errWrite := encoder.Write(payload); errWrite != nil {
+		log.Errorf("antigravity executor: compress request body error: %v", errWrite)
+		return bytes.NewReader(payload), false
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		log.Errorf("antigravity executor: close request encoder error: %v", errClose)
+		return bytes.NewReader(payload), false
+	}
+	if buf.Len() >= len(payload) {
+		return bytes.NewReader(payload), false
+	}
+	return bytes.NewReader(buf.Bytes()), true
+}
+
+// doAntigravityRequest sends req and retries once with the plain payload when the
+// upstream rejects a gzip-encoded body with 400 or 415.
+func doAntigravityRequest(httpClient *http.Client, auth *cliproxyauth.Auth, operation string, req *http.Request, plainPayload []byte) (*http.Response, error) {
+	resp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, operation).Do(req)
+	if errDo != nil {
+		return nil, errDo
+	}
+	if !strings.EqualFold(req.Header.Get("Content-Encoding"), "gzip") ||
+		(resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnsupportedMediaType) {
+		return resp, nil
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		log.Errorf("antigravity executor: close rejected response body error: %v", errClose)
+	}
+	plainReq, errNewRequest := http.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), bytes.NewReader(plainPayload))
+	if errNewRequest != nil {
+		return nil, errNewRequest
+	}
+	plainReq.Header = req.Header.Clone()
+	plainReq.Header.Del("Content-Encoding")
+	plainReq.Host = req.Host
+	return helps.WithAntigravityHTTPClientTrace(httpClient, auth, operation).Do(plainReq)
 }
 
 // antigravityToolChoiceModeIsNoneDoc reports whether the request already sets
