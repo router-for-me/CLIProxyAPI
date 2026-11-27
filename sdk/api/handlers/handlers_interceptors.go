@@ -802,6 +802,9 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 	}
 
 	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
+		if id, ok := modelID.(string); ok && sourceFormat == "gemini" {
+			modelID = strings.TrimPrefix(id, "models/")
+		}
 		c.Writer.Header().Del("Content-Length")
 		var catalog struct {
 			Data   []json.RawMessage `json:"data"`
@@ -817,12 +820,16 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			var entry struct {
 				ID   string `json:"id"`
 				Slug string `json:"slug"`
+				Name string `json:"name"`
 			}
 			if errUnmarshal := json.Unmarshal(model, &entry); errUnmarshal != nil {
 				continue
 			}
 			if entry.ID == "" {
 				entry.ID = entry.Slug
+			}
+			if sourceFormat == "gemini" {
+				entry.ID = strings.TrimPrefix(entry.Name, "models/")
 			}
 			if entry.ID != "" && entry.ID == modelID {
 				selected = model
@@ -831,6 +838,10 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 		if selected == nil {
 			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusNotFound, nil)
+			if sourceFormat == "gemini" {
+				c.JSON(http.StatusNotFound, ErrorResponse{Error: ErrorDetail{Message: "Not Found", Type: "not_found"}})
+				return
+			}
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"}})
 			return
 		}
