@@ -1122,7 +1122,17 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 	if hasUnauthorizedAuthFailure(existing) {
 		return false
 	}
+	releaseCredentialQuota(auth, existing, now, true)
+	return true
+}
 
+// releaseCredentialQuota clears an auth-level credential_quota cooldown on auth.
+// Model states wrapped by credential_quota propagation have their independent
+// shadow cooldown reinstated (if still live) or are reset, while an independent
+// auth-level force cooldown recorded on existing is preserved. When
+// includeLegacyUnwrappedQuota is true, unwrapped "quota" model states are also
+// cleared (used by legacy Devin quota restoration).
+func releaseCredentialQuota(auth, existing *Auth, now time.Time, includeLegacyUnwrappedQuota bool) {
 	applyCooldownFields(&auth.Quota, QuotaState{})
 	for _, state := range auth.ModelStates {
 		if state == nil {
@@ -1130,14 +1140,13 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 		}
 		reason := strings.TrimSpace(state.Quota.Reason)
 		wrapped := state.credentialQuotaPropagated || reason == "credential_quota"
-		if !state.Quota.Exceeded || (reason != "quota" && !wrapped) {
+		if !state.Quota.Exceeded || (!wrapped && (!includeLegacyUnwrappedQuota || reason != "quota")) {
 			continue
 		}
 		// A wrapped sibling carries its independent layer in the shadow.
 		// Reinstate that exact block (if still live) instead of erasing it;
-		// the reporting model ("quota" unwrapped) and pure propagation
-		// targets (no shadow) fully release. Deadline or status heuristics
-		// cannot recover this provenance reliably.
+		// pure propagation targets (no shadow) fully release. Deadline or
+		// status heuristics cannot recover this provenance reliably.
 		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
 			*state = *shadow.cloneShallow()
 			state.UpdatedAt = now
@@ -1173,8 +1182,13 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 		if auth.Unavailable && auth.Status == StatusActive {
 			auth.Status = StatusError
 		}
+	} else if auth.credentialRetryAfter.After(now) {
+		auth.Unavailable = true
+		if auth.NextRetryAfter.Before(auth.credentialRetryAfter) {
+			auth.NextRetryAfter = auth.credentialRetryAfter
+		}
+		auth.Status = StatusError
 	}
-	return true
 }
 
 // isDevinQuotaExhaustionMessage reports whether text is Devin's explicit

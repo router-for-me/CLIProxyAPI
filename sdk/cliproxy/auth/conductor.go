@@ -92,6 +92,11 @@ type Result struct {
 	// CompletedResponse reports that the upstream execution produced a completed
 	// generation response (as opposed to an incomplete stream or non-generation call).
 	CompletedResponse bool
+	// OperatorVerify marks the result of an operator-triggered, account-pinned
+	// VerifyInference probe. A completed response from such a probe is direct
+	// evidence that the credential can serve again, so it may release an active
+	// credential_quota cooldown that ordinary client traffic must leave in place.
+	OperatorVerify bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).

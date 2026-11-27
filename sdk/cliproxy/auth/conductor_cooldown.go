@@ -1614,6 +1614,14 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 	if current == nil {
 		return false
 	}
+	if result.OperatorVerify {
+		if result.RegistrationEpoch > 0 && current.RegistrationEpoch != result.RegistrationEpoch {
+			return true
+		}
+		if (result.CredentialVersion > 0 || current.CredentialVersion > 1) && current.CredentialVersion != result.CredentialVersion {
+			return true
+		}
+	}
 	staleEpoch := result.RegistrationEpoch > 0 && result.RegistrationEpoch < current.RegistrationEpoch
 	if staleEpoch {
 		return true
@@ -1659,14 +1667,20 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	_ = m.markResult(ctx, result)
+}
+
+// markResult records an execution result, notifies hooks, and reports whether
+// this result marked the credential as InferenceVerified.
+func (m *Manager) markResult(ctx context.Context, result Result) bool {
 	if result.AuthID == "" {
-		return
+		return false
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if antigravityTargetRejected(result) {
-		return
+		return false
 	}
 	routedModel := antigravityResultModel(ctx, result)
 	if routedModel != "" {
@@ -1676,7 +1690,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if policy := m.ResultPolicy(); policy != nil {
 			result = policy.ApplyResultPolicy(ctx, result)
 			if result.AuthID == "" {
-				return
+				return false
 			}
 		}
 	}
@@ -1685,6 +1699,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var authSnapshot *Auth
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
+	releasedCredentialQuota := false
+	appliedVerification := false
 	now := time.Now()
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
 	rejectsToken := !result.Success && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error))
@@ -1705,7 +1721,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			releaseMutation()
 			m.hook.OnResult(ctx, result)
 			m.publishErrorEvent(result, nil)
-			return
+			return false
 		}
 		if modelKey == "" && strings.TrimSpace(result.RouteModel) != "" {
 			if m != nil {
@@ -1755,12 +1771,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		retainCredentialRetry := !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			!auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) &&
 			auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
+		retainCredentialQuota := !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
+			auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) &&
+			auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
 		isDisabled := auth.Disabled || auth.Status == StatusDisabled
 		if result.Success {
-			if result.CompletedResponse && !result.SkipQuotaObservation && !isDisabled && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
+			if result.OperatorVerify && result.CompletedResponse && !result.SkipQuotaObservation &&
+				!isDisabled && !wasTerminalUnauthorized &&
+				!retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry && !retainCredentialQuota &&
+				auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+				// A completed, operator-triggered account-pinned verify dispatched after the
+				// credential_quota cooldown was recorded proves the quota is available again.
+				releaseCredentialQuota(auth, auth.Clone(), now, false)
+				releasedCredentialQuota = true
+			}
+			if result.CompletedResponse && !result.SkipQuotaObservation && !isDisabled && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry && !retainCredentialQuota {
 				auth.InferenceVerified = true
 				auth.LastInferenceVerifiedAt = now
+				appliedVerification = true
 			}
 			if isDisabled {
 				// A disabled credential (operator action or terminal TOS) stays
@@ -1772,6 +1801,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state := ensureModelState(auth, modelKey)
 					modelState = state
 					resetModelState(state, now)
+				}
+			} else if releasedCredentialQuota {
+				// releaseCredentialQuota already cleared the credential_quota layer and
+				// reinstated any independent per-model shadow or auth-level cooldowns;
+				// skip the generic success reset so those independent timers survive.
+				if modelKey != "" {
+					modelState = existingModelState(auth, modelKey)
 				}
 			} else if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 				// Retain active credential-scoped cooldown
@@ -2418,7 +2454,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	if m.scheduler != nil && authSnapshot != nil {
-		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh
+		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh || releasedCredentialQuota
 		var targetModels []string
 		if !credentialScopedResult && modelKey != "" {
 			targetModels = append(targetModels, modelKey)
@@ -2457,6 +2493,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
 	m.updateSessionAffinity(result)
+	return appliedVerification
 }
 
 func (m *Manager) updateSessionAffinity(result Result) {
