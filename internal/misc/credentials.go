@@ -2,6 +2,7 @@ package misc
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -58,4 +59,71 @@ func MergeMetadata(source any, metadata map[string]any) (map[string]any, error) 
 	}
 
 	return data, nil
+}
+
+var syncAtomicTempFile = func(file *os.File) error {
+	return file.Sync()
+}
+
+// WriteFileAtomic writes data to path atomically by writing to a temporary file
+// in the same directory, syncing it to disk, closing it, and renaming it over
+// the target path.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("file path is empty")
+	}
+	if perm == 0 {
+		perm = 0o600
+	}
+
+	dir := filepath.Dir(path)
+	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
+		return fmt.Errorf("failed to create directory: %w", errMkdir)
+	}
+
+	tmpFile, errCreate := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if errCreate != nil {
+		return fmt.Errorf("failed to create temp file: %w", errCreate)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			if errRemove := os.Remove(tmpPath); errRemove != nil && !os.IsNotExist(errRemove) {
+				log.Errorf("atomic file write: remove temp file error: %v", errRemove)
+			}
+		}
+	}()
+
+	if errChmod := tmpFile.Chmod(perm); errChmod != nil {
+		if errClose := tmpFile.Close(); errClose != nil {
+			log.Errorf("atomic file write: close temp file after chmod error: %v", errClose)
+		}
+		return fmt.Errorf("failed to chmod temp file: %w", errChmod)
+	}
+
+	if _, errWrite := tmpFile.Write(data); errWrite != nil {
+		if errClose := tmpFile.Close(); errClose != nil {
+			log.Errorf("atomic file write: close temp file after write error: %v", errClose)
+		}
+		return fmt.Errorf("failed to write temp file: %w", errWrite)
+	}
+
+	if errSync := syncAtomicTempFile(tmpFile); errSync != nil {
+		if errClose := tmpFile.Close(); errClose != nil {
+			log.Errorf("atomic file write: close temp file after sync error: %v", errClose)
+		}
+		return fmt.Errorf("failed to sync temp file: %w", errSync)
+	}
+
+	if errClose := tmpFile.Close(); errClose != nil {
+		return fmt.Errorf("failed to close temp file: %w", errClose)
+	}
+
+	if errRename := os.Rename(tmpPath, path); errRename != nil {
+		return fmt.Errorf("failed to rename temp file: %w", errRename)
+	}
+
+	cleanup = false
+	return nil
 }

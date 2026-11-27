@@ -4,6 +4,7 @@
 package kimi
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // KimiTokenStorage stores OAuth2 token information for Kimi API authentication.
@@ -114,20 +114,15 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("kimi token storage: close token file error: %v", errClose)
-		}
-	}()
-
-	encoder := json.NewEncoder(f)
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
 	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
+	if errEncode := encoder.Encode(data); errEncode != nil {
+		return fmt.Errorf("failed to encode token data: %w", errEncode)
+	}
+
+	if errWrite := misc.WriteFileAtomic(authFilePath, buf.Bytes(), 0o600); errWrite != nil {
+		return fmt.Errorf("failed to write token to file: %w", errWrite)
 	}
 	return nil
 }
