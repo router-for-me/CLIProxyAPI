@@ -205,7 +205,8 @@ func codexTerminalFailureStatus(body []byte) int {
 		return http.StatusUnauthorized
 	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
 		return http.StatusForbidden
-	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
+	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded",
+		errorType == "insufficient_quota", errorCode == "insufficient_quota", errorCode == "credit_balance_exhausted":
 		return http.StatusTooManyRequests
 	case errorType == "invalid_request_error", errorType == "bad_request_error", errorType == "image_generation_user_error", errorCode == "invalid_value", errorCode == "invalid_request_error":
 		return http.StatusBadRequest
@@ -252,7 +253,7 @@ func codexTerminalStreamErrShouldHandle(body []byte) bool {
 	if codexTerminalErrorIsContextLength(body) {
 		return true
 	}
-	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+	if isCodexUsageLimitError(body) || isCodexBillingQuotaError(body) || isCodexTransientCapacityError(body) {
 		return true
 	}
 	code, _, ok := codexStatusErrorClassification(http.StatusBadRequest, body)
@@ -367,9 +368,10 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
-	credentialScoped := isUsageLimit && !modelLevelCooling
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
-	if transientCapacity || isUsageLimit {
+	isBillingQuota := isCodexBillingQuotaError(body)
+	credentialScoped := isBillingQuota || (isUsageLimit && !modelLevelCooling)
+	transientCapacity := !isUsageLimit && !isBillingQuota && isCodexTransientCapacityError(body)
+	if transientCapacity || isUsageLimit || isBillingQuota {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
@@ -561,6 +563,28 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 	}
 	for _, candidate := range candidates {
 		if strings.EqualFold(strings.TrimSpace(candidate), "usage_limit_reached") {
+			return true
+		}
+	}
+	return false
+}
+
+// isCodexBillingQuotaError reports whether the error body represents a
+// structured account/API-key billing quota exhaustion (insufficient_quota or
+// credit_balance_exhausted). Billing exhaustion belongs to the credential rather
+// than a single model, so it always produces a credential-scoped 429 cooldown.
+func isCodexBillingQuotaError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "body.error.type", "response.error.type"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String()), "insufficient_quota") {
+			return true
+		}
+	}
+	for _, path := range []string{"error.code", "code", "body.error.code", "response.error.code"} {
+		switch strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String())) {
+		case "insufficient_quota", "credit_balance_exhausted":
 			return true
 		}
 	}
