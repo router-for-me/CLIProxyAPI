@@ -293,14 +293,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					if isCodexOverloadBootstrapFailure(terminalBody) {
+					overloadFailover := isCodexOverloadBootstrapFailure(terminalBody)
+					billingQuotaFailover := isCodexBillingQuotaError(terminalBody)
+					if overloadFailover || billingQuotaFailover {
 						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 						timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
 						if !timeoutReached {
-							// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
-							// attempt before the downstream headers are committed so the conductor can
-							// transparently retry on another credential, and report the status the
-							// upstream refused to put on the wire.
+							// Transient capacity or structured billing quota rejection smuggled into
+							// an HTTP 200 stream. Fail the attempt before the downstream headers are
+							// committed so the conductor can transparently retry on another credential,
+							// and report the status the upstream refused to put on the wire.
+							if billingQuotaFailover {
+								helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap billing quota rejection after %d buffered lines, failing over", bufferedFrames)
+								return nil, streamErr
+							}
 							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
 							if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
 								return nil, streamErr

@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	translatorgeminigemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -3240,6 +3241,158 @@ func TestAntigravityReasoningReplay_PrunesEmptyExtraContentShell(t *testing.T) {
 		bp5 := ojson.GetBytesNoCopy(batchOut, "request.contents.0.parts.5")
 		if strings.Contains(bp5.Raw, "thought_signature") || strings.Contains(bp5.Raw, `"google"`) || bp5.Get("extra_content.keep").String() != "yes" || strings.Count(bp5.Raw, `"extra_content"`) != 1 {
 			t.Fatalf("batch parts.5 should prune empty duplicate extra_content and keep sibling: %s", bp5.Raw)
+		}
+	})
+}
+
+func TestPrepareGeminiTopLevelReasoningReplayPayloadDoc_AcceptsGroupedSplitFunctionResponses(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	rawGemini := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "call echo 3 times"}]},
+			{"role": "model", "parts": [
+				{"functionCall": {"id": "call_1", "name": "echo", "args": {"x": "a"}}},
+				{"functionCall": {"id": "call_2", "name": "echo", "args": {"x": "b"}}},
+				{"functionCall": {"id": "call_3", "name": "echo", "args": {"x": "c"}}}
+			]},
+			{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "echo", "response": {"result": "res_a"}}}]},
+			{"role": "user", "parts": [{"functionResponse": {"id": "call_2", "name": "echo", "response": {"result": "res_b"}}}]},
+			{"role": "user", "parts": [{"functionResponse": {"id": "call_3", "name": "echo", "response": {"result": "res_c"}}}]}
+		]
+	}`)
+
+	translated, errTranslate := translatorgeminigemini.ConvertGeminiRequestToGemini("gemini-4-hydrogen", rawGemini, false)
+	if errTranslate != nil {
+		t.Fatalf("ConvertGeminiRequestToGemini failed: %v", errTranslate)
+	}
+	doc := ojson.NewDoc(translated)
+	req := cliproxyexecutor.Request{Model: "gemini-4-hydrogen", Payload: rawGemini}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+
+	if _, _, _, errPrepare := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), "gemini-4-hydrogen", req, opts, doc); errPrepare != nil {
+		t.Fatalf("expected split parallel functionResponses to pass top-level Gemini replay validation after translation, got: %v", errPrepare)
+	}
+	if got := doc.Get("contents.2.parts.#").Int(); got != 3 {
+		t.Fatalf("expected 3 merged functionResponse parts at contents[2], got %d", got)
+	}
+
+	t.Run("snake_case_empty_names_and_duplicate_id_reordering", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			raw  string
+		}{
+			{
+				name: "snake_case_split_with_empty_names",
+				raw: `{
+					"contents": [
+						{"role": "user", "parts": [{"text": "run tools"}]},
+						{"role": "model", "parts": [
+							{"function_call": {"id": "call_1", "name": "read", "args": {"path": "a"}}},
+							{"function_call": {"id": "call_2", "name": "grep", "args": {"pattern": "b"}}}
+						]},
+						{"role": "user", "parts": [{"function_response": {"id": "call_2", "name": "", "response": {"result": "r2"}}}]},
+						{"role": "user", "parts": [{"function_response": {"id": "call_1", "name": "  ", "response": {"result": "r1"}}}]}
+					]
+				}`,
+			},
+			{
+				name: "duplicate_placeholder_id_reordered_by_name",
+				raw: `{
+					"contents": [
+						{"role": "user", "parts": [{"text": "run tools"}]},
+						{"role": "model", "parts": [
+							{"functionCall": {"id": "1", "name": "read", "args": {"path": "a"}}},
+							{"functionCall": {"id": "1", "name": "grep", "args": {"pattern": "b"}}}
+						]},
+						{"role": "user", "parts": [
+							{"functionResponse": {"id": "1", "name": "grep", "response": {"result": "r2"}}},
+							{"functionResponse": {"id": "1", "name": "read", "response": {"result": "r1"}}}
+						]}
+					]
+				}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := []byte(tc.raw)
+				tr, errTr := translatorgeminigemini.ConvertGeminiRequestToGemini("gemini-4-hydrogen", raw, false)
+				if errTr != nil {
+					t.Fatalf("ConvertGeminiRequestToGemini failed: %v", errTr)
+				}
+				d := ojson.NewDoc(tr)
+				r := cliproxyexecutor.Request{Model: "gemini-4-hydrogen", Payload: raw}
+				o := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+				if _, _, _, errPrep := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), "gemini-4-hydrogen", r, o, d); errPrep != nil {
+					t.Fatalf("expected top-level Gemini replay validation to succeed, got: %v", errPrep)
+				}
+			})
+		}
+	})
+
+	t.Run("rejects_empty_boundary_and_excess_split_turns", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			raw     string
+			wantErr string
+		}{
+			{
+				name: "empty_parts_boundary",
+				raw: `{
+					"contents": [
+						{"role": "user", "parts": [{"text": "call echo"}]},
+						{"role": "model", "parts": [{"functionCall": {"id": "call_1", "name": "echo", "args": {}}}]},
+						{"role": "user", "parts": []},
+						{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "echo", "response": {"ok": true}}}]}
+					]
+				}`,
+				wantErr: "content appears before 1 pending functionResponse part(s)",
+			},
+			{
+				name: "excess_split_turns",
+				raw: `{
+					"contents": [
+						{"role": "user", "parts": [{"text": "call echo twice"}]},
+						{"role": "model", "parts": [
+							{"functionCall": {"id": "call_1", "name": "echo", "args": {}}},
+							{"functionCall": {"id": "call_2", "name": "echo", "args": {}}}
+						]},
+						{"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "echo", "response": {"ok": 1}}}]},
+						{"role": "user", "parts": [{"functionResponse": {"id": "call_2", "name": "echo", "response": {"ok": 2}}}]},
+						{"role": "user", "parts": [{"functionResponse": {"id": "call_3", "name": "echo", "response": {"ok": 3}}}]}
+					]
+				}`,
+				wantErr: "functionResponse count 3 does not match pending functionCall count 2",
+			},
+			{
+				name: "interleaved_user_function_call_and_response",
+				raw: `{
+					"contents": [
+						{"role": "user", "parts": [{"text": "call echo"}]},
+						{"role": "model", "parts": [{"functionCall": {"id": "call_1", "name": "echo", "args": {}}}]},
+						{"role": "user", "parts": [
+							{"functionResponse": {"id": "call_1", "name": "echo", "response": {"ok": true}}},
+							{"functionCall": {"id": "call_2", "name": "echo", "args": {}}}
+						]}
+					]
+				}`,
+				wantErr: "functionCall and functionResponse parts must not be interleaved in the same content",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := []byte(tc.raw)
+				tr, errTr := translatorgeminigemini.ConvertGeminiRequestToGemini("gemini-4-hydrogen", raw, false)
+				if errTr != nil {
+					t.Fatalf("ConvertGeminiRequestToGemini failed: %v", errTr)
+				}
+				d := ojson.NewDoc(tr)
+				r := cliproxyexecutor.Request{Model: "gemini-4-hydrogen", Payload: raw}
+				o := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+				_, _, _, errPrep := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), "gemini-4-hydrogen", r, o, d)
+				if errPrep == nil || !strings.Contains(errPrep.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, errPrep)
+				}
+			})
 		}
 	})
 }

@@ -397,7 +397,8 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 		// cooldown (isAuthBlockedForModel); the projection must agree with it.
 		// When states exist, unmatched models stay schedulable by design, so the
 		// credential-wide fields must not suspend them here either.
-		if blocked, _, retryAfter := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
+		effectiveUnavailable := auth.Unavailable && !isOrphanedAuthUnavailable(auth, now)
+		if blocked, _, retryAfter := availabilityBlock(effectiveUnavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
 			isSuspended = true
 			if retryAfter.IsZero() {
 				openEnded = true
