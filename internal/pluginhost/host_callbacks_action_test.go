@@ -1,9 +1,10 @@
 package pluginhost
 
 import (
-	"encoding/json"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -43,11 +44,7 @@ func TestHostModelExecutionRequestActionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	var fields map[string]any
-	if err = json.Unmarshal(raw, &fields); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if _, exists := fields["action"]; exists {
+	if ojson.NewDoc(raw).Get("action").Exists() {
 		t.Fatal("empty action must be omitted from the wire format")
 	}
 }
