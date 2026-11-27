@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -65,7 +67,8 @@ func (w *Watcher) syncAuthDirWatch() {
 	if oldWatched == target {
 		return
 	}
-	if oldWatched != "" && !w.sameNormalizedAuthPath(oldWatched, w.configPath) && !w.sameNormalizedAuthPath(oldWatched, target) {
+	if oldWatched != "" && !w.sameNormalizedAuthPath(oldWatched, w.configPath) && !w.sameNormalizedAuthPath(oldWatched, target) &&
+		(w.configDirWatch == "" || !w.sameNormalizedAuthPath(oldWatched, filepath.Dir(w.configPath))) {
 		if errRemove := w.watcher.Remove(oldWatched); errRemove != nil {
 			log.Debugf("failed to remove previous auth directory watch %s: %v", oldWatched, errRemove)
 		}
@@ -112,7 +115,18 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
 	normalizedAuthDir := w.normalizeAuthPath(w.currentAuthDir())
-	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
+	isConfigPath := normalizedName == normalizedConfigPath
+	isConfigEvent := isConfigPath && event.Op&configOps != 0
+	// Replacing the config by rename (atomic saves, many editors) drops the watch on
+	// the old file; inotify then reports Remove and nothing more. Watch the new file.
+	// A rename still schedules its reload when no file is there yet, so a
+	// replacement that lands before the debounce fires is applied.
+	if isConfigPath && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		isConfigEvent = w.rearmConfigWatch() || isConfigEvent
+	} else if isConfigPath && event.Op&fsnotify.Create != 0 {
+		// The file came back after the re-arm gave up; the directory watch reported it.
+		w.ensureConfigWatch()
+	}
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
@@ -286,4 +300,98 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	}
 	w.clientsMutex.Unlock()
 	return false
+}
+
+// rearmConfigWatch watches the config path again after its file was replaced or
+// removed. It reports whether a config file exists there to reload.
+func (w *Watcher) rearmConfigWatch() bool {
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(replaceCheckDelay)
+		}
+		if _, errStat := os.Stat(w.configPath); errStat != nil {
+			continue
+		}
+		if w.watcher == nil {
+			return true
+		}
+		// Another replace can remove the file between the stat and the add. The
+		// old file's watch is already gone and no later event would retry, so
+		// check and add again until the add sticks.
+		errAdd := addConfigWatch(w.watcher, w.configPath)
+		if errAdd == nil {
+			return true
+		}
+		if !errors.Is(errAdd, fs.ErrNotExist) {
+			log.WithError(errAdd).Warnf("failed to watch replaced config file %s", w.configPath)
+			return true
+		}
+	}
+	// The file is not back yet. Watch its directory so a replacement that lands
+	// later still re-arms the file watch (ensureConfigWatch) and reloads.
+	w.watchConfigDirForReplacement()
+	return false
+}
+
+// watchConfigDirForReplacement watches the config file's directory until the
+// file is back. When that directory is the auth directory it is already watched.
+func (w *Watcher) watchConfigDirForReplacement() {
+	if w == nil || w.watcher == nil || w.stopped.Load() {
+		return
+	}
+	w.watchMu.Lock()
+	defer w.watchMu.Unlock()
+	dir := filepath.Dir(w.configPath)
+	if w.configDirWatch != "" || (w.watchedAuthDir != "" && w.sameNormalizedAuthPath(dir, w.watchedAuthDir)) {
+		return
+	}
+	if errAdd := w.watcher.Add(dir); errAdd != nil {
+		log.WithError(errAdd).Warnf("config file %s was removed and its directory cannot be watched; it is no longer watched for changes", w.configPath)
+		return
+	}
+	w.configDirWatch = dir
+	log.Warnf("config file %s was removed; watching %s until it is back", w.configPath, dir)
+}
+
+// ensureConfigWatch watches the config file again when it exists but is not
+// watched (it was replaced after the re-arm checks gave up), then drops the
+// directory watch that was waiting for it.
+func (w *Watcher) ensureConfigWatch() {
+	if w == nil || w.watcher == nil || w.stopped.Load() {
+		return
+	}
+	w.watchMu.Lock()
+	defer w.watchMu.Unlock()
+	watched := false
+	for _, path := range w.watcher.WatchList() {
+		if w.sameNormalizedAuthPath(path, w.configPath) {
+			watched = true
+			break
+		}
+	}
+	if !watched {
+		if _, errStat := os.Stat(w.configPath); errStat != nil {
+			return
+		}
+		if errAdd := addConfigWatch(w.watcher, w.configPath); errAdd != nil {
+			if !errors.Is(errAdd, fs.ErrNotExist) {
+				log.WithError(errAdd).Warnf("failed to watch replaced config file %s", w.configPath)
+			}
+			return
+		}
+		log.Infof("config file %s is back; watching it again", w.configPath)
+	}
+	if w.configDirWatch != "" {
+		if w.watchedAuthDir == "" || !w.sameNormalizedAuthPath(w.configDirWatch, w.watchedAuthDir) {
+			if errRemove := w.watcher.Remove(w.configDirWatch); errRemove != nil {
+				log.Debugf("failed to remove config directory watch %s: %v", w.configDirWatch, errRemove)
+			}
+		}
+		w.configDirWatch = ""
+	}
+}
+
+// addConfigWatch adds the config file to the fsnotify watcher; tests replace it.
+var addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
+	return watcher.Add(path)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2243,4 +2244,312 @@ func TestConcurrentSetConfigKeepsWatchedAuthDirOnLatestConfig(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for fsnotify update from dirC")
 	}
+}
+
+func TestConfigWatchSurvivesRenameReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+
+	reloadedPorts := make(chan int, 64)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
+		if cfg != nil {
+			reloadedPorts <- cfg.Port
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+
+	// Atomic saves replace the file by rename, which drops a watch on the old
+	// inode. Every replace, not just the first, must still reload.
+	for _, port := range []int{8001, 8002, 8003} {
+		tmp := filepath.Join(tmpDir, ".config.yaml.tmp")
+		if err = os.WriteFile(tmp, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir)), 0o644); err != nil {
+			t.Fatalf("failed to write temp config: %v", err)
+		}
+		if err = os.Rename(tmp, configPath); err != nil {
+			t.Fatalf("failed to replace config: %v", err)
+		}
+		waitForReloadedPort(t, reloadedPorts, port)
+	}
+}
+
+func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	// inotify drops the watch when a rename replaces the file and reports Remove
+	// for it; the new file at the same path must be watched again and reloaded.
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched again, watch list %v", configPath, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
+}
+
+// A second replace can remove the config between the existence check and the
+// add. The add fails with ENOENT and nothing else would retry it, so the re-arm
+// must retry until the watch is in place.
+func TestHandleEventConfigRemoveRetriesWatchLostToSecondReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+	original := addConfigWatch
+	t.Cleanup(func() { addConfigWatch = original })
+	adds := 0
+	addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
+		adds++
+		if adds == 1 {
+			// The second save's rename lands here: the stat saw a file, the add does not.
+			return &os.PathError{Op: "inotify_add_watch", Path: path, Err: syscall.ENOENT}
+		}
+		return original(watcher, path)
+	}
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched after the retried add (adds=%d), watch list %v", configPath, adds, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
+}
+
+// A rename whose replacement lands after the bounded re-arm checks still schedules
+// the reload a rename always did, so the new file is applied once it exists. A bare
+// Remove with no file schedules nothing.
+func TestHandleEventConfigRenameStillReloadsWhenRearmFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	w := &Watcher{configPath: configPath, authDir: filepath.Join(tmpDir, "auth")}
+	t.Cleanup(w.stopConfigReloadTimer)
+	scheduled := func() bool {
+		w.configReloadMu.Lock()
+		defer w.configReloadMu.Unlock()
+		return w.configReloadTimer != nil
+	}
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+	if scheduled() {
+		t.Fatal("a Remove of a config that is still absent scheduled a reload")
+	}
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Rename})
+	if !scheduled() {
+		t.Fatal("a Rename whose replacement is not there yet did not schedule a reload")
+	}
+}
+
+// waitForReloadedPort consumes reload callbacks until one carries port. The
+// timeout only guards against a hang; ordering comes from the callbacks.
+func waitForReloadedPort(t *testing.T, reloadedPorts <-chan int, port int) {
+	t.Helper()
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	for {
+		select {
+		case got := <-reloadedPorts:
+			if got == port {
+				return
+			}
+		case <-hangGuard.C:
+			t.Fatalf("no reload with port %d after replacing the config", port)
+		}
+	}
+}
+
+// A replacement that lands after the bounded re-arm checks (here, after the
+// rename event was fully handled) must still be watched again once it appears,
+// and a later edit must reload too. With only the file watched, the old watch is
+// gone with the renamed file, so the watcher must notice the new file some other
+// way (its directory).
+func TestConfigWatchRestoredForLateReplacement(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+
+	reloadedPorts := make(chan int, 64)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
+		if cfg != nil {
+			reloadedPorts <- cfg.Port
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+
+	// The old file is renamed away and nothing replaces it yet. Deliver the
+	// rename directly so the test knows its handling, including the bounded
+	// re-arm, has finished before the replacement appears.
+	if err = os.Rename(configPath, filepath.Join(tmpDir, "config.yaml.old")); err != nil {
+		t.Fatalf("rename config away: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Rename})
+
+	// The replacement arrives late.
+	tmp := filepath.Join(tmpDir, ".config.yaml.tmp")
+	if err = os.WriteFile(tmp, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", 8001, authDir)), 0o644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err = os.Rename(tmp, configPath); err != nil {
+		t.Fatalf("move replacement into place: %v", err)
+	}
+	waitForReloadedPort(t, reloadedPorts, 8001)
+
+	// A later in-place edit must reload as well.
+	if err = os.WriteFile(configPath, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", 8002, authDir)), 0o644); err != nil {
+		t.Fatalf("edit config: %v", err)
+	}
+	waitForReloadedPort(t, reloadedPorts, 8002)
+}
+
+// A bare Remove schedules no reload, so when the replacement lands after the
+// re-arm gave up, only the directory watch can notice it. It must be watched
+// and applied, and a later edit must reload too.
+func TestConfigWatchRestoredWhenReplacementFollowsRemove(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+	reloadedPorts := make(chan int, 64)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
+		if cfg != nil {
+			reloadedPorts <- cfg.Port
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+
+	if err = os.Remove(configPath); err != nil {
+		t.Fatalf("remove config: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	tmp := filepath.Join(tmpDir, ".config.yaml.tmp")
+	if err = os.WriteFile(tmp, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", 8001, authDir)), 0o644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err = os.Rename(tmp, configPath); err != nil {
+		t.Fatalf("move replacement into place: %v", err)
+	}
+	waitForReloadedPort(t, reloadedPorts, 8001)
+
+	if err = os.WriteFile(configPath, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", 8002, authDir)), 0o644); err != nil {
+		t.Fatalf("edit config: %v", err)
+	}
+	waitForReloadedPort(t, reloadedPorts, 8002)
 }

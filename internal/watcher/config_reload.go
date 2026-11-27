@@ -63,6 +63,9 @@ func (w *Watcher) reloadConfigIfChanged() {
 		log.Debugf("ignoring empty config file write event")
 		return
 	}
+	// A replacement that landed after the re-arm checks gave up is applied here;
+	// make sure later edits to it are seen too.
+	w.ensureConfigWatch()
 	newHash := config.ComputeSourceHash(data)
 
 	w.clientsMutex.RLock()

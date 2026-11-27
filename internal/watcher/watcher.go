@@ -33,11 +33,15 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath                 string
-	authDir                    string
-	watchMu                    sync.Mutex
-	started                    bool
-	watchedAuthDir             string
+	configPath     string
+	authDir        string
+	watchMu        sync.Mutex
+	started        bool
+	watchedAuthDir string
+	// configDirWatch is the config file's directory while it is watched to catch a
+	// replacement of a config file that was removed (guarded by watchMu); empty
+	// when not watched, or when it is the auth directory, which is always watched.
+	configDirWatch             string
 	config                     *config.Config
 	clientsMutex               sync.RWMutex
 	authRescanMu               sync.Mutex
