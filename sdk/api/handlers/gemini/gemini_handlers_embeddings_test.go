@@ -146,8 +146,8 @@ func TestGeminiHandlerUnknownActionReturnsNotFound(t *testing.T) {
 			if !strings.Contains(recorder.Body.String(), "invalid_request_error") {
 				t.Fatalf("body = %q, want invalid_request_error", recorder.Body.String())
 			}
-			if !strings.Contains(recorder.Body.String(), "not found") {
-				t.Fatalf("body = %q, want not found message", recorder.Body.String())
+			if !strings.Contains(recorder.Body.String(), "Unsupported method") {
+				t.Fatalf("body = %q, want unsupported method message", recorder.Body.String())
 			}
 			if _, _, calls := executor.snapshot(); calls != 0 {
 				t.Fatalf("executor calls = %d, want 0", calls)

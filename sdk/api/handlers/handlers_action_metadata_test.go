@@ -17,8 +17,11 @@ func TestPluginExecutorRequestCarriesModelAction(t *testing.T) {
 	h := &BaseAPIHandler{}
 	for _, action := range []string{"embedContent", "batchEmbedContents", "decisions"} {
 		t.Run(action, func(t *testing.T) {
-			req, opts := h.pluginExecutorRequest(context.Background(), "gemini", "gemini", "gemini-embedding-001", "gemini-embedding-001",
+			req, opts, _, errMsg := h.preparePluginExecutorRequest(context.Background(), "gemini", "gemini", "gemini-embedding-001", "gemini-embedding-001",
 				[]byte(`{"requests":[]}`), "", false, modelExecutionOptions{Action: action, Path: "/v1beta/models/gemini-embedding-001:" + action})
+			if errMsg != nil {
+				t.Fatalf("preparePluginExecutorRequest() error = %v", errMsg.Error)
+			}
 			if got, _ := req.Metadata[coreexecutor.RequestActionMetadataKey].(string); got != action {
 				t.Fatalf("req.Metadata[action] = %q, want %q", got, action)
 			}
@@ -34,8 +37,11 @@ func TestPluginExecutorRequestCarriesModelAction(t *testing.T) {
 
 func TestPluginExecutorRequestOmitsActionWhenAbsent(t *testing.T) {
 	h := &BaseAPIHandler{}
-	req, opts := h.pluginExecutorRequest(context.Background(), "gemini", "gemini", "gemini-2.5-pro", "gemini-2.5-pro",
+	req, opts, _, errMsg := h.preparePluginExecutorRequest(context.Background(), "gemini", "gemini", "gemini-2.5-pro", "gemini-2.5-pro",
 		[]byte(`{"contents":[]}`), "", false, modelExecutionOptions{})
+	if errMsg != nil {
+		t.Fatalf("preparePluginExecutorRequest() error = %v", errMsg.Error)
+	}
 	if _, exists := req.Metadata[coreexecutor.RequestActionMetadataKey]; exists {
 		t.Fatal("chat requests must not gain action metadata")
 	}

@@ -539,11 +539,11 @@ func staticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "claude":
 		return data.Claude
 	case "gemini", "gemini-interactions":
-		return data.Gemini
+		return WithGeminiDecisionBuiltins(WithGeminiEmbeddingBuiltins(data.Gemini))
 	case "vertex":
 		return data.Vertex
 	case "aistudio":
-		return data.AIStudio
+		return WithGeminiDecisionBuiltins(WithGeminiEmbeddingBuiltins(data.AIStudio))
 	case "codex":
 		return WithCodexBuiltins(data.CodexPro)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
