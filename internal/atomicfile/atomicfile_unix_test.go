@@ -509,3 +509,67 @@ func TestWriteFileKeepsTargetOnIOErrorBeforeFallbacks(t *testing.T) {
 		}
 	}
 }
+
+// An I/O error while resolving a symlink is failing storage, not a dangling
+// link: the save must return it with the target untouched, not write in place.
+func TestWriteFileKeepsTargetWhenSymlinkResolutionFails(t *testing.T) {
+	original := evalSymlinks
+	t.Cleanup(func() { evalSymlinks = original })
+	evalSymlinks = func(path string) (string, error) {
+		return "", &os.PathError{Op: "lstat", Path: path, Err: syscall.EIO}
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	link := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(target, []byte(`{"refresh_token":"old"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	for _, replace := range []bool{false, true} {
+		var err error
+		if replace {
+			err = ReplaceFile(link, []byte(`{"refresh_token":"new"}`), 0o600)
+		} else {
+			err = WriteFile(link, []byte(`{"refresh_token":"new"}`), 0o600)
+		}
+		if !errors.Is(err, syscall.EIO) {
+			t.Fatalf("replace=%v: error = %v, want it to wrap EIO", replace, err)
+		}
+		if got, _ := os.ReadFile(target); string(got) != `{"refresh_token":"old"}` {
+			t.Fatalf("replace=%v: target = %q, want the old content untouched", replace, got)
+		}
+	}
+}
+
+// An I/O error from the exchange does not show the swap was not applied: if it
+// was, the temp path now holds the old credential, and a rename would put it
+// back over the new one. The save must stop there and return the error.
+func TestReplaceFileDoesNotRenameAfterExchangeIOError(t *testing.T) {
+	originalExchange, originalAvailable, originalRename := exchange, exchangeAvailable, rename
+	t.Cleanup(func() { exchange, exchangeAvailable, rename = originalExchange, originalAvailable, originalRename })
+	exchangeAvailable = func() bool { return true }
+	exchange = func(from, to string) error {
+		return &os.LinkError{Op: "renameat2", Old: from, New: to, Err: syscall.EIO}
+	}
+	renames := 0
+	rename = func(from, to string) error {
+		renames++
+		return os.Rename(from, to)
+	}
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte(`{"refresh_token":"old"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := ReplaceFile(path, []byte(`{"refresh_token":"new"}`), 0o600)
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("ReplaceFile() error = %v, want it to wrap EIO", err)
+	}
+	if renames != 0 {
+		t.Fatalf("rename called %d times after an exchange I/O error, want 0", renames)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}

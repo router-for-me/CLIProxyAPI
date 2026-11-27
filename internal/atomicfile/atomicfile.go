@@ -14,8 +14,8 @@ import (
 )
 
 // rename, exchange, exchangeAvailable, matchOwner, statTarget, chmodTemp,
-// syncTemp, removeFile and createTempFile are replaced in tests to exercise the
-// fallbacks.
+// syncTemp, removeFile, createTempFile and evalSymlinks are replaced in tests to
+// exercise the fallbacks.
 var (
 	rename            = os.Rename
 	exchange          = exchangeFiles
@@ -26,6 +26,7 @@ var (
 	syncTemp          = func(file *os.File) error { return file.Sync() }
 	removeFile        = os.Remove
 	createTempFile    = createTemp
+	evalSymlinks      = filepath.EvalSymlinks
 )
 
 // keptModeBits are the mode bits a replacement carries over from the file it
@@ -75,8 +76,12 @@ func ReplaceFile(path string, data []byte, perm os.FileMode) error {
 
 func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	target := path
-	if resolved, errResolve := filepath.EvalSymlinks(path); errResolve == nil {
+	if resolved, errResolve := evalSymlinks(path); errResolve == nil {
 		target = resolved
+	} else if capacityError(errResolve) {
+		// Failing storage, not a dangling link: writing in place would truncate
+		// the only valid copy.
+		return fmt.Errorf("atomicfile: resolve %s: %w", path, errResolve)
 	} else if linkInfo, errLstat := os.Lstat(path); errLstat == nil && linkInfo.Mode()&os.ModeSymlink != 0 {
 		// A dangling symlink: a rename would replace the link. Writing through it
 		// creates its target, as os.WriteFile does (ReplaceFile fails instead).
@@ -235,6 +240,11 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 			}
 			return nil
 		case errors.Is(errSwap, os.ErrNotExist):
+			return fmt.Errorf("atomicfile: replace %s: %w", target, errSwap)
+		case capacityError(errSwap):
+			// An I/O error does not show the swap was not applied. If it was,
+			// tmpPath holds the previous content, and the rename below would put
+			// it back over the new one. Stop here.
 			return fmt.Errorf("atomicfile: replace %s: %w", target, errSwap)
 		case !exchangeUnsupported(errSwap):
 			// The exchange can be refused while a plain rename is still allowed (a
