@@ -145,6 +145,17 @@ func replaceCPASessionID(val, sessionID string) string {
 	return sb.String()
 }
 
+// CustomHeaderName returns the canonical header name of a header: attribute,
+// and false if the attribute is not a custom header. Every reader of custom
+// header attributes uses it, so they all agree on which header an attribute sets.
+func CustomHeaderName(attr string) (string, bool) {
+	if !strings.HasPrefix(attr, "header:") {
+		return "", false
+	}
+	name := http.CanonicalHeaderKey(strings.TrimSpace(strings.TrimPrefix(attr, "header:")))
+	return name, name != ""
+}
+
 // extractCustomHeaders resolves header: attributes keyed by canonical header
 // name. Attribute names that differ only by case would otherwise race through
 // random map order, so keys are visited in sorted byte order and the first one
@@ -155,17 +166,14 @@ func extractCustomHeaders(attrs map[string]string, clientHeaders http.Header, ct
 	}
 	keys := make([]string, 0, len(attrs))
 	for k := range attrs {
-		if strings.HasPrefix(k, "header:") {
+		if _, ok := CustomHeaderName(k); ok {
 			keys = append(keys, k)
 		}
 	}
 	sort.Strings(keys)
 	headers := make(map[string]string)
 	for _, k := range keys {
-		name := http.CanonicalHeaderKey(strings.TrimSpace(strings.TrimPrefix(k, "header:")))
-		if name == "" {
-			continue
-		}
+		name, _ := CustomHeaderName(k)
 		if _, ok := headers[name]; ok {
 			continue
 		}

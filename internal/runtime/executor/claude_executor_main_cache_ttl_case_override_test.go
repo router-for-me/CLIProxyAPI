@@ -36,3 +36,26 @@ func TestClaudeExecutor_MainCacheTTL1hCaseVariantOverridesAgreeWithSentHeader(t 
 		}
 	}
 }
+
+// A credential override whose attribute name has spaces around the header name
+// is still sent, so the main-cache-ttl-1h gate must see it too.
+func TestClaudeExecutor_MainCacheTTL1hSpacedOverrideNameAgreesWithSentHeader(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ClaudeCode.MainCacheTTL1h = true
+	executor := NewClaudeExecutor(cfg)
+	auth := mainCacheTTLTestAuth(mainCacheTTLTestGateway, map[string]string{
+		"header: Anthropic-Beta ": "claude-code-20250219,oauth-2025-04-20",
+	})
+	payload := mainCacheTTLTestPayload("")
+	for _, stream := range []bool{false, true} {
+		seen, err := runMainCacheTTLNativeOAuth(t, executor, auth, payload, stream, "msg_spaced")
+		if err != nil {
+			t.Fatalf("stream=%t: error = %v", stream, err)
+		}
+		has1h := helps.ClaudePayloadHas1hTTL(seen.body)
+		betas := strings.Join(seen.header.Values("Anthropic-Beta"), ",")
+		if has1h || strings.Contains(betas, claudeExtendedCacheTTLBeta) {
+			t.Fatalf("stream=%t: body 1h=%t, Anthropic-Beta=%q; want no 1h upgrade, since the override omits the beta", stream, has1h, betas)
+		}
+	}
+}

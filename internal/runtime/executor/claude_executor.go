@@ -463,7 +463,7 @@ func claudeAuthBetaOverride(ctx context.Context, auth *cliproxyauth.Auth, anthro
 	}
 	betaAttrs := make(map[string]string)
 	for name, value := range auth.Attributes {
-		if strings.EqualFold(name, "header:Anthropic-Beta") {
+		if header, ok := util.CustomHeaderName(name); ok && header == "Anthropic-Beta" {
 			raw = append(raw, value)
 			betaAttrs[name] = value
 		}
