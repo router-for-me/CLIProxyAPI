@@ -135,9 +135,15 @@ func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequest(payload []byte, o
 	if claudeThreadContinuationNeedsAliasState(payload) {
 		aliases, ok := e.claudeOAuthToolAliasStore().load(claudeOAuthToolAliasKeys(payload, ""))
 		if !ok {
+			if options.keepThreadAliasesOnly {
+				return payload, nil, nil
+			}
 			return nil, nil, newClaudeThreadNotFoundError()
 		}
 		return payload, aliases, nil
+	}
+	if options.keepThreadAliasesOnly && !e.claudeThreadHasOAuthToolAliases(ojson.GetBytesNoCopy(payload, "thread.previous_message_id").String()) {
+		return payload, nil, nil
 	}
 	remapped, aliases := prepareClaudeOAuthToolNamesForUpstream(payload, options)
 	return remapped, aliases, nil
@@ -147,12 +153,28 @@ func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequestDoc(doc *ojson.Doc
 	if claudeThreadContinuationNeedsAliasStateDoc(doc) {
 		aliases, ok := e.claudeOAuthToolAliasStore().load(claudeOAuthToolAliasKeysDoc(doc, ""))
 		if !ok {
+			if options.keepThreadAliasesOnly {
+				return nil, nil
+			}
 			return nil, newClaudeThreadNotFoundError()
 		}
 		return aliases, nil
 	}
+	if options.keepThreadAliasesOnly && !e.claudeThreadHasOAuthToolAliases(doc.Get("thread.previous_message_id").String()) {
+		return nil, nil
+	}
 	aliases, _ := prepareClaudeOAuthToolNamesForUpstreamDoc(doc, options)
 	return aliases, nil
+}
+
+// claudeThreadHasOAuthToolAliases reports whether the message a thread continues
+// from was sent upstream with aliased tool names.
+func (e *ClaudeExecutor) claudeThreadHasOAuthToolAliases(previousMessageID string) bool {
+	if previousMessageID == "" {
+		return false
+	}
+	aliases, ok := e.claudeOAuthToolAliasStore().load([]string{"message:" + previousMessageID})
+	return ok && len(aliases) > 0
 }
 
 func (e *ClaudeExecutor) rememberClaudeOAuthToolAliases(payload []byte, aliases map[string]string, messageID string) {

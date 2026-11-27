@@ -210,8 +210,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	var oauthToolNamesReverseMap map[string]string
-	if fp.MCPAlias && cloaked {
+	// Thread state is handled even when aliasing is disabled, so threads that
+	// started with aliases keep them after a hot reload turns aliasing off.
+	if fp.ProfileClaudeCodeCLI && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx, opts.Metadata, req.Metadata)
+		mcpAliases.keepThreadAliasesOnly = !fp.MCPAlias
 		oauthToolNamesReverseMap, err = e.prepareClaudeOAuthToolNamesForRequestDoc(doc, mcpAliases)
 		if err != nil {
 			return nil, err

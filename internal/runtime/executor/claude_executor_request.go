@@ -1881,6 +1881,10 @@ func isClaudeOAuthToken(apiKey string) bool {
 
 type claudeMCPAliasOptions struct {
 	secret string
+	// keepThreadAliasesOnly is set when disable-mcp-tool-alias is on: new
+	// declarations keep their client names, but a thread continued from a
+	// message that was sent with aliases keeps using that thread's aliases.
+	keepThreadAliasesOnly bool
 }
 
 func resolveClaudeMCPAliasOptions(ctx context.Context, metadataSets ...map[string]any) claudeMCPAliasOptions {

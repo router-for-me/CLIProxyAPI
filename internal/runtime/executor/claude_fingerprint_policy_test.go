@@ -158,6 +158,33 @@ func TestResolveClaudeFingerprintPolicy(t *testing.T) {
 			wantAuthOAuth:    false,
 			wantProfileOAuth: false,
 		},
+		{
+			name:             "claude oauth with disable-mcp-tool-alias keeps CLI fingerprint",
+			apiKey:           "sk-ant-oat-no-mcp-alias",
+			cfg:              &config.Config{Claude: config.ClaudeConfig{DisableMCPToolAlias: true}},
+			wantAuthOAuth:    true,
+			wantProfileOAuth: true,
+			wantMCP:          false,
+			wantDiagnostics:  true,
+			wantCancellation: true,
+		},
+		{
+			name:   "api key claude-code-cli with disable-mcp-tool-alias keeps CLI fingerprint",
+			apiKey: "key-config-no-mcp-alias",
+			attrs:  map[string]string{"api_key": "key-config-no-mcp-alias", "base_url": "https://gateway.example"},
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{DisableMCPToolAlias: true},
+				ClaudeKey: []config.ClaudeKey{{
+					APIKey:             "key-config-no-mcp-alias",
+					BaseURL:            "https://gateway.example",
+					FingerprintProfile: "claude-code-cli",
+				}},
+			},
+			wantProfileOAuth: true,
+			wantSynthesize:   true,
+			wantMCP:          false,
+			wantDiagnostics:  true,
+		},
 	}
 
 	for _, tt := range tests {

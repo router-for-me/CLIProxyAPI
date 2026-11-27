@@ -9106,6 +9106,147 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	}
 }
 
+func TestClaudeExecutor_ExecuteOAuthDisableMCPToolAliasKeepsCloaking(t *testing.T) {
+	var upstreamToolName string
+	var upstreamBody []byte
+	var upstreamHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = bytes.Clone(body)
+		upstreamHeaders = r.Header.Clone()
+		upstreamToolName = ojson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{"query":"go"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, upstreamToolName)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{Claude: config.ClaudeConfig{DisableMCPToolAlias: true}})
+	auth := &cliproxyauth.Auth{
+		ID: "oauth-disable-mcp-alias",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-disable-mcp-alias",
+			"base_url": server.URL,
+		},
+		Metadata: claudeOAuthTestMetadata(),
+	}
+	payload := []byte(`{"model":"claude-opus-5","system":"messages-system-prompt","messages":[{"role":"user","content":"search"}],"tools":[{"name":"search_web","description":"search","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}]}`)
+	resp, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if upstreamToolName != "search_web" {
+		t.Fatalf("upstream tool name = %q, want original %q", upstreamToolName, "search_web")
+	}
+	if got := ojson.GetBytes(resp.Payload, "content.0.name").String(); got != "search_web" {
+		t.Fatalf("client response tool name = %q, want search_web; payload=%s", got, resp.Payload)
+	}
+	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); !ok {
+		t.Fatalf("Claude OAuth body is missing CCH when disable-mcp-tool-alias is true: %s", upstreamBody)
+	}
+	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.321 (external, cli)" {
+		t.Fatalf("Messages User-Agent = %q, want CLI identity", got)
+	}
+	if got := ojson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+		t.Fatalf("Messages system.1.text = %q, want official CLI identity", got)
+	}
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt", "1h")
+}
+
+func TestClaudeExecutor_ExecuteStreamOAuthDisableMCPToolAliasKeepsCloaking(t *testing.T) {
+	var upstreamToolName string
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = bytes.Clone(body)
+		upstreamToolName = ojson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":%q,\"input\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", upstreamToolName)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{Claude: config.ClaudeConfig{DisableMCPToolAlias: true}})
+	auth := &cliproxyauth.Auth{
+		ID: "oauth-disable-mcp-alias-stream",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-disable-mcp-alias-stream",
+			"base_url": server.URL,
+		},
+		Metadata: claudeOAuthTestMetadata(),
+	}
+	payload := []byte(`{"model":"claude-opus-5","system":"stream-system-prompt","messages":[{"role":"user","content":"fetch"}],"tools":[{"name":"fetch_url","description":"fetch","input_schema":{"type":"object"}}],"stream":true}`)
+	result, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	var downstream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		downstream.Write(chunk.Payload)
+	}
+	if upstreamToolName != "fetch_url" {
+		t.Fatalf("upstream tool name = %q, want original %q", upstreamToolName, "fetch_url")
+	}
+	if got := ojson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+		t.Fatalf("streaming system.1.text = %q, want official CLI identity", got)
+	}
+	if !strings.Contains(downstream.String(), `"name":"fetch_url"`) {
+		t.Fatalf("downstream stream did not preserve fetch_url: %s", downstream.String())
+	}
+}
+
+func TestClaudeExecutor_CountTokensOAuthDisableMCPToolAliasKeepsCloaking(t *testing.T) {
+	var upstreamToolName string
+	var upstreamBody []byte
+	var upstreamHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = bytes.Clone(body)
+		upstreamHeaders = r.Header.Clone()
+		upstreamToolName = ojson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"input_tokens":42}`)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{Claude: config.ClaudeConfig{DisableMCPToolAlias: true}})
+	auth := &cliproxyauth.Auth{
+		ID: "oauth-disable-mcp-alias-count",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-disable-mcp-alias-count",
+			"base_url": server.URL,
+		},
+		Metadata: claudeOAuthTestMetadata(),
+	}
+	payload := []byte(`{"model":"claude-opus-5","system":"count-system-prompt","messages":[{"role":"user","content":"search"}],"tools":[{"name":"search_web","description":"search","input_schema":{"type":"object"}}]}`)
+	resp, errCount := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errCount != nil {
+		t.Fatalf("countTokensUpstream() error = %v", errCount)
+	}
+	if upstreamToolName != "search_web" {
+		t.Fatalf("count_tokens upstream tool name = %q, want original %q", upstreamToolName, "search_web")
+	}
+	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.321 (external, cli)" {
+		t.Fatalf("count_tokens User-Agent = %q, want CLI identity", got)
+	}
+	if ojson.GetBytes(upstreamBody, "system").Exists() {
+		t.Fatalf("count_tokens should align CLI shape without top-level system: %s", upstreamBody)
+	}
+	if got := ojson.GetBytes(resp.Payload, "input_tokens").Int(); got != 42 {
+		t.Fatalf("count_tokens input_tokens = %d, want 42", got)
+	}
+}
+
 func TestPrependClaudeSystemReminders_FollowsToolResultsAndIsIdempotent(t *testing.T) {
 	payload := []byte(`{"messages":[` +
 		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
