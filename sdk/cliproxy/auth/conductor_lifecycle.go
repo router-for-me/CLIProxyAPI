@@ -189,6 +189,53 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, errMutation
 	}
 	defer releaseMutation()
+	return m.registerLocked(ctx, auth, releaseMutation)
+}
+
+// RegisterFileSnapshotIfAbsent registers an unversioned file-synthesized auth
+// snapshot only if no runtime auth with the same ID exists and the backing file
+// on disk still matches the snapshot, all verified under the per-auth mutation
+// lock. When an auth already exists under the lock, it returns a clone of that
+// existing auth with exists=true without overwriting it or bumping its
+// registration epoch. When the auth is still absent but the snapshot no longer
+// matches disk, it returns (nil, false, nil).
+func (m *Manager) RegisterFileSnapshotIfAbsent(ctx context.Context, auth *Auth) (registered *Auth, exists bool, err error) {
+	if m == nil || auth == nil {
+		return nil, false, nil
+	}
+	NormalizeCredentialMetadata(auth.Metadata)
+	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+		return nil, false, fmt.Errorf("register auth: %w", errWeight)
+	}
+	if auth.ID == "" {
+		auth.ID = uuid.NewString()
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+
+	m.mu.RLock()
+	existing, ok := m.auths[auth.ID]
+	var existingClone *Auth
+	if ok && existing != nil {
+		existingClone = existing.Clone()
+	}
+	m.mu.RUnlock()
+	if existingClone != nil {
+		return existingClone, true, nil
+	}
+	// Validate file snapshot freshness under the per-auth mutation gate
+	// without holding m.mu across filesystem I/O.
+	if auth.HasFileSnapshot() && !auth.FileSnapshotMatchesDisk() {
+		return nil, false, nil
+	}
+	registered, err = m.registerLocked(ctx, auth, releaseMutation)
+	return registered, false, err
+}
+
+func (m *Manager) registerLocked(ctx context.Context, auth *Auth, releaseMutation func()) (*Auth, error) {
 	now := time.Now()
 	if auth.Generation == 0 {
 		auth.Generation = 1
