@@ -224,6 +224,9 @@ func (m *Manager) lockAuthMutationWithPersistCancel(ctx context.Context, id stri
 // published object to Store.Save: readers and runtime-only writers remain live
 // during I/O. Only the store's delta is merged back, preserving intervening edits.
 func (m *Manager) persistLocked(ctx context.Context, auth *Auth) error {
+	if m.store == nil {
+		return nil
+	}
 	before := auth.Clone()
 	saved := auth.Clone()
 	m.mu.Unlock()
