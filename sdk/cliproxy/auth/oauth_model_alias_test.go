@@ -213,6 +213,32 @@ func TestOAuthModelAliasChannel_PluginProvider(t *testing.T) {
 	}
 }
 
+func TestRouteAwareSelectionRequiredWithAndWithoutAliases(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "routing-test", Provider: "antigravity"}
+	if manager.routeAwareSelectionRequired(auth, "public(high)") {
+		t.Fatal("unaliased model should use the scheduler")
+	}
+
+	auth.Prefix = "project"
+	if !manager.routeAwareSelectionRequired(auth, "project/public(high)") {
+		t.Fatal("credential prefix should require route-aware selection")
+	}
+	auth.Prefix = ""
+
+	aliases := []internalconfig.OAuthModelAlias{{Name: "upstream", Alias: "public"}}
+	SetOAuthModelAliasesAttribute(auth, aliases)
+	if !manager.routeAwareSelectionRequired(auth, "public(high)") {
+		t.Fatal("credential alias should require route-aware selection")
+	}
+	auth.Attributes = nil
+
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{"antigravity": aliases})
+	if !manager.routeAwareSelectionRequired(auth, "public(high)") {
+		t.Fatal("published global alias should require route-aware selection")
+	}
+}
+
 func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 

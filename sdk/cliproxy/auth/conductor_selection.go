@@ -2418,6 +2418,11 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 			// The base-model shard can handle routes whose public and state keys agree.
 			return thinking.ParseSuffix(route.ID).HasSuffix || !sameCanonicalModelKey(route.SourceModelID, routeModel)
 		}
+	} else if auth.Prefix == "" && auth.Attributes[oauthModelAliasesAttributeKey] == "" {
+		table, _ := m.oauthModelAlias.Load().(*oauthModelAliasTable)
+		if table == nil || len(table.reverse) == 0 {
+			return false
+		}
 	}
 	return !sameCanonicalModelKey(m.selectionModelForAuth(auth, routeModel), routeModel)
 }
