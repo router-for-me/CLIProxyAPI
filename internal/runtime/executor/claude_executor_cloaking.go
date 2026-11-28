@@ -830,7 +830,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cch
 
 func checkSystemInstructionsWithSigningModeDoc(doc *ojson.Doc, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) bool {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
+	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, true, "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -920,7 +920,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	turnOrigin ...string,
 ) []byte {
 	doc := ojson.NewDoc(payload)
-	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, turnOrigin...) {
+	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, true, turnOrigin...) {
 		return payload
 	}
 	return doc.Bytes()
@@ -935,6 +935,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	isSubagent bool,
 	prevReq, promptID string,
 	keepCallerSystemTopLevel bool,
+	keepClassifierShape bool,
 	turnOrigin ...string,
 ) bool {
 	if doc == nil {
@@ -945,6 +946,10 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
 	billingBlock := buildTextBlock(billingText, nil)
+	if keepClassifierShape && !strictMode && helps.IsClaudeAutoModeClassifierRequest(doc) {
+		keepClaudeClassifierSystemPromptDoc(doc, system, billingBlock)
+		return true
+	}
 
 	isExplicit := (len(turnOrigin) > 1 && turnOrigin[1] == "explicit_cache_mode") || isExplicitPromptCacheModeDoc(doc)
 	var agentCC *claudeCacheControl = &claudeCodeCacheControl
@@ -1199,6 +1204,84 @@ func validateClaudeCallerSystemBlocks(system ojson.Result) error {
 		return true
 	})
 	return blockErr
+}
+
+// keepClaudeClassifierSystemPromptDoc sends the auto-mode classifier in the shape
+// Claude Code itself uses: the billing header, then the caller's own system
+// blocks with their cache_control. It adds no CLI identity block, no
+// mid-conversation system turn, and no date reminder. The classifier's
+// messages are all user turns with the transcript last, so relocating its
+// system prompt would put the large stable prompt after the volatile
+// transcript and defeat prompt caching on every call.
+func keepClaudeClassifierSystemPromptDoc(doc *ojson.Doc, system ojson.Result, billingBlock string) {
+	blocks := append([]string{billingBlock}, claudeClassifierSystemBlocks(system)...)
+	_ = doc.SetRawBytes("system", []byte("["+strings.Join(blocks, ",")+"]"))
+}
+
+// claudeClassifierSystemBlocks rebuilds the classifier's system blocks with the
+// caller's cache_control only when it is a valid ephemeral marker with no ttl,
+// "5m", or "1h". Any other ttl would reach Anthropic as is, and TTL
+// normalization would also strip the 1h ttl from every later breakpoint.
+func claudeClassifierSystemBlocks(system ojson.Result) []string {
+	var blocks []string
+	for _, block := range collectForwardedClaudeSystemPromptBlocksWithCache(system) {
+		block.RawCC = sanitizeClaudeClassifierCacheControl(block.RawCC)
+		blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, true))
+	}
+	return blocks
+}
+
+// sanitizeClaudeClassifierCacheControl rebuilds a valid ephemeral marker in the
+// native {type, ttl, scope} shape. Anthropic accepts only scope "global" and
+// rejects unknown fields, so any other scope and every other field is dropped,
+// the same way the native constructor keeps scope only when it is "global".
+// A marker with an invalid ttl is dropped whole.
+func sanitizeClaudeClassifierCacheControl(rawCC string) string {
+	if rawCC == "" {
+		return ""
+	}
+	cc := ojson.Parse(rawCC)
+	sanitized := ojson.NewDocString(`{"type":"ephemeral"}`)
+	if ttl := cc.Get("ttl"); ttl.Exists() {
+		if ttl.Type != ojson.String || (ttl.String() != "5m" && ttl.String() != "1h") {
+			return ""
+		}
+		if errSet := sanitized.Set("ttl", ttl.String()); errSet != nil {
+			return ""
+		}
+	}
+	if scope := cc.Get("scope"); scope.Type == ojson.String && scope.String() == "global" {
+		if errSet := sanitized.Set("scope", "global"); errSet != nil {
+			return ""
+		}
+	}
+	return sanitized.String()
+}
+
+// claudeKeepsClassifierShapeDoc reports whether a cloaked request is the
+// auto-mode classifier and keeps its own system blocks at the top level. The
+// shape is kept only when the prompt reaches Anthropic unchanged.
+func claudeKeepsClassifierShapeDoc(doc *ojson.Doc, strictMode bool, matcher *helps.SensitiveWordMatcher) bool {
+	return !strictMode && helps.IsClaudeAutoModeClassifierRequest(doc) && !claudeSystemTextRewrittenBy(doc.Get("system"), matcher)
+}
+
+// claudeSystemTextRewrittenBy reports whether the sensitive-word rules would
+// change any system text. The classifier keeps its own prompt shape only when
+// that prompt reaches Anthropic unchanged; otherwise it takes the normal path.
+func claudeSystemTextRewrittenBy(system ojson.Result, matcher *helps.SensitiveWordMatcher) bool {
+	if matcher == nil {
+		return false
+	}
+	if system.Type == ojson.String {
+		return matcher.ObfuscateText(system.String()) != system.String()
+	}
+	rewritten := false
+	system.ForEach(func(_, part ojson.Result) bool {
+		text := part.Get("text").String()
+		rewritten = part.Get("type").String() == "text" && !util.IsClaudeCodeAttributionSystemText(text) && matcher.ObfuscateText(text) != text
+		return !rewritten
+	})
+	return rewritten
 }
 
 func collectForwardedClaudeSystemPromptBlocks(system ojson.Result) []string {
@@ -2762,6 +2845,7 @@ func applyCloakingInternalDoc(
 		prevReq,
 		promptID,
 		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
+		claudeKeepsClassifierShapeDoc(doc, settings.strictMode, settings.buildSensitiveWordMatcher()),
 		turnOriginArgs...,
 	)
 
@@ -3126,6 +3210,27 @@ func stripClaudeCacheControlTTLDoc(doc *ojson.Doc) bool {
 			return true
 		}
 		if errDel := doc.Delete(claudeCacheControlTTLPath(path)); errDel == nil {
+			changed = true
+		}
+		return true
+	})
+	return changed
+}
+
+// stripClaudeCacheControlScopeDoc removes scope from every cache_control block.
+// The count_tokens beta profile carries no prompt-caching-scope beta, so a
+// scope there makes Anthropic reject the count. A scope does not change the
+// count.
+func stripClaudeCacheControlScopeDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	changed := false
+	forEachClaudeCacheControlPathDoc(doc, func(path string, cacheControl ojson.Result) bool {
+		if !cacheControl.IsObject() || !cacheControl.Get("scope").Exists() {
+			return true
+		}
+		if errDel := doc.Delete(claudeCacheControlPath(path) + ".scope"); errDel == nil {
 			changed = true
 		}
 		return true

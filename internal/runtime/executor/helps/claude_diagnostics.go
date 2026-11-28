@@ -15,6 +15,7 @@ import (
 	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const (
@@ -787,6 +788,52 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// claudeAutoModeClassifierPrompt opens the system prompt of Claude Code's
+// auto-mode permission classifier.
+const claudeAutoModeClassifierPrompt = "You are a security monitor for autonomous AI coding agents."
+
+// IsClaudeAutoModeClassifierRequest reports whether a request has the shape of
+// Claude Code's auto-mode permission classifier: no tools, no tool_choice, only
+// user turns, and a system prompt that opens with the classifier sentence on
+// its first non-billing block. Claude Code sends it with its own system prompt
+// and no CLI identity block. A request with tools is an ordinary agent turn even
+// when its system prompt opens with the classifier sentence, so it must keep the
+// ordinary cloaked shape.
+func IsClaudeAutoModeClassifierRequest(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	if tools := doc.Get("tools"); tools.Exists() && (!tools.IsArray() || len(tools.Array()) > 0) {
+		return false
+	}
+	if doc.Get("tool_choice").Exists() {
+		return false
+	}
+	messages := doc.Get("messages")
+	if !messages.IsArray() || len(messages.Array()) == 0 {
+		return false
+	}
+	for _, message := range messages.Array() {
+		if message.Get("role").String() != "user" {
+			return false
+		}
+	}
+	system := doc.Get("system")
+	if system.Type == ojson.String {
+		return strings.HasPrefix(system.String(), claudeAutoModeClassifierPrompt)
+	}
+	first := ""
+	system.ForEach(func(_, part ojson.Result) bool {
+		text := part.Get("text").String()
+		if part.Get("type").String() != "text" || strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) {
+			return true
+		}
+		first = text
+		return false
+	})
+	return strings.HasPrefix(first, claudeAutoModeClassifierPrompt)
 }
 
 // IsClaudeProbeOrHelperRequest reports whether the request is a minimal

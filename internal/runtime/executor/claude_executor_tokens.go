@@ -213,8 +213,18 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 				return cliproxyexecutor.Response{}, errSystem
 			}
 		}
-		relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
-		if matcher := settings.buildSensitiveWordMatcher(); matcher != nil {
+		matcher := settings.buildSensitiveWordMatcher()
+		if claudeKeepsClassifierShapeDoc(doc, settings.strictMode, matcher) {
+			// Count the classifier in the shape the Messages path sends it.
+			_ = doc.SetRawBytes("system", []byte("["+strings.Join(claudeClassifierSystemBlocks(doc.Get("system")), ",")+"]"))
+			// count_tokens sends no extended-cache-ttl or prompt-caching-scope
+			// beta, and neither a ttl nor a scope changes the count.
+			stripClaudeCacheControlTTLDoc(doc)
+			stripClaudeCacheControlScopeDoc(doc)
+		} else {
+			relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
+		}
+		if matcher != nil {
 			helps.ObfuscateSensitiveWordsDoc(doc, matcher)
 		}
 	} else if policy.Uncloak {
