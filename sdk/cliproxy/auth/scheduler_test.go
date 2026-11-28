@@ -400,6 +400,37 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 }
 
+func TestSchedulerTracksReadyTokenExpiryAcrossCredentialUpdates(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	shard := &modelScheduler{entries: make(map[string]*scheduledAuth)}
+	upsert := func(expiry time.Time) {
+		auth := &Auth{
+			ID:       "oauth",
+			Provider: "gemini",
+			Metadata: map[string]any{
+				"access_token": "opaque",
+				"expires_at":   expiry.Format(time.RFC3339),
+			},
+		}
+		shard.upsertEntryLocked(buildScheduledAuthMetaWithModelSet(auth, nil, 0), now)
+	}
+	upsert(now.Add(time.Hour))
+	upsert(now.Add(3 * time.Hour))
+	shard.promoteExpiredLocked(now.Add(time.Hour))
+	if entry := shard.entries["oauth"]; entry.state != scheduledStateReady {
+		t.Fatalf("refreshed token state = %v, want ready", entry.state)
+	}
+	if want := now.Add(3 * time.Hour); !shard.nextTokenExpiry.Equal(want) {
+		t.Fatalf("next token expiry = %v, want %v", shard.nextTokenExpiry, want)
+	}
+
+	upsert(now.Add(2 * time.Hour))
+	shard.promoteExpiredLocked(now.Add(2 * time.Hour))
+	if entry := shard.entries["oauth"]; entry.state != scheduledStateBlocked {
+		t.Fatalf("expired token state = %v, want blocked", entry.state)
+	}
+}
+
 func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
 	t.Parallel()
 
