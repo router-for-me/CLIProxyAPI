@@ -251,9 +251,11 @@ func TestResponsesWebsocketIdleUpstreamEOFIsSilent(t *testing.T) {
 	<-closed
 	// A read deadline would break the client conn for good, so silence is checked in order:
 	// awaitCompleted fails on any error frame, and a loss frame would precede the completion.
-	// The idle socket is gone: a continuation cannot resume it.
+	// The idle socket is gone: a continuation cannot resume it. Whether the proxy has already
+	// seen the EOF when the continuation arrives is a race the test cannot observe: if it has,
+	// the continuation is refused outright; if not, it goes to the dead socket and is lost.
 	f.create(`,"previous_response_id":"r2"`)
-	if got := ojson.GetBytesNoCopy(f.nextError(), "error.code").String(); got != "previous_response_not_found" {
+	if got := ojson.GetBytesNoCopy(f.nextError(), "error.code").String(); got != "previous_response_not_found" && got != "upstream_websocket_lost" {
 		t.Fatalf("continuation after idle EOF = %s", got)
 	}
 	f.create("")
