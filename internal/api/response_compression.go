@@ -173,48 +173,42 @@ type responseCompressorPool interface {
 	Put(any)
 }
 
-// responseCompressorPools reuse encoders across responses. The default zstd encoder keeps an
-// 8 MiB window and its buffers (about 18 MB per stream); a 1 MiB window with lower encoder
-// memory loses little ratio on API responses, which are far smaller than the window.
+const sseZstdCompressorKey = "zstd-sse"
+
+// SSE uses a separate pool so long-lived streams hold smaller encoders.
 var responseCompressorPools = map[string]responseCompressorPool{
 	"zstd": &sync.Pool{New: func() any {
-		encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20), zstd.WithLowerEncoderMem(true))
-		if errNewWriter != nil {
-			log.Errorf("create response compression encoder: %v", errNewWriter)
-			return nil
-		}
-		return encoder
+		return newResponseZstdEncoder(1<<20, zstd.SpeedDefault)
+	}},
+	sseZstdCompressorKey: &sync.Pool{New: func() any {
+		return newResponseZstdEncoder(64<<10, zstd.SpeedFastest)
 	}},
 	"gzip": &sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }},
 }
 
-// newResponseCompressor takes a pooled encoder writing to dst, or nil when none can be created.
-func newResponseCompressor(encoding string, dst io.Writer) responseCompressor {
-	pool := responseCompressorPools[encoding]
-	if pool == nil {
+func newResponseZstdEncoder(window int, level zstd.EncoderLevel) any {
+	encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(window), zstd.WithLowerEncoderMem(true), zstd.WithEncoderLevel(level))
+	if errNewWriter != nil {
+		log.Errorf("create response compression encoder: %v", errNewWriter)
 		return nil
 	}
-	compressor, _ := pool.Get().(responseCompressor)
-	if compressor == nil {
-		return nil
-	}
-	compressor.Reset(dst)
-	return compressor
+	return encoder
 }
 
 // responseCompressionWriter keeps headers uncommitted until the encoding is known.
 // Gin's remaining interfaces, including Hijacker and Pusher, are embedded unchanged.
 type responseCompressionWriter struct {
 	gin.ResponseWriter
-	encoding   string
-	minBytes   int
-	buffer     bytes.Buffer
-	compressor responseCompressor
-	decided    bool
-	writeErr   error
-	written    bool
-	size       int
-	status     int
+	encoding       string
+	minBytes       int
+	buffer         bytes.Buffer
+	compressor     responseCompressor
+	compressorPool responseCompressorPool
+	decided        bool
+	writeErr       error
+	written        bool
+	size           int
+	status         int
 }
 
 func (w *responseCompressionWriter) Unwrap() http.ResponseWriter {
@@ -343,12 +337,23 @@ func (w *responseCompressionWriter) decide(force bool, size int) {
 			return
 		}
 	}
-	compressor := newResponseCompressor(w.encoding, w.ResponseWriter)
+	poolKey := w.encoding
+	if streaming && w.encoding == "zstd" {
+		poolKey = sseZstdCompressorKey
+	}
+	pool := responseCompressorPools[poolKey]
+	if pool == nil {
+		w.decided = true
+		return
+	}
+	compressor, _ := pool.Get().(responseCompressor)
 	if compressor == nil {
 		w.decided = true
 		return
 	}
+	compressor.Reset(w.ResponseWriter)
 	w.compressor = compressor
+	w.compressorPool = pool
 	w.decided = true
 	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Encoding", w.encoding)
@@ -405,7 +410,7 @@ func (w *responseCompressionWriter) finish() {
 		// Drop the response writer reference before pooling the encoder, and fail later writes
 		// instead of sending them uncompressed under Content-Encoding.
 		w.compressor.Reset(io.Discard)
-		responseCompressorPools[w.encoding].Put(w.compressor)
+		w.compressorPool.Put(w.compressor)
 		w.compressor = nil
 		if w.writeErr == nil {
 			w.writeErr = io.ErrClosedPipe
