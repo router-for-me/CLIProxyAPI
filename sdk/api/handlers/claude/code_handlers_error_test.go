@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,74 @@ func TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay(t *testing.T) {
 
 	if got := ojson.GetBytesNoCopy(recorder.Body.Bytes(), "error.details.error_code").String(); got != "thread_not_found" {
 		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, recorder.Body.Bytes())
+	}
+}
+
+func TestClaudeErrorPreservesUpstreamDetails(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"bad input","details":{"error_code":"context_too_long","limit":200000}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details").Raw; got != `{"error_code":"context_too_long","limit":200000}` {
+		t.Fatalf("error.details = %s, want upstream object verbatim; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorAddsThreadNotFoundCodeToDetailsWithoutErrorCode(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"hint":"replay"}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.hint").String(); got != "replay" {
+		t.Fatalf("error.details.hint = %q, want replay; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorKeepsUpstreamErrorCodeOnThreadNotFound(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"error_code":"custom_code"}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "custom_code" {
+		t.Fatalf("error.details.error_code = %q, want custom_code; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorOmitsDetailsWhenUpstreamHasNone(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	for _, text := range []string{
+		"bad",
+		`{"type":"error","error":{"type":"invalid_request_error","message":"bad input"}}`,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"bad input","details":"not an object"}}`,
+	} {
+		body, errMarshal := json.Marshal(handler.toClaudeError(&interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(text)}))
+		if errMarshal != nil {
+			t.Fatalf("marshal Claude error: %v", errMarshal)
+		}
+		if ojson.GetBytesNoCopy(body, "error.details").Exists() {
+			t.Fatalf("error.details present for %q; body=%s", text, body)
+		}
 	}
 }
 
@@ -1030,4 +1099,198 @@ func TestClaudeErrorNormalizesGoogleTokenExceededToPromptIsTooLong(t *testing.T)
 			t.Fatalf("message = %q, want %q", message, outputLimitMsg)
 		}
 	})
+}
+
+const malformedDetailsClaudeError = `{"type":"error","error":{"type":"invalid_request_error","message":"bad request","details":{"hint":"retry",}}}`
+
+func TestWriteClaudeErrorResponseDropsMalformedUpstreamDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(malformedDetailsClaudeError),
+	})
+
+	body := recorder.Body.Bytes()
+	if !json.Valid(body) {
+		t.Fatalf("body is not valid JSON: %s", body)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error; body=%s", got, body)
+	}
+	// The upstream text is invalid JSON as a whole, so the message is the raw
+	// upstream text, as it was before details were forwarded.
+	if got := ojson.GetBytesNoCopy(body, "error.message").String(); got != malformedDetailsClaudeError {
+		t.Fatalf("error.message = %q, want the raw upstream error; body=%s", got, body)
+	}
+	if ojson.GetBytesNoCopy(body, "error.details").Exists() {
+		t.Fatalf("malformed details forwarded; body=%s", body)
+	}
+}
+
+func TestClaudeStreamTerminalErrorDropsMalformedUpstreamDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Header("Content-Type", "text/event-stream")
+
+	handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(malformedDetailsClaudeError),
+	}
+	close(errs)
+
+	handler.forwardClaudeStream(c, c.Writer, func(error) {}, nil, errs)
+
+	raw := recorder.Body.String()
+	const prefix = "event: error\ndata: "
+	if !strings.HasPrefix(raw, prefix) {
+		t.Fatalf("unexpected SSE error body: %q", raw)
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(raw, prefix))
+	if !json.Valid([]byte(data)) {
+		t.Fatalf("SSE error data is not valid JSON: %q", raw)
+	}
+	if got := ojson.Get(data, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error; body=%q", got, raw)
+	}
+	if ojson.Get(data, "error.details").Exists() {
+		t.Fatalf("malformed details forwarded; body=%q", raw)
+	}
+}
+
+func TestClaudeErrorMarksMissingThreadWithUnusableErrorCode(t *testing.T) {
+	cases := map[string]string{
+		"null":   `null`,
+		"empty":  `""`,
+		"blank":  `"  "`,
+		"number": `42`,
+		"object": `{"code":"x"}`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			handler := &ClaudeCodeAPIHandler{}
+			msg := &interfaces.ErrorMessage{
+				StatusCode: http.StatusNotFound,
+				Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"error_code":` + code + `,"hint":"replay"}}}`),
+			}
+
+			body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+			if errMarshal != nil {
+				t.Fatalf("marshal Claude error: %v", errMarshal)
+			}
+			if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "thread_not_found" {
+				t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+			}
+			if got := ojson.GetBytesNoCopy(body, "error.details.hint").String(); got != "replay" {
+				t.Fatalf("error.details.hint = %q, want replay; body=%s", got, body)
+			}
+		})
+	}
+}
+
+func TestWriteClaudeDirectErrorMarksMissingThreadWithNullErrorCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode:     http.StatusNotFound,
+		DirectResponse: true,
+		Body:           []byte(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"error_code":null,"hint":"replay"}}}`),
+	})
+
+	body := recorder.Body.Bytes()
+	if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.hint").String(); got != "replay" {
+		t.Fatalf("error.details.hint = %q, want replay; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorKeepsMissingThreadUpstreamErrorCode(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"error_code":"thread_expired"}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "thread_expired" {
+		t.Fatalf("error.details.error_code = %q, want thread_expired; body=%s", got, body)
+	}
+}
+
+func TestWriteClaudeErrorResponseDropsTooDeepUpstreamDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+
+	const depth = 10001
+	details := strings.Repeat(`{"a":`, depth) + "1" + strings.Repeat("}", depth)
+	upstream := `{"type":"error","error":{"type":"invalid_request_error","message":"real message","details":` + details + `}}`
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(upstream),
+	})
+
+	// The depth also fails json.Unmarshal of the whole text, so the message
+	// is the raw upstream text, as for other unparsable upstream errors.
+	body := recorder.Body.Bytes()
+	if got := ojson.GetBytesNoCopy(body, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error; body=%.200s", got, body)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.message").String(); got != upstream {
+		t.Fatalf("error.message = %.200q, want the raw upstream error", got)
+	}
+	if ojson.GetBytesNoCopy(body, "error.details").Exists() {
+		t.Fatalf("too deep details forwarded; body=%.200s", body)
+	}
+}
+
+func TestWriteClaudeErrorResponseKeepsEnvelopeWithinDepthLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// details sits two levels deep in the response envelope, so it may use
+	// at most the parser depth limit minus two.
+	for _, tc := range []struct {
+		depth       int
+		wantDetails bool
+	}{
+		{depth: 9998, wantDetails: true},
+		{depth: 9999, wantDetails: false},
+		{depth: 10000, wantDetails: false},
+	} {
+		t.Run(strconv.Itoa(tc.depth), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			handler := &ClaudeCodeAPIHandler{}
+			details := strings.Repeat(`{"a":`, tc.depth-1) + "1" + strings.Repeat("}", tc.depth-1)
+			details = `{"error_code":"x","a":` + details + `}`
+			upstream := `{"type":"error","error":{"type":"invalid_request_error","message":"real message","details":` + details + `}}`
+			handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      errors.New(upstream),
+			})
+
+			body := recorder.Body.Bytes()
+			if !json.Valid(body) {
+				t.Fatalf("response body is not valid JSON; body=%.200s", body)
+			}
+			if got := ojson.GetBytesNoCopy(body, "error.details").Exists(); got != tc.wantDetails {
+				t.Fatalf("error.details present = %v, want %v; body=%.200s", got, tc.wantDetails, body)
+			}
+		})
+	}
 }

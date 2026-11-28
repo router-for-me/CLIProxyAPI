@@ -530,7 +530,10 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			}
 			state.ensureSSEEventBoundary(c.Writer)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			errorBytes, errMarshal := json.Marshal(h.toClaudeError(errMsg))
+			if errMarshal != nil {
+				errorBytes = []byte(claudeFallbackErrorBody)
+			}
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 		CloseError: func() *interfaces.ErrorMessage {
@@ -553,13 +556,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
-}
-
-type claudeErrorDetails struct {
-	ErrorCode string `json:"error_code"`
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	// Details carries upstream error.details verbatim. Claude Code reads
+	// details.error_code (e.g. "thread_not_found") to decide how to recover.
+	Details json.RawMessage `json:"details,omitempty"`
 }
 
 type claudeErrorResponse struct {
@@ -607,13 +608,28 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 		Error: claudeErrorDetail{
 			Type:    errType,
 			Message: message,
+			Details: claudeErrorDetailsFromText(errText),
 		},
 	}
-	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
-		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
+	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) && !hasClaudeErrorCode(response.Error.Details) {
+		details := []byte(response.Error.Details)
+		if len(details) == 0 {
+			details = []byte("{}")
+		}
+		doc := ojson.NewDoc(details)
+		if errSet := doc.Set("error_code", "thread_not_found"); errSet == nil {
+			response.Error.Details = doc.Bytes()
+		}
 	}
 	return response
 }
+
+func hasClaudeErrorCode(details json.RawMessage) bool {
+	code := ojson.GetBytes(details, "error_code")
+	return code.Type == ojson.String && strings.TrimSpace(code.String()) != ""
+}
+
+const claudeFallbackErrorBody = `{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`
 
 func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
@@ -674,7 +690,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 
 	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, retryAfter))
 	if err != nil {
-		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
+		body = []byte(claudeFallbackErrorBody)
 	}
 	appendClaudeAPIResponse(c, body)
 	if !c.Writer.Written() {
@@ -730,6 +746,20 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 
 	message = normalizeClaudePromptTooLongMessage(errType, message)
 	return errType, message
+}
+
+// claudeErrorDetailsFromText returns the upstream error.details object, if any.
+func claudeErrorDetailsFromText(errText string) json.RawMessage {
+	details := ojson.Get(strings.TrimSpace(errText), "error.details")
+	// Get can return an object for malformed input, and json.Marshal rejects
+	// raw values that json.Valid rejects (including its depth limit, which
+	// ojson.Valid does not enforce). A rejected value would erase the envelope.
+	// Validate details at its depth in the envelope, so that the written body
+	// also stays within the depth limit.
+	if !details.IsObject() || !json.Valid([]byte(`{"error":{"details":`+details.Raw+`}}`)) {
+		return nil
+	}
+	return json.RawMessage(details.Raw)
 }
 
 // normalizeClaudePromptTooLongMessage adds Anthropic's canonical "prompt is too long: "
