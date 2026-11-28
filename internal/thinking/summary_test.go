@@ -38,10 +38,14 @@ func TestExtractSummaryConfig(t *testing.T) {
 		{name: "responses deprecated generate summary", format: "openai-response", body: `{"reasoning":{"generate_summary":"detailed"}}`, wantMode: SummaryEnabled, wantDetail: "detailed"},
 		{name: "claude summarized", format: "claude", body: `{"thinking":{"type":"adaptive","display":"summarized"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
 		{name: "claude updates", format: "claude", body: `{"thinking":{"type":"adaptive","display":"updates"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
+		{name: "claude updates mixed case", format: "claude", body: `{"thinking":{"type":"adaptive","display":"Updates"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
 		{name: "claude omitted", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":2048,"display":"omitted"}}`, wantMode: SummaryDisabled},
 		{name: "claude display without type is invalid", format: "claude", body: `{"thinking":{"display":"summarized"}}`, wantMode: SummaryUnspecified},
 		{name: "claude updates without type is invalid", format: "claude", body: `{"thinking":{"display":"updates"}}`, wantMode: SummaryUnspecified},
 		{name: "claude display with auto type is invalid", format: "claude", body: `{"thinking":{"type":"auto","display":"summarized"}}`, wantMode: SummaryUnspecified},
+		{name: "claude updates with auto type is invalid", format: "claude", body: `{"thinking":{"type":"auto","display":"updates"}}`, wantMode: SummaryUnspecified},
+		{name: "claude unknown display unspecified", format: "claude", body: `{"thinking":{"type":"adaptive","display":"progress"}}`, wantMode: SummaryUnspecified},
+		{name: "claude non-string display unspecified", format: "claude", body: `{"thinking":{"type":"adaptive","display":true}}`, wantMode: SummaryUnspecified},
 		// ApplySummaryConfig runs before ApplyThinking fills budget_tokens, so an
 		// absent budget must not be read as inactive thinking.
 		{name: "claude enabled display without budget is valid", format: "claude", body: `{"thinking":{"type":"enabled","display":"summarized"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
