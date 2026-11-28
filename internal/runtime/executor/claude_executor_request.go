@@ -1431,7 +1431,10 @@ func applyClaudeHeadersWithNativeProfile(
 				baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
 			}
 		}
-		if !reqProbeOrHelper && !countTokens && helps.ClaudePayloadHas1hTTL(body) {
+		// The final body decides: a payload rule can reshape a main request into
+		// a probe after its 1h upgrade, and a 1h marker without this beta is
+		// rejected upstream. Native probes reach here with their ttl stripped.
+		if !countTokens && helps.ClaudePayloadHas1hTTL(body) {
 			baseBetas = withClaudeExtendedCacheTTLBeta(baseBetas)
 		}
 		// A body carrying thinking.block_binding is rejected upstream unless

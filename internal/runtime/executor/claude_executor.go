@@ -453,6 +453,30 @@ func (e *ClaudeExecutor) stripForeignClaudeAdvisorBlocksDoc(ctx context.Context,
 	return state
 }
 
+// claudeAuthBetaOverride resolves a credential header:Anthropic-Beta override
+// as applyClaudeHeaders applies it. It returns the sorted raw values and the
+// resolved header values. On api.anthropic.com the executor rebuilds
+// Anthropic-Beta after credential headers, so no override applies there.
+func claudeAuthBetaOverride(ctx context.Context, auth *cliproxyauth.Auth, anthropicBase bool, incomingHeaders http.Header) (raw []string, resolved []string) {
+	if auth == nil || anthropicBase {
+		return nil, nil
+	}
+	betaAttrs := make(map[string]string)
+	for name, value := range auth.Attributes {
+		if header, ok := util.CustomHeaderName(name); ok && header == "Anthropic-Beta" {
+			raw = append(raw, value)
+			betaAttrs[name] = value
+		}
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	sort.Strings(raw)
+	probe := (&http.Request{Header: make(http.Header)}).WithContext(ctx)
+	util.ApplyCustomHeadersFromAttrs(probe, betaAttrs, incomingHeaders)
+	return raw, helps.HeaderValuesCaseInsensitive(probe.Header, "Anthropic-Beta")
+}
+
 func (e *ClaudeExecutor) prepareClaudeThreadBetas(ctx context.Context, request *http.Request, auth *cliproxyauth.Auth, body []byte, extraBetas []string, payloadBetasConfigured bool, incomingHeaders http.Header, uncloak bool, metadataSets ...map[string]any) (*helps.ClaudeThreadBetaRequest, error) {
 	if !ojson.GetBytesNoCopy(body, "thread").IsObject() {
 		return nil, nil
@@ -469,23 +493,9 @@ func (e *ClaudeExecutor) prepareClaudeThreadBetas(ctx context.Context, request *
 	if e.cfg != nil {
 		hd = e.cfg.ClaudeHeaderDefaults
 	}
-	var customBetas []string
-	betaAttrs := make(map[string]string)
-	if auth != nil && !isAnthropicUpstreamURL(request.URL) {
-		for name, value := range auth.Attributes {
-			if strings.EqualFold(name, "header:Anthropic-Beta") {
-				customBetas = append(customBetas, value)
-				betaAttrs[name] = value
-			}
-		}
-	}
-	sort.Strings(customBetas)
-	customBetaApplied := false
+	customBetas, resolved := claudeAuthBetaOverride(request.Context(), auth, isAnthropicUpstreamURL(request.URL), incomingHeaders)
+	customBetaApplied := len(resolved) > 0
 	if len(customBetas) > 0 {
-		probe := (&http.Request{Header: make(http.Header)}).WithContext(request.Context())
-		util.ApplyCustomHeadersFromAttrs(probe, betaAttrs, incomingHeaders)
-		resolved := helps.HeaderValuesCaseInsensitive(probe.Header, "Anthropic-Beta")
-		customBetaApplied = len(resolved) > 0
 		customBetas = append(customBetas, strings.Join(resolved, ","))
 	}
 	policy := sha256.Sum256([]byte(fmt.Sprintf("%q\x00%q\x00%q\x00%t\x00%t", hd.AnthropicBetaStrip, hd.AnthropicBetaAppend, customBetas, uncloak, fp.UseOAuthBetas)))

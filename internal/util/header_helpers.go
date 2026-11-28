@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -144,20 +145,39 @@ func replaceCPASessionID(val, sessionID string) string {
 	return sb.String()
 }
 
+// CustomHeaderName returns the canonical header name of a header: attribute,
+// and false if the attribute is not a custom header. Every reader of custom
+// header attributes uses it, so they all agree on which header an attribute sets.
+func CustomHeaderName(attr string) (string, bool) {
+	if !strings.HasPrefix(attr, "header:") {
+		return "", false
+	}
+	name := http.CanonicalHeaderKey(strings.TrimSpace(strings.TrimPrefix(attr, "header:")))
+	return name, name != ""
+}
+
+// extractCustomHeaders resolves header: attributes keyed by canonical header
+// name. Attribute names that differ only by case would otherwise race through
+// random map order, so keys are visited in sorted byte order and the first one
+// that resolves to a non-empty value wins.
 func extractCustomHeaders(attrs map[string]string, clientHeaders http.Header, ctx context.Context) map[string]string {
 	if len(attrs) == 0 {
 		return nil
 	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		if _, ok := CustomHeaderName(k); ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
 	headers := make(map[string]string)
-	for k, v := range attrs {
-		if !strings.HasPrefix(k, "header:") {
+	for _, k := range keys {
+		name, _ := CustomHeaderName(k)
+		if _, ok := headers[name]; ok {
 			continue
 		}
-		name := strings.TrimSpace(strings.TrimPrefix(k, "header:"))
-		if name == "" {
-			continue
-		}
-		val := strings.TrimSpace(v)
+		val := strings.TrimSpace(attrs[k])
 		if val == "" {
 			continue
 		}

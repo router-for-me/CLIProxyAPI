@@ -361,6 +361,11 @@ func parseCodexWebSearchResultCacheTTL(raw string) (time.Duration, error) {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+
+	// MainCacheTTL1h upgrades native Claude Code main-conversation requests on
+	// Claude OAuth credentials to the 1h prompt cache, as Claude Code does for a
+	// subscription login. Subagents, probes, and explicit caller ttls are untouched.
+	MainCacheTTL1h bool `yaml:"main-cache-ttl-1h" json:"main-cache-ttl-1h"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
