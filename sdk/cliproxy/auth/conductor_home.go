@@ -42,6 +42,9 @@ type HomeDispatchBundle struct {
 	client     homeAuthDispatcher
 	registry   *executionregistry.Registry
 	generation uint64
+	// ignoresExclusions is set once this Home returned a credential the pick
+	// excluded: an older Home server that ignores excluded_auth_ids.
+	ignoresExclusions atomic.Bool
 }
 
 // PublishHomeDispatch publishes the selectable Home lifetime as one atomic bundle.
@@ -649,7 +652,7 @@ func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliprox
 	m.mu.Unlock()
 
 	for _, selection := range ended {
-		if errWait := m.endHomeSelectionBeforeRedispatch(ctx, selection, "target_changed"); errWait != nil {
+		if errWait := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "target_changed", excludedAuthIDs); errWait != nil {
 			return nil, false, errWait
 		}
 	}
@@ -716,22 +719,31 @@ func (m *Manager) endHomeSelectionBeforeRedispatch(ctx context.Context, selectio
 		return nil
 	}
 
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	waitCtx, cancelWait := context.WithTimeout(waitCtx, m.homeCPACancelBound())
+	defer cancelWait()
+	errWait := ticket.Wait(waitCtx)
+	if errWait == nil || ctx == nil || ctx.Err() == nil {
+		// A wait the caller's own cancellation cut short did not wait for the release.
+		selection.releaseWaited.Store(true)
+	}
+	if errWait != nil {
+		return &Error{Code: "home_unavailable", Message: homeReleaseAckTimeoutMessage + errWait.Error(), Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+	}
+	return nil
+}
+
+func (m *Manager) homeCPACancelBound() time.Duration {
 	bound := internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound
 	if m != nil {
 		if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil {
 			bound = cfg.CredentialConcurrency.WithDefaults().CPACancelBound
 		}
 	}
-	waitCtx := ctx
-	if waitCtx == nil {
-		waitCtx = context.Background()
-	}
-	waitCtx, cancelWait := context.WithTimeout(waitCtx, bound)
-	defer cancelWait()
-	if errWait := ticket.Wait(waitCtx); errWait != nil {
-		return &Error{Code: "home_unavailable", Message: "Home did not acknowledge credential release: " + errWait.Error(), Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
-	}
-	return nil
+	return bound
 }
 
 func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliproxyexecutor.Options, model string, selection *HomeDispatchSelection) bool {
@@ -1177,6 +1189,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
+	sentExclusions := true
 	if hierarchyClient, okHierarchy := client.(homeDispatchSessionHierarchyDispatcher); okHierarchy {
 		var retryRoundPtr *int
 		if retryRound >= 0 {
@@ -1189,6 +1202,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		} else if constrainedClient, okConstraints := client.(homeDispatchConstraintsDispatcher); okConstraints {
 			raw, errRPop = constrainedClient.RPopAuthWithConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), excludedAuthIDList, pinnedAuthID)
 		} else {
+			sentExclusions = false
 			raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 		}
 	} else if retryRoundPolicyClient, okRetryRound := client.(homeCredentialPolicyRetryRoundConstraintsDispatcher); okRetryRound {
@@ -1197,6 +1211,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		if constrainedClient, okConstraints := client.(homeCredentialPolicyConstraintsDispatcher); okConstraints {
 			raw, errRPop = constrainedClient.RPopAuthWithPolicyAndConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, excludedAuthIDList, pinnedAuthID)
 		} else {
+			sentExclusions = false
 			raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
 		}
 	} else {
@@ -1308,6 +1323,9 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if strings.TrimSpace(auth.ID) == "" {
 		endScope()
 		return nil, &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+	}
+	if _, excluded := excludedAuthIDs[strings.TrimSpace(auth.ID)]; excluded && sentExclusions {
+		bundle.ignoresExclusions.Store(true)
 	}
 	if pinnedAuthID != "" && strings.TrimSpace(auth.ID) != pinnedAuthID {
 		endScope()

@@ -1871,6 +1871,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeSameAuthRetries := make(map[string]int)
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
+	homeRedispatched := false
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
 	var lastErr error
@@ -1910,6 +1911,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var errPick error
 		if homeMode {
 			selection, errPick = m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
+			if !homeRedispatched && shouldRedispatchAfterHomeUnavailable(ctx, errPick, lastErr) {
+				homeRedispatched = true
+				selection, errPick = m.redispatchAfterHomeUnavailable(ctx, routeModel, pickOpts)
+				if errPick != nil {
+					if errAccount := homeRedispatchFailureError(ctx, errPick, lastErr, upstreamErr, &roundTiming); errAccount != nil {
+						return nil, errAccount
+					}
+				}
+			}
 			if selection != nil {
 				auth = selection.CloneAuthForRoute(routeModel)
 				executor = selection.Executor
@@ -2056,7 +2066,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				lastHomeAuthID = auth.ID
 				homeSameAuthRetryPending = false
 				releaseAttempt()
-				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
+				if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "no_execution_models", homeExcludedAuthIDs); errEnd != nil {
 					return nil, errEnd
 				}
 			}
@@ -2154,7 +2164,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				roundTiming.Observe(errPrepare)
 			}
 			if selection != nil {
-				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
+				if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "prepare_failed", homeExcludedAuthIDs); errEnd != nil {
 					return nil, errEnd
 				}
 			}
@@ -2212,7 +2222,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					lastHomeAuthID = auth.ID
 					homeSameAuthRetryPending = false
 					releaseAttempt()
-					if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "credential_refused"); errEnd != nil {
+					if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "credential_refused", homeExcludedAuthIDs); errEnd != nil {
 						return nil, errEnd
 					}
 				}
@@ -2245,7 +2255,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if selection != nil {
 				releaseAttempt()
-				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
+				if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "stream_start_failed", homeExcludedAuthIDs); errEnd != nil {
 					return nil, errEnd
 				}
 			}

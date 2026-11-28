@@ -179,6 +179,10 @@ type HomeDispatchSelection struct {
 	retained         atomic.Bool
 	runtimeAuthBound atomic.Bool
 	ended            atomic.Bool
+	// releaseWaited is set once endHomeSelectionBeforeRedispatch has waited for this
+	// selection's release acknowledgement, whether Home acknowledged it or the bound
+	// ran out. A wait cut short by the caller's cancellation does not set it.
+	releaseWaited    atomic.Bool
 	preservedAttempt atomic.Pointer[attemptCancel]
 }
 
