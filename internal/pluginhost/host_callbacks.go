@@ -2,10 +2,13 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -183,6 +186,10 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthModels(ctx, request)
 	case pluginabi.MethodHostAffinityLookup:
 		return h.callHostAffinityLookup(ctx, request)
+	case pluginabi.MethodHostContextDone:
+		return h.callHostContextDone(ctx, request)
+	case pluginabi.MethodHostContextWait:
+		return h.callHostContextWait(ctx, request)
 	case pluginabi.MethodHostRoutingResetCooldown:
 		return h.callHostRoutingResetCooldown(ctx, request)
 	default:
@@ -539,4 +546,155 @@ func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) 
 		entry.Debug(message)
 	}
 	return marshalRPCResult(rpcEmptyResponse{})
+}
+
+func contextDoneReason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	default:
+		return "done"
+	}
+}
+
+func (h *Host) resolveOwnedCallbackContext(ctx context.Context, callbackID string) (context.Context, <-chan struct{}, bool, error) {
+	callbackID = strings.TrimSpace(callbackID)
+	if callbackID == "" {
+		return nil, nil, false, fmt.Errorf("host_callback_id is required")
+	}
+	targetCtx, callbackPluginID, callbackInstance, closedCh, exists := h.lookupCallbackContextWithClosed(callbackID)
+	if !exists {
+		return nil, nil, false, nil
+	}
+	callerPluginID := hostCallbackPluginIDFromContext(ctx)
+	if callerPluginID != "" && callbackPluginID != callerPluginID {
+		return nil, nil, false, fmt.Errorf("host callback ID does not belong to the calling plugin")
+	}
+	callerInstance := hostCallbackInstanceFromContext(ctx)
+	if callerInstance != callbackInstance && (callerInstance != nil || callbackInstance != nil) {
+		return nil, nil, false, fmt.Errorf("host callback ID does not belong to the calling plugin instance")
+	}
+	return targetCtx, closedCh, true, nil
+}
+
+func (h *Host) callHostContextDone(ctx context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.HostContextDoneRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host context done request: %w", errUnmarshal)
+	}
+	targetCtx, _, exists, errResolve := h.resolveOwnedCallbackContext(ctx, req.HostCallbackID)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+	if !exists {
+		return marshalRPCResult(pluginapi.HostContextDoneResponse{
+			Done:   true,
+			Reason: "closed",
+			Error:  "host callback context is closed",
+		})
+	}
+	if errCtx := targetCtx.Err(); errCtx != nil {
+		return marshalRPCResult(pluginapi.HostContextDoneResponse{
+			Done:   true,
+			Reason: contextDoneReason(errCtx),
+			Error:  errCtx.Error(),
+		})
+	}
+	return marshalRPCResult(pluginapi.HostContextDoneResponse{Done: false})
+}
+
+func (h *Host) callHostContextWait(ctx context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.HostContextWaitRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host context wait request: %w", errUnmarshal)
+	}
+	if req.TimeoutMS < 0 {
+		return nil, fmt.Errorf("timeout_ms must be non-negative")
+	}
+	targetCtx, closedCh, exists, errResolve := h.resolveOwnedCallbackContext(ctx, req.HostCallbackID)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+	if !exists {
+		return marshalRPCResult(pluginapi.HostContextWaitResponse{
+			Done:   true,
+			Reason: "closed",
+			Error:  "host callback context is closed",
+		})
+	}
+	if errCtx := targetCtx.Err(); errCtx != nil {
+		return marshalRPCResult(pluginapi.HostContextWaitResponse{
+			Done:   true,
+			Reason: contextDoneReason(errCtx),
+			Error:  errCtx.Error(),
+		})
+	}
+
+	var callerDone <-chan struct{}
+	if ctx != nil {
+		callerDone = ctx.Done()
+	}
+	var timer *time.Timer
+	var timerCh <-chan time.Time
+	if req.TimeoutMS > 0 {
+		maxTimeoutMS := int64(math.MaxInt64 / int64(time.Millisecond))
+		timeoutMS := req.TimeoutMS
+		if timeoutMS > maxTimeoutMS {
+			timeoutMS = maxTimeoutMS
+		}
+		timer = time.NewTimer(time.Duration(timeoutMS) * time.Millisecond)
+		defer timer.Stop()
+		timerCh = timer.C
+	}
+
+	select {
+	case <-targetCtx.Done():
+		errCtx := targetCtx.Err()
+		return marshalRPCResult(pluginapi.HostContextWaitResponse{
+			Done:   true,
+			Reason: contextDoneReason(errCtx),
+			Error:  errCtx.Error(),
+		})
+	case <-closedCh:
+		if errCtx := targetCtx.Err(); errCtx != nil {
+			return marshalRPCResult(pluginapi.HostContextWaitResponse{
+				Done:   true,
+				Reason: contextDoneReason(errCtx),
+				Error:  errCtx.Error(),
+			})
+		}
+		return marshalRPCResult(pluginapi.HostContextWaitResponse{
+			Done:   true,
+			Reason: "closed",
+			Error:  "host callback context is closed",
+		})
+	case <-callerDone:
+		if errCtx := targetCtx.Err(); errCtx != nil {
+			return marshalRPCResult(pluginapi.HostContextWaitResponse{
+				Done:   true,
+				Reason: contextDoneReason(errCtx),
+				Error:  errCtx.Error(),
+			})
+		}
+		errCaller := ctx.Err()
+		return marshalRPCResult(pluginapi.HostContextWaitResponse{
+			Done:   true,
+			Reason: contextDoneReason(errCaller),
+			Error:  errCaller.Error(),
+		})
+	case <-timerCh:
+		if errCtx := targetCtx.Err(); errCtx != nil {
+			return marshalRPCResult(pluginapi.HostContextWaitResponse{
+				Done:   true,
+				Reason: contextDoneReason(errCtx),
+				Error:  errCtx.Error(),
+			})
+		}
+		return marshalRPCResult(pluginapi.HostContextWaitResponse{
+			Done:     false,
+			TimedOut: true,
+		})
+	}
 }

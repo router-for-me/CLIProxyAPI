@@ -321,7 +321,7 @@ func isSessionAffinityRetryError(err error) bool {
 }
 
 func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick error) bool {
-	if lastErr == nil || isRequestStopError(errPick) || isSessionAffinityRetryError(errPick) {
+	if lastErr == nil || errors.Is(errPick, context.Canceled) || errors.Is(errPick, context.DeadlineExceeded) || isRequestStopError(errPick) || isSessionAffinityRetryError(errPick) {
 		return false
 	}
 	if !homeMode {

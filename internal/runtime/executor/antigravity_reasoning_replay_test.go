@@ -3396,3 +3396,85 @@ func TestPrepareGeminiTopLevelReasoningReplayPayloadDoc_AcceptsGroupedSplitFunct
 		}
 	})
 }
+
+func TestCountTokensAllowsUnpairedSingleFunctionResponseTurn(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-4-neon"
+	topLevelPayload := []byte(`{
+		"contents": [
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "read_file", "id": "read_file__call_1", "response": {"result": "hello"}}},
+					{"inlineData": {"mimeType": "image/png", "data": "AA=="}}
+				]
+			}
+		]
+	}`)
+
+	t.Run("top_level_count_tokens_helper_passes_through", func(t *testing.T) {
+		doc := ojson.NewDoc(topLevelPayload)
+		req := cliproxyexecutor.Request{Model: model, Payload: topLevelPayload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+		changed, err := prepareGeminiTopLevelCountTokensReasoningReplayPayloadDoc(context.Background(), model, req, opts, doc)
+		if err != nil {
+			t.Fatalf("prepareGeminiTopLevelCountTokensReasoningReplayPayloadDoc returned error: %v", err)
+		}
+		if changed {
+			t.Fatalf("expected unchanged payload for unpaired countTokens fragment")
+		}
+		out := doc.Bytes()
+		if got := ojson.GetBytesNoCopy(out, "contents.0.role").String(); got != "user" {
+			t.Fatalf("contents[0].role = %q, want user", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "contents.0.parts.0.functionResponse.id").String(); got != "read_file__call_1" {
+			t.Fatalf("functionResponse.id = %q, want read_file__call_1", got)
+		}
+		if !ojson.GetBytesNoCopy(out, "contents.0.parts.1.inlineData").Exists() {
+			t.Fatalf("expected inlineData part to be preserved: %s", out)
+		}
+	})
+
+	t.Run("top_level_action_metadata_count_tokens_passes_through", func(t *testing.T) {
+		doc := ojson.NewDoc(topLevelPayload)
+		req := cliproxyexecutor.Request{
+			Model:    model,
+			Payload:  topLevelPayload,
+			Metadata: map[string]any{"action": "countTokens"},
+		}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+		_, replayReq, changed, err := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), model, req, opts, doc)
+		if err != nil || changed || len(replayReq) != 0 {
+			t.Fatalf("prepareGeminiTopLevelReasoningReplayPayloadDoc(countTokens) = len(replayReq):%d changed:%v err:%v", len(replayReq), changed, err)
+		}
+	})
+
+	t.Run("antigravity_count_tokens_helper_passes_through_without_mutating_role", func(t *testing.T) {
+		wrappedPayload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"read_file","id":"read_file__call_1","response":{"result":"hello"}}}]}]}}`)
+		doc := ojson.NewDoc(wrappedPayload)
+		req := cliproxyexecutor.Request{Model: model, Payload: wrappedPayload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+		changed, err := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(context.Background(), model, req, opts, doc)
+		if err != nil {
+			t.Fatalf("prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc returned error: %v", err)
+		}
+		if changed {
+			t.Fatalf("expected unchanged payload for unpaired antigravity countTokens fragment")
+		}
+		if got := doc.Get("request.contents.0.role").String(); got != "user" {
+			t.Fatalf("request.contents[0].role = %q, want user", got)
+		}
+	})
+
+	t.Run("generate_content_still_rejects_unpaired_function_response", func(t *testing.T) {
+		doc := ojson.NewDoc(topLevelPayload)
+		req := cliproxyexecutor.Request{Model: model, Payload: topLevelPayload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+		_, _, _, err := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), model, req, opts, doc)
+		if err == nil || !strings.Contains(err.Error(), "functionResponse without preceding functionCall") {
+			t.Fatalf("generateContent expected pairing rejection, got: %v", err)
+		}
+	})
+}
