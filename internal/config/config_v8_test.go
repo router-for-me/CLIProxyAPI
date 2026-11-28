@@ -758,11 +758,57 @@ func TestV8SaveLegacyAdapterAndManualFallback(t *testing.T) {
 	}
 }
 
+func TestV8ClaudeRelaxedSystemPromptRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `config-version: 8
+api-keys:
+  claude:
+    - name: primary
+      keys:
+        - api-key: test-key
+`
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []*bool{new(false), new(true), nil} {
+		cfg.ClaudeKey[0].Cloak = &CloakConfig{RelaxedSystemPrompt: want}
+		if errSave := SaveConfigPreserveComments(path, cfg); errSave != nil {
+			t.Fatal(errSave)
+		}
+		saved, errRead := os.ReadFile(path)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if errValidate := ValidateV8Config(saved); errValidate != nil {
+			t.Fatalf("saved config fails v8 validation: %v", errValidate)
+		}
+		reloaded, errLoad := LoadConfig(path)
+		if errLoad != nil {
+			t.Fatal(errLoad)
+		}
+		if len(reloaded.ClaudeKey) != 1 {
+			t.Fatalf("expected one Claude key, got %d", len(reloaded.ClaudeKey))
+		}
+		var got *bool
+		if cloak := reloaded.ClaudeKey[0].Cloak; cloak != nil {
+			got = cloak.RelaxedSystemPrompt
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("relaxed-system-prompt failed to round trip:\n%s", saved)
+		}
+	}
+}
+
 func TestV8RejectsInvalidGroups(t *testing.T) {
 	for _, raw := range []string{
 		"api-keys: {codex: [{name: a, keys: [{api-key: a, weight: 1.5}]}]}",
 		"api-keys: {codex: [{name: a, keys: [{api-key: a, base-url: https://invalid}]}]}",
 		"api-keys: {codex: [{name: a, keys: {api-key: a}}]}",
+		"api-keys: {claude: [{name: a, keys: [{api-key: a, cloak: {relaxed-system-prompt: yes}}]}]}",
 		"server: true", "config-version: 9", "server: {port: bad}",
 	} {
 		t.Run(raw, func(t *testing.T) {
