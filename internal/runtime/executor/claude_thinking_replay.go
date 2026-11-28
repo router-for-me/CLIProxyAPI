@@ -23,7 +23,7 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 	if auth == nil || !sourceFormatEqual(opts.SourceFormat, sdktranslator.FormatClaude) {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") || auth.AuthKind() != cliproxyauth.AuthKindAPIKey {
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") || helps.ClaudeAuthKind(auth) != cliproxyauth.AuthKindAPIKey {
 		return false
 	}
 	if !helps.APIKeyModelIsCompat(req) {
