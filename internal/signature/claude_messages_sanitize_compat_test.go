@@ -87,3 +87,33 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesOpaqueThinkingSignature
 		t.Fatalf("compat sanitizer dropped opaque signature: %s", withCompat)
 	}
 }
+
+func TestCodexCommentaryMirrorAppearsOnceInCrossProviderReplay(t *testing.T) {
+	const marker = `{"type":"thinking","thinking":"progress","signature":"` + CodexCommentarySignatureMarker + `"}`
+	const mirror = `{"type":"text","text":"progress"}`
+	const final = `{"type":"text","text":"final"}`
+	for _, tt := range []struct {
+		name     string
+		messages string
+		want     string
+	}{
+		{"same message", `[{"role":"assistant","content":[` + marker + "," + mirror + "," + final + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + `]}]`},
+		{"split assistant message", `[{"role":"assistant","content":[` + marker + `]},{"role":"assistant","content":[` + mirror + "," + final + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + `]}]`},
+		{"split string mirror", `[{"role":"assistant","content":[` + marker + `]},{"role":"assistant","content":"progress"}]`, `[{"role":"assistant","content":"progress"}]`},
+		{"different adjacent string", `[{"role":"assistant","content":[` + marker + `]},{"role":"assistant","content":"final"}]`, `[{"role":"assistant","content":[` + mirror + `]},{"role":"assistant","content":"final"}]`},
+		{"different adjacent text", `[{"role":"assistant","content":[` + marker + "," + final + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + `]}]`},
+		{"nonadjacent repeated text", `[{"role":"assistant","content":[` + marker + "," + final + "," + mirror + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + "," + mirror + `]}]`},
+		{"user text is preserved", `[{"role":"assistant","content":[` + marker + `]},{"role":"user","content":[` + mirror + `]}]`, `[{"role":"assistant","content":[` + mirror + `]},{"role":"user","content":[` + mirror + `]}]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"messages":` + tt.messages + "}")
+			restored, _ := RestoreCodexCommentaryMarkers(input)
+			sanitized, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-5")
+			for _, result := range [][]byte{restored, sanitized} {
+				if got := ojson.GetBytesNoCopy(result, "messages").Raw; got != tt.want {
+					t.Errorf("messages = %s, want %s", got, tt.want)
+				}
+			}
+		})
+	}
+}
