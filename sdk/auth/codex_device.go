@@ -61,14 +61,18 @@ func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
 	return strings.EqualFold(strings.TrimSpace(opts.Metadata[codexLoginModeMetadataKey]), codexLoginModeDevice)
 }
 
-func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// CodexDeviceCode is a pending Codex device authorization.
+type CodexDeviceCode struct {
+	VerificationURL string
+	UserCode        string
+	ExpiresIn       int
+	deviceAuthID    string
+	interval        time.Duration
+}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
-
-	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
+// StartCodexDeviceLogin requests a Codex device code for the user to approve.
+func StartCodexDeviceLogin(ctx context.Context, client *http.Client) (*CodexDeviceCode, error) {
+	userCodeResp, err := requestCodexDeviceUserCode(ctx, client)
 	if err != nil {
 		return nil, err
 	}
@@ -82,21 +86,22 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, fmt.Errorf("codex device flow did not return required fields")
 	}
 
-	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
+	return &CodexDeviceCode{
+		VerificationURL: codexDeviceVerificationURL,
+		UserCode:        deviceCode,
+		ExpiresIn:       int(codexDeviceTimeout / time.Second),
+		deviceAuthID:    deviceAuthID,
+		interval:        parseCodexDevicePollInterval(userCodeResp.Interval),
+	}, nil
+}
 
-	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
-
-	if !opts.NoBrowser {
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the device URL manually")
-		} else if errOpen := browser.OpenURL(codexDeviceVerificationURL); errOpen != nil {
-			log.Warnf("Failed to open browser automatically: %v", errOpen)
-		}
+// CompleteCodexDeviceLogin waits for device approval and exchanges it for Codex credentials.
+func CompleteCodexDeviceLogin(ctx context.Context, cfg *config.Config, client *http.Client, device *CodexDeviceCode) (*coreauth.Auth, error) {
+	if device == nil {
+		return nil, fmt.Errorf("codex device code is required")
 	}
 
-	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval)
+	tokenResp, err := pollCodexDeviceToken(ctx, client, device.deviceAuthID, device.UserCode, device.interval)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +127,34 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return NewCodexAuthenticator().buildAuthRecord(authSvc, authBundle)
+}
+
+func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+
+	device, err := StartCodexDeviceLogin(ctx, httpClient)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("Starting Codex device authentication...")
+	fmt.Printf("Codex device URL: %s\n", device.VerificationURL)
+	fmt.Printf("Codex device code: %s\n", device.UserCode)
+
+	if !opts.NoBrowser {
+		if !browser.IsAvailable() {
+			log.Warn("No browser available; please open the device URL manually")
+		} else if errOpen := browser.OpenURL(device.VerificationURL); errOpen != nil {
+			log.Warnf("Failed to open browser automatically: %v", errOpen)
+		}
+	}
+
+	return CompleteCodexDeviceLogin(ctx, cfg, httpClient, device)
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
@@ -282,8 +314,9 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
-		"email":     tokenStorage.Email,
-		"plan_type": planType,
+		"email":      tokenStorage.Email,
+		"account_id": tokenStorage.AccountID,
+		"plan_type":  planType,
 	}
 
 	fmt.Println("Codex authentication successful")
