@@ -3286,8 +3286,25 @@ func selectorExcludesZeroWeight(selector Selector) bool {
 //   - hasUnblocked: true when at least one eligible candidate is still available
 //   - ok: true when no candidate is available and at least one is in a timed cooldown
 func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, now time.Time) (earliest time.Time, hasUnblocked bool, ok bool) {
+	pool := m.poolCooldownForModelAt(ctx, providers, model, opts, now)
+	return pool.earliest, pool.hasUnblocked, pool.ok
+}
+
+// poolCooldown describes a request's candidate pool when none of them can serve it.
+type poolCooldown struct {
+	earliest     time.Time
+	hasUnblocked bool
+	ok           bool
+	// claudeCooldown reports that every candidate is in a Claude unified
+	// rate-limit cooldown; claudeSignals are the signals of the one that
+	// recovers first, as the cooldown 429s that follow report them.
+	claudeCooldown bool
+	claudeSignals  map[string]string
+}
+
+func (m *Manager) poolCooldownForModelAt(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, now time.Time) poolCooldown {
 	if m == nil {
-		return time.Time{}, false, false
+		return poolCooldown{}
 	}
 	excludeZeroWeight := selectorExcludesZeroWeight(m.Selector())
 	m.mu.RLock()
@@ -3303,7 +3320,9 @@ func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers 
 	registryRef := registry.GetGlobalRegistry()
 	trimmedModel := strings.TrimSpace(model)
 
+	var earliest time.Time
 	totalCandidates := 0
+	var candidates []*Auth
 	cooling := 0
 	for _, candidate := range m.auths {
 		if isAuthDisabled(candidate) {
@@ -3337,10 +3356,11 @@ func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers 
 			continue
 		}
 		totalCandidates++
+		candidates = append(candidates, candidate)
 		checkModel := m.selectionModelForAuth(candidate, model)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, opts.Headers)
 		if !blocked {
-			return time.Time{}, true, false
+			return poolCooldown{hasUnblocked: true}
 		}
 		if reason == blockReasonCooldown {
 			cooling++
@@ -3355,9 +3375,17 @@ func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers 
 		}
 	}
 	if totalCandidates > 0 && cooling > 0 && !earliest.IsZero() {
-		return earliest, false, true
+		pool := poolCooldown{earliest: earliest, ok: true}
+		// Like the cooldown 429s that follow, describe a Claude usage limit only
+		// when every candidate is cooling down.
+		if cooling == totalCandidates {
+			pool.claudeCooldown, pool.claudeSignals = claudeCooldownMetadataForAuths(ctx, candidates, func(candidate *Auth) string {
+				return m.selectionModelForAuth(candidate, model)
+			}, now, opts.Headers)
+		}
+		return pool
 	}
-	return time.Time{}, false, false
+	return poolCooldown{}
 }
 
 func observeSelectionCooldownDeadline(dst *time.Time, err error, now time.Time) {
@@ -3393,18 +3421,17 @@ func (m *Manager) annotatePoolCooldownTerminalErrorAt(ctx context.Context, provi
 	if errors.As(lastErr, &existing) && existing != nil {
 		return lastErr
 	}
-	deadline, hasUnblocked, ok := m.earliestPoolCooldownForModelAt(ctx, providers, model, opts, now)
-	if hasUnblocked {
+	pool := m.poolCooldownForModelAt(ctx, providers, model, opts, now)
+	if pool.hasUnblocked {
 		return lastErr
 	}
-	if !ok && !selectionCooldownDeadline.IsZero() && selectionCooldownDeadline.After(now) {
-		deadline = selectionCooldownDeadline
-		ok = true
+	if pool.ok {
+		return &poolCooldownTerminalError{cause: lastErr, deadline: pool.earliest, claudeCooldown: pool.claudeCooldown, claudeSignals: pool.claudeSignals}
 	}
-	if !ok {
-		return lastErr
+	if !selectionCooldownDeadline.IsZero() && selectionCooldownDeadline.After(now) {
+		return &poolCooldownTerminalError{cause: lastErr, deadline: selectionCooldownDeadline}
 	}
-	return &poolCooldownTerminalError{cause: lastErr, deadline: deadline}
+	return lastErr
 }
 
 func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, err error) {

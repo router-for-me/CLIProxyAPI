@@ -395,6 +395,10 @@ func (e *authUnavailableError) Headers() http.Header {
 type poolCooldownTerminalError struct {
 	cause    error
 	deadline time.Time
+	// claudeCooldown and claudeSignals are set when every candidate is in a
+	// Claude unified rate-limit cooldown; see claudeCooldownMetadataForAuths.
+	claudeCooldown bool
+	claudeSignals  map[string]string
 }
 
 func (e *poolCooldownTerminalError) Error() string {
@@ -456,6 +460,33 @@ func (e *poolCooldownTerminalError) SafeResponseHeaders() http.Header {
 
 func (e *poolCooldownTerminalError) Headers() http.Header {
 	if e == nil || e.cause == nil {
+		return nil
+	}
+	headers := e.causeHeaders()
+	// The pool owns Retry-After, so Anthropic-Ratelimit-Unified-* headers from
+	// the last attempt would describe one credential, not the pool. Drop them
+	// and, when every candidate is in a Claude unified cooldown, describe the
+	// pool the way the cooldown 429s that follow do, with a reset that matches
+	// Retry-After.
+	pooled := make(http.Header, len(headers))
+	for key, values := range headers {
+		if strings.HasPrefix(strings.ToLower(key), "anthropic-ratelimit-unified-") {
+			continue
+		}
+		pooled[key] = append([]string(nil), values...)
+	}
+	if remaining := time.Until(e.deadline); e.claudeCooldown && remaining > 0 {
+		newModelCooldownErrorForCandidates("", "claude", remaining, nil, true, e.claudeSignals).appendClaudeUnifiedHeaders(pooled)
+	}
+	if len(pooled) == 0 {
+		return nil
+	}
+	return pooled
+}
+
+// causeHeaders returns the first non-empty headers the wrapped error carries.
+func (e *poolCooldownTerminalError) causeHeaders() http.Header {
+	if e == nil {
 		return nil
 	}
 	for cur := e.cause; cur != nil; cur = errors.Unwrap(cur) {
