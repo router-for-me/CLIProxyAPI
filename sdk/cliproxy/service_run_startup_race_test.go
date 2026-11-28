@@ -354,7 +354,7 @@ func TestRegisterModelsForAuthBatch_ConsistentConfigSnapshotAcrossConcurrentComm
 	})
 
 	var committed atomic.Bool
-	modelRegistrationTaskHook = func() {
+	modelRegistrationTaskHook = func(string) {
 		if committed.CompareAndSwap(false, true) {
 			service.commitConfigUpdate(updatedCfg.CloneForRuntime())
 		}
