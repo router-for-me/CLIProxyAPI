@@ -122,6 +122,13 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
 
+	refusalKey := helps.FingerprintAntigravityRequest(antigravityAuthID(auth), selection.ID, requestPayload)
+	if remaining, strikes, blocked := helps.DefaultAntigravity429Guard.Check(refusalKey); blocked {
+		err = helps.BuildAntigravityRefusalReplayError(remaining, strikes)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -146,6 +153,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+		recordAntigravitySoft429Refusal(refusalKey, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		err = e.applyAntigravityUpstreamError(ctx, auth, selection.ID, useCredits, replayScope, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
@@ -156,6 +164,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if errorResult := ojson.GetBytesNoCopy(bodyBytes, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
 		statusCode := antigravityInBandErrorStatusCode(errorResult)
 		log.Debugf("antigravity executor: upstream in-band error status: %d", statusCode)
+		recordAntigravitySoft429Refusal(refusalKey, statusCode, httpResp.Header, bodyBytes)
 		err = e.applyAntigravityUpstreamError(ctx, auth, selection.ID, useCredits, replayScope, statusCode, httpResp.Header, bodyBytes)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -314,6 +323,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
 
+	refusalKey := helps.FingerprintAntigravityRequest(antigravityAuthID(auth), selection.ID, requestPayload)
+	if remaining, strikes, blocked := helps.DefaultAntigravity429Guard.Check(refusalKey); blocked {
+		err = helps.BuildAntigravityRefusalReplayError(remaining, strikes)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -343,6 +359,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			err = errRead
 			return resp, err
 		}
+		recordAntigravitySoft429Refusal(refusalKey, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		err = e.applyAntigravityUpstreamError(ctx, auth, selection.ID, useCredits, replayScope, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
@@ -372,6 +389,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
 			}
+			recordAntigravitySoft429Refusal(refusalKey, statusCode, nil, payload)
 			err = e.applyAntigravityUpstreamError(ctx, auth, selection.ID, useCredits, replayScope, statusCode, nil, payload)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailure(ctx, err)

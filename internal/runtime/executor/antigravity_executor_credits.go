@@ -816,6 +816,16 @@ func (e *AntigravityExecutor) applyAntigravityUpstreamError(
 	}
 	return newAntigravityStatusErrWithHeaders(statusCode, headers, body)
 }
+
+func recordAntigravitySoft429Refusal(refusalKey string, statusCode int, headers http.Header, body []byte) {
+	if refusalKey == "" || statusCode != http.StatusTooManyRequests {
+		return
+	}
+	decision := decideAntigravity429WithHeaders(body, headers)
+	if decision.kind == antigravity429DecisionSoftRetry {
+		helps.DefaultAntigravity429Guard.Remember(refusalKey, decision.retryAfter)
+	}
+}
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || isAntigravityAuthDisabled(auth) || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
 		return

@@ -248,6 +248,7 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	misc.ScrubProxyAndFingerprintHeaders(httpReq)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
