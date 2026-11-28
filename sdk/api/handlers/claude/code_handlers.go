@@ -593,6 +593,8 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 	if status == http.StatusTooManyRequests && msg != nil && msg.Error != nil {
 		var cooldown interface{ IsModelCooldown() bool }
 		if errors.As(msg.Error, &cooldown) && cooldown != nil && cooldown.IsModelCooldown() {
+			// The cooldown body may carry Codex's usage_limit_reached type; Messages clients expect rate_limit_error.
+			errType = "rate_limit_error"
 			if seconds, errParse := strconv.ParseInt(retryAfter, 10, 64); errParse == nil && seconds > 0 {
 				delay := retryAfter + "s"
 				if seconds <= (1<<63-1)/int64(time.Second) {
