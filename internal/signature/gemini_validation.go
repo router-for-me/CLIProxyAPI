@@ -393,6 +393,40 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 			return false
 		}
 
+		if errResponses := validateGeminiFunctionResponses(pending, responses); errResponses != nil {
+			validationErr = errResponses
+			return false
+		}
+
+		pending = nil
+		return true
+	})
+	return validationErr
+}
+
+func geminiResponsesMatchPositionally(pending []geminiFunctionCallRef, responses []geminiFunctionResponseRef) bool {
+	for i, responseRef := range responses {
+		response := geminiPartFunctionResponse(responseRef.part)
+		call := pending[i]
+		responseID := response.Get("id").String()
+		responseName := response.Get("name").String()
+		if responseID == "" || responseID != call.id || responseName == "" || (call.name != "" && responseName != call.name) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateGeminiFunctionResponses(pending []geminiFunctionCallRef, responses []geminiFunctionResponseRef) error {
+	allCallsHaveID := true
+	for _, call := range pending {
+		if call.id == "" {
+			allCallsHaveID = false
+			break
+		}
+	}
+
+	if len(pending) <= 1 || !allCallsHaveID {
 		for responseIndex, responseRef := range responses {
 			partPath := responseRef.path
 			response := geminiPartFunctionResponse(responseRef.part)
@@ -402,9 +436,9 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 
 			switch {
 			case call.id != "" && responseID == "":
-				validationErr = fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
+				return fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
 			case call.id != "" && responseID != call.id:
-				validationErr = fmt.Errorf(
+				return fmt.Errorf(
 					"%s: functionResponse.id %q does not match functionCall.id %q at %s",
 					partPath,
 					responseID,
@@ -412,9 +446,9 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 					call.path,
 				)
 			case responseName == "":
-				validationErr = fmt.Errorf("%s: missing functionResponse.name", partPath)
+				return fmt.Errorf("%s: missing functionResponse.name", partPath)
 			case call.name != "" && responseName != call.name:
-				validationErr = fmt.Errorf(
+				return fmt.Errorf(
 					"%s: functionResponse.name %q does not match functionCall.name %q at %s",
 					partPath,
 					responseName,
@@ -422,15 +456,82 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 					call.path,
 				)
 			}
-			if validationErr != nil {
-				return false
+		}
+		return nil
+	}
+
+	if geminiResponsesMatchPositionally(pending, responses) {
+		return nil
+	}
+
+	used := make([]bool, len(pending))
+	for responseIndex, responseRef := range responses {
+		partPath := responseRef.path
+		response := geminiPartFunctionResponse(responseRef.part)
+		responseID := response.Get("id").String()
+		responseName := response.Get("name").String()
+
+		fallbackCall := pending[responseIndex]
+		if used[responseIndex] {
+			for idx := range pending {
+				if !used[idx] {
+					fallbackCall = pending[idx]
+					break
+				}
 			}
 		}
 
-		pending = nil
-		return true
-	})
-	return validationErr
+		if responseID == "" {
+			return fmt.Errorf("%s: missing functionResponse.id for %s", partPath, fallbackCall.path)
+		}
+
+		matchedIndex := -1
+		if !used[responseIndex] && pending[responseIndex].id == responseID &&
+			(pending[responseIndex].name == "" || responseName == "" || pending[responseIndex].name == responseName) {
+			matchedIndex = responseIndex
+		}
+		if matchedIndex < 0 {
+			for idx, call := range pending {
+				if !used[idx] && call.id == responseID && (call.name == "" || call.name == responseName) {
+					matchedIndex = idx
+					break
+				}
+			}
+		}
+		if matchedIndex < 0 {
+			for idx, call := range pending {
+				if !used[idx] && call.id == responseID {
+					matchedIndex = idx
+					break
+				}
+			}
+		}
+		if matchedIndex < 0 {
+			return fmt.Errorf(
+				"%s: functionResponse.id %q does not match functionCall.id %q at %s",
+				partPath,
+				responseID,
+				fallbackCall.id,
+				fallbackCall.path,
+			)
+		}
+
+		used[matchedIndex] = true
+		call := pending[matchedIndex]
+		switch {
+		case responseName == "":
+			return fmt.Errorf("%s: missing functionResponse.name", partPath)
+		case call.name != "" && responseName != call.name:
+			return fmt.Errorf(
+				"%s: functionResponse.name %q does not match functionCall.name %q at %s",
+				partPath,
+				responseName,
+				call.name,
+				call.path,
+			)
+		}
+	}
+	return nil
 }
 
 func decodeGeminiThoughtSignature(sig string) ([]byte, error) {

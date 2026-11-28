@@ -770,20 +770,21 @@ func isGeminiCountTokensAction(req cliproxyexecutor.Request, opts cliproxyexecut
 }
 
 func prepareGeminiTopLevelReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (antigravityReasoningReplayScope, []byte, bool, error) {
-	return prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx, modelName, req, opts, doc, !isGeminiCountTokensAction(req, opts))
+	return prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx, modelName, req, opts, doc, isGeminiCountTokensAction(req, opts))
 }
 
 func prepareGeminiTopLevelCountTokensReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (bool, error) {
-	_, _, changed, err := prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx, modelName, req, opts, doc, false)
+	_, _, changed, err := prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx, modelName, req, opts, doc, true)
 	return changed, err
 }
 
-func prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, reserveOnMiss bool) (antigravityReasoningReplayScope, []byte, bool, error) {
+func prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, countTokens bool) (antigravityReasoningReplayScope, []byte, bool, error) {
 	if doc == nil || !antigravityUsesReasoningReplayCache(modelName) {
 		return antigravityReasoningReplayScope{}, nil, false, nil
 	}
+	reserveOnMiss := !countTokens
 	if doc.Get("request.contents").Exists() {
-		scope, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, reserveOnMiss)
+		scope, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, countTokens)
 		var replayRequestPayload []byte
 		if reserveOnMiss && scope.valid() {
 			replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
@@ -803,7 +804,7 @@ func prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx context.Context,
 			_ = wrappedDoc.SetRawBytes(key, []byte(val.Raw))
 		}
 	}
-	scope, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, wrappedDoc, false, reserveOnMiss)
+	scope, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, wrappedDoc, false, countTokens)
 	if err != nil {
 		return scope, nil, false, err
 	}
@@ -820,15 +821,16 @@ func prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx context.Context,
 }
 
 func prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (antigravityReasoningReplayScope, bool, error) {
-	return prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, !isGeminiCountTokensAction(req, opts))
+	return prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, isGeminiCountTokensAction(req, opts))
 }
 
 func prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (bool, error) {
-	_, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, false)
+	_, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, true)
 	return changed, err
 }
 
-func prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, normalizeFunctionResponseRoles, reserveOnMiss bool) (antigravityReasoningReplayScope, bool, error) {
+func prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, normalizeFunctionResponseRoles, countTokens bool) (antigravityReasoningReplayScope, bool, error) {
+	reserveOnMiss := !countTokens
 	if doc == nil || !antigravityUsesReasoningReplayCache(modelName) {
 		return antigravityReasoningReplayScope{}, false, nil
 	}
@@ -866,12 +868,26 @@ func prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx context.Co
 	if antigravityRepairUnsignedFirstFunctionCallsDoc(doc) {
 		changed = true
 	}
+	// models.countTokens is a stateless tokenizer that accepts arbitrary Content
+	// fragments (such as an isolated functionResponse turn for budget estimation)
+	// without requiring paired multi-turn history. When nothing mutated contents,
+	// skip wrapping and pairing validation altogether; when replay or normalization
+	// mutated contents, still validate and restore original contents on mismatch.
+	if countTokens && !changed {
+		return scope, false, nil
+	}
 	currentContentsRaw := doc.Get("request.contents").Raw
 	currentWrapped := []byte(`{}`)
 	if currentContentsRaw != "" {
 		currentWrapped = []byte(`{"request":{"contents":` + currentContentsRaw + `}}`)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(currentWrapped); errPairing != nil {
+		if countTokens {
+			if originalContentsRaw != "" && doc.Get("request.contents").Raw != originalContentsRaw {
+				_ = doc.SetRawBytes("request.contents", []byte(originalContentsRaw))
+			}
+			return scope, false, nil
+		}
 		origWrapped := []byte(`{}`)
 		if originalContentsRaw != "" {
 			origWrapped = []byte(`{"request":{"contents":` + originalContentsRaw + `}}`)

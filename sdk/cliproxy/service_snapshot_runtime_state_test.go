@@ -32,6 +32,9 @@ func TestHandleAuthUpdatesFileSnapshotKeepsCooldown(t *testing.T) {
 				t.Fatal(errBuild)
 			}
 			id := "cooldown.json"
+			reg := GlobalModelRegistry()
+			reg.UnregisterClient(id)
+			t.Cleanup(func() { reg.UnregisterClient(id) })
 			path := filepath.Join(dir, id)
 			raw := `{"type":"claude","email":"a@b.c"}`
 			read := func() *coreauth.Auth {
@@ -99,6 +102,9 @@ func TestHandleAuthUpdatesDiscardedSnapshotTriggersWatcherReread(t *testing.T) {
 	}
 
 	id := "acct.json"
+	reg := GlobalModelRegistry()
+	reg.UnregisterClient(id)
+	t.Cleanup(func() { reg.UnregisterClient(id) })
 	path := filepath.Join(dir, id)
 	initial := `{"type":"codex","email":"a@b.c","prefix":"pfx-0"}`
 	edit := `{"type":"codex","email":"a@b.c","prefix":"pfx-1"}`
@@ -134,6 +140,18 @@ func TestHandleAuthUpdatesDiscardedSnapshotTriggersWatcherReread(t *testing.T) {
 	service.handleAuthUpdates(ctx, []watcher.AuthUpdate{{Action: watcher.AuthUpdateActionModify, ID: id, Auth: snapshot}})
 	if reread == nil || !reread.SameFileSnapshot(snapshot) {
 		t.Fatalf("reread = %+v, want discarded snapshot for %s", reread, id)
+	}
+}
+
+func TestHandleAuthUpdatesSnapshotTestsUnregisterGlobalModels(t *testing.T) {
+	t.Run("discarded snapshot", TestHandleAuthUpdatesDiscardedSnapshotTriggersWatcherReread)
+	if models := GlobalModelRegistry().GetModelsForClient("acct.json"); len(models) != 0 {
+		t.Errorf("leaked %d model(s) for acct.json in GlobalModelRegistry after TestHandleAuthUpdatesDiscardedSnapshotTriggersWatcherReread", len(models))
+	}
+
+	t.Run("cooldown snapshot", TestHandleAuthUpdatesFileSnapshotKeepsCooldown)
+	if models := GlobalModelRegistry().GetModelsForClient("cooldown.json"); len(models) != 0 {
+		t.Errorf("leaked %d model(s) for cooldown.json in GlobalModelRegistry after TestHandleAuthUpdatesFileSnapshotKeepsCooldown", len(models))
 	}
 }
 

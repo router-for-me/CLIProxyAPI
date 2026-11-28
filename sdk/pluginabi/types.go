@@ -38,7 +38,11 @@ const (
 	// Version 10 lets a plugin expose multiple OAuth/auth provider identifiers and
 	// per-entry display metadata via auth.identifier (identifiers/entries) or
 	// Capabilities.AuthProviders / MultiAuthProvider / AuthProviderEntries.
-	SchemaVersion uint32 = 10
+	// Version 11 lets scheduler plugins opt into push cancellation via
+	// scheduler.pick.cancel (capabilities.scheduler_pick_cancel), attaches
+	// host_callback_id to scheduler.pick requests, and exposes host.context.done
+	// and host.context.wait host callbacks for observing request cancellation.
+	SchemaVersion uint32 = 11
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -66,6 +70,9 @@ const (
 	// SchemaVersionMultiAuthProviders is the first schema version where a plugin
 	// may register multiple auth provider identifiers.
 	SchemaVersionMultiAuthProviders uint32 = 10
+	// SchemaVersionSchedulerPickCancel is the first schema version where a scheduler
+	// plugin may opt into scheduler.pick.cancel push notifications.
+	SchemaVersionSchedulerPickCancel uint32 = 11
 )
 
 const (
@@ -89,6 +96,8 @@ const (
 
 	// MethodSchedulerPick asks a scheduler plugin to select an auth candidate.
 	MethodSchedulerPick = "scheduler.pick"
+	// MethodSchedulerPickCancel notifies a scheduler plugin that an in-flight scheduler.pick request was canceled.
+	MethodSchedulerPickCancel = "scheduler.pick.cancel"
 	// MethodSchedulerContinuity asks a scheduler plugin whether a request should proceed, wait, or disable continuity.
 	MethodSchedulerContinuity = "scheduler.continuity"
 	// MethodModelRoute asks a router plugin to select a plugin executor for a matching request.
@@ -151,6 +160,8 @@ const (
 	MethodHostAuthSave           = "host.auth.save"
 	MethodHostAuthModels         = "host.auth.models"
 	MethodHostAffinityLookup     = "host.affinity.lookup"
+	MethodHostContextDone        = "host.context.done"
+	MethodHostContextWait        = "host.context.wait"
 
 	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
 )
