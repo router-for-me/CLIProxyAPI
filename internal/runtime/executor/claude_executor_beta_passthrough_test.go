@@ -86,6 +86,10 @@ func TestApplyClaudeHeaders_PreservesNativeGatewayHintsOnly(t *testing.T) {
 				"x-claude-code-prev-tool-durations": {"5"},
 				"x-claude-code-compaction":          {"false"},
 				"x-claude-code-context-compacted":   {"false"},
+				"x-claude-code-sandy-plover":        {"native-state"},
+				"anthropic-dispatch-id":             {"11111111-2222-4333-8444-555555555555"},
+				"x-claude-code-prompt-id":           {"66666666-7777-4888-8999-aaaaaaaaaaaa"},
+				"anthropic-usage-limit":             {"test-limit"},
 			}
 			auth := fixtureAuth()
 			if err := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil,
