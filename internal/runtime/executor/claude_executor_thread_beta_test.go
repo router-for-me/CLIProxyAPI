@@ -296,7 +296,7 @@ func TestClaudeThreadBetasSharedAcrossScopedCopiesAndIsolated(t *testing.T) {
 			auth := &cliproxyauth.Auth{ID: "credential-a", Attributes: map[string]string{"api_key": "key-scoped-thread", "base_url": "https://gateway.example.com", "header:Anthropic-Beta": "gateway-thread-beta"}}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller-a"}}
 			request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{"model":"claude-opus-5","thread":{"type":"create"},"messages":[{"role":"user","content":"first"}]}`)}
-			first := registered.ForAPIKey()
+			first := registered.ForAPIKey(nil)
 			if stream {
 				result, errStream := first.ExecuteStream(ctx, auth, request, opts)
 				if errStream != nil {
@@ -311,7 +311,7 @@ func TestClaudeThreadBetasSharedAcrossScopedCopiesAndIsolated(t *testing.T) {
 				t.Fatal(errExecute)
 			}
 			request.Payload = []byte(`{"model":"claude-opus-5","thread":{"type":"continue","previous_message_id":"msg_thread_1"},"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"second"}]}`)
-			second := registered.ForAPIKey()
+			second := registered.ForAPIKey(nil)
 			if _, errExecute := second.Execute(ctx, auth, request, opts); errExecute != nil {
 				t.Fatalf("continuation via a fresh scoped executor: %v", errExecute)
 			}

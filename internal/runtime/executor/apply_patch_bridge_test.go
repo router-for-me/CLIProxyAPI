@@ -508,7 +508,7 @@ func TestApplyPatchBridgeKimiReusedClientControls(t *testing.T) {
 			}
 			_, auth, bodies := newApplyPatchCompatTestExecutor(t, reply)
 			auth.Provider = "kimi"
-			exec := NewKimiExecutor(&config.Config{}).ForAPIKey()
+			exec := NewKimiExecutor(&config.Config{}).ForAPIKey(nil)
 			response, errExecute := exec.Execute(t.Context(), auth, cliproxyexecutor.Request{Model: "kimi-k2.5", Payload: payload}, cliproxyexecutor.Options{SourceFormat: source, OriginalRequest: payload})
 			if errExecute != nil {
 				t.Fatal(errExecute)

@@ -10,10 +10,317 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"gopkg.in/yaml.v3"
 )
+
+// keyPayloadDocument builds grouped source with a distinct unfiltered control key.
+func keyPayloadDocument(family, payload string) []byte {
+	return []byte(fmt.Sprintf("config-version: 8\napi-keys:\n  %s:\n    - name: fixture\n      base-url: https://synthetic.invalid\n      keys:\n        - {api-key: syntheticControl123}\n        - {api-key: syntheticTarget123, payload: %s}\n", family, payload))
+}
+
+// TestKeyPayloadPreservesReaderAcceptance checks key shapes through the existing readers.
+func TestKeyPayloadPreservesReaderAcceptance(t *testing.T) {
+	for _, field := range keyPayloadFields(reflect.TypeFor[Config]()) {
+		family := keyPayloadPath(field)
+		t.Run(family.current, func(t *testing.T) {
+			// Preserve grouped-key precedence across discarded flat values.
+			source := keyPayloadDocument(family.current, "null")
+			baseline, err := ParseConfigBytes(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, shadowed := range []string{"false", "{}", "[null]", "[false]"} {
+				t.Run("shadowed/"+shadowed, func(t *testing.T) {
+					raw := append([]byte(fmt.Sprintf("%s: %s\n", family.old, shadowed)), source...)
+					actual, err := ParseConfigBytes(raw)
+					if err != nil || !reflect.DeepEqual(actual, baseline) {
+						t.Fatalf("discarded flat values changed the grouped configuration: %v", err)
+					}
+				})
+			}
+
+			// Match typed null-entry decoding for flat configuration and nested snapshots.
+			var decoded Config
+			var legacy legacyConfig
+			raw := []byte(family.old + ": [null]\n")
+			if err := yaml.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal(raw, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(reflect.ValueOf(&decoded).Elem().FieldByIndex(field.Index).Interface(), reflect.ValueOf(&legacy).Elem().FieldByIndex(field.Index).Interface()) {
+				t.Fatal("the reader changed the null-entry collection")
+			}
+			for _, child := range keyPayloadFields(field.Type.Elem()) {
+				var nested Config
+				var nestedLegacy legacyConfig
+				raw := []byte(fmt.Sprintf("%s: [{%s: [null]}]\n", family.old, keyPayloadPath(child).old))
+				if err := yaml.Unmarshal(raw, &nested); err != nil {
+					t.Fatal(err)
+				}
+				if err := yaml.Unmarshal(raw, &nestedLegacy); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(reflect.ValueOf(&nested).Elem().FieldByIndex(field.Index).Interface(), reflect.ValueOf(&nestedLegacy).Elem().FieldByIndex(field.Index).Interface()) {
+					t.Fatal("the reader changed the nested null-entry collection")
+				}
+			}
+
+			// Delegate invalid active key shapes to the existing typed decoder.
+			for _, invalid := range []string{"false", "{}", "[false]"} {
+				raw := []byte(fmt.Sprintf("%s: %s\n", family.old, invalid))
+				var typed legacyConfig
+				expected := yaml.Unmarshal(raw, &typed)
+				var actual Config
+				err := yaml.Unmarshal(raw, &actual)
+				if expected == nil || err == nil || err.Error() != expected.Error() {
+					t.Fatalf("the reader changed the existing key-shape error: expected %v; got %v", expected, err)
+				}
+			}
+		})
+	}
+}
+
+func TestKeyPayloadConfigReadersAndRoundTrips(t *testing.T) {
+	for _, field := range keyPayloadFields(reflect.TypeFor[Config]()) {
+		family := keyPayloadPath(field)
+		for _, protocol := range append([]string{"", "   "}, strings.Split(field.Tag.Get("payload-protocols"), ",")...) {
+			t.Run(family.current+"/"+protocol, func(t *testing.T) {
+				selector := " " + strings.ToUpper(protocol) + " "
+				payload := fmt.Sprintf("{filter: [{models: [{name: '*', protocol: %q, from-protocol: openai, headers: {X-Filter: 'yes*'}, match: [{mode: test}]}], params: [system.0]}]}", selector)
+				raw := keyPayloadDocument(family.current, payload)
+				if err := ValidateV8Config(raw); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := ParseConfigBytes(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				encoded, err := yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := ParseConfigBytes(encoded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				originalJSON, err := json.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshotYAML, err := yaml.Marshal(snapshot)
+				if err != nil || !bytes.Equal(encoded, snapshotYAML) {
+					t.Fatalf("YAML snapshot changed its serialized configuration: %v", err)
+				}
+				var decoded Config
+				if err = json.Unmarshal(originalJSON, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				roundTripJSON, err := json.Marshal(&decoded)
+				if err != nil || !bytes.Equal(originalJSON, roundTripJSON) {
+					t.Fatalf("JSON round trip changed configuration: %v", err)
+				}
+				var effective yaml.Node
+				if err = effective.Encode(cfg); err != nil {
+					t.Fatal(err)
+				}
+				keys := yamlPath(&effective, family.old)
+				for _, child := range keyPayloadFields(field.Type.Elem()) {
+					keys = yamlPath(keys.Content[0], keyPayloadPath(child).old)
+				}
+				if len(keys.Content) != 2 || yamlPath(keys.Content[0], "payload") != nil {
+					t.Fatal("local policy escaped the selected key")
+				}
+				var policy KeyPayloadConfig
+				if err = yamlPath(keys.Content[1], "payload").Decode(&policy); err != nil {
+					t.Fatal(err)
+				}
+				if len(policy.Filter) != 1 || policy.Filter[0].Models[0].Protocol != selector || policy.Filter[0].Models[0].FromProtocol != "openai" {
+					t.Fatal("reader changed the declared selectors")
+				}
+				policies := cfg.KeyPayloadFilters()
+				if len(policies) != 1 {
+					t.Fatal("policy readout escaped the selected key")
+				}
+
+				// Compare serialized policies because YAML represents nil collections as empty lists.
+				serialized, err := yaml.Marshal(policies)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, candidate := range []*Config{snapshot, &decoded} {
+					readout, err := yaml.Marshal(candidate.KeyPayloadFilters())
+					if err != nil || !bytes.Equal(serialized, readout) {
+						t.Fatalf("policy readout changed across YAML or JSON serialization: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestKeyPayloadSchemaDiscovery exercises added collections without a provider registry entry.
+func TestKeyPayloadSchemaDiscovery(t *testing.T) {
+	// Declare distinct collection names and nested serialization paths in type metadata.
+	groupType := reflect.StructOf([]reflect.StructField{{
+		Name: "Entries", Type: reflect.TypeFor[[]OpenAICompatibilityAPIKey](), Tag: `yaml:"alternate-entries,omitempty"`,
+	}})
+	schema := reflect.StructOf([]reflect.StructField{
+		{Name: "Direct", Type: reflect.TypeFor[[]ClaudeKey](), Tag: `yaml:"extra-keys" payload-protocols:"claude"`},
+		{Name: "Nested", Type: reflect.SliceOf(groupType), Tag: `yaml:"extra-groups" payload-protocols:"openai,openai-response"`},
+		{Name: "Unrelated", Type: reflect.TypeFor[[]PayloadFilterRule](), Tag: `yaml:"unrelated"`},
+		{Name: "Ignored", Type: reflect.TypeFor[[]ClaudeKey](), Tag: `yaml:"-"`},
+	})
+	policy := KeyPayloadPolicy{Payload: &KeyPayloadConfig{Filter: []PayloadFilterRule{{
+		Models: []PayloadModelRule{{Name: "*"}}, Params: []string{"delete-marker"},
+	}}}}
+	value := reflect.New(schema).Elem()
+	value.FieldByName("Direct").Set(reflect.ValueOf([]ClaudeKey{{APIKey: "syntheticControl123"}, {APIKey: "syntheticTarget123", KeyPayloadPolicy: policy}}))
+	groups := reflect.MakeSlice(reflect.SliceOf(groupType), 1, 1)
+	groups.Index(0).FieldByName("Entries").Set(reflect.ValueOf([]OpenAICompatibilityAPIKey{{APIKey: "syntheticControl123"}, {APIKey: "syntheticTarget123", KeyPayloadPolicy: policy}}))
+	value.FieldByName("Nested").Set(groups)
+	value.FieldByName("Ignored").Set(value.FieldByName("Direct"))
+
+	// Read the actual policies and reject unrelated rule collections.
+	filters := make(map[string][]PayloadFilterRule)
+	collectKeyPayloadFilters(value, "", filters)
+	want := map[string][]PayloadFilterRule{
+		"extra-keys[1].payload.filter":                        policy.PayloadFilters(),
+		"extra-groups[0].alternate-entries[1].payload.filter": policy.PayloadFilters(),
+	}
+	if !reflect.DeepEqual(filters, want) {
+		t.Fatalf("schema-derived policy paths differ: %v", reflect.ValueOf(filters).MapKeys())
+	}
+	fields := keyPayloadFields(schema)
+	if len(fields) != len(want) {
+		t.Fatal("schema discovery omitted keys or included an unrelated collection")
+	}
+	for _, field := range fields {
+		var node yaml.Node
+		if err := node.Encode(value.FieldByIndex(field.Index).Interface()); err != nil {
+			t.Fatal(err)
+		}
+		layout := keyPayloadLayout{path: keyPayloadPath(field).old, fields: keyPayloadFields(field.Type.Elem())}
+		if err := validateKeyPayloadSequence(&node, layout, field); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Validate nested selector errors against the added collection's declared scope.
+	var source yaml.Node
+	if err := yaml.Unmarshal([]byte(`[{alternate-entries: [{payload: {filter: [{models: [{name: '*', protocol: codex}]}]}}]}]`), &source); err != nil {
+		t.Fatal(err)
+	}
+	nested, found := schema.FieldByName("Nested")
+	if !found {
+		t.Fatal("nested schema field is absent")
+	}
+	layout := keyPayloadLayout{path: keyPayloadPath(nested).old, fields: keyPayloadFields(nested.Type.Elem())}
+	err := validateKeyPayloadSequence(source.Content[0], layout, nested)
+	if err == nil || !strings.Contains(err.Error(), "extra-groups[0].alternate-entries[0].payload.filter[0].models[0].protocol") || !strings.Contains(err.Error(), "parent extra-groups key scope; expected openai, openai-response") {
+		t.Fatalf("schema-derived nested destination rejection failed: %v", err)
+	}
+}
+
+func TestKeyPayloadConfigRejectsSourceShapes(t *testing.T) {
+	for _, test := range []struct{ payload, suffix string }{
+		{"[]", ""},
+		{"{default: []}", ".default"},
+		{"{override: {}}", ".override"},
+		{"{filter: {}}", ".filter"},
+		{"{filter: [null]}", ".filter[0]"},
+		{"{filter: [{params: [42]}]}", ".filter[0].params[0]"},
+		{"{filter: [{models: [false]}]}", ".filter[0].models[0]"},
+		{"{filter: [{models: [{name: '*', protocol: 42}]}]}", ".filter[0].models[0].protocol"},
+		{"{filter: [{models: [{name: '*', headers: {Authorization: [secretValue123]}}]}]}", ".filter[0].models[0].headers.Authorization"},
+		{"{filter: [{models: [{name: '*', protocol: codex}]}]}", ".filter[0].models[0].protocol"},
+	} {
+		for _, reader := range []struct {
+			name string
+			read func([]byte) error
+		}{
+			{"ordinary", func(raw []byte) error { _, err := ParseConfigBytes(raw); return err }},
+			{"strict", ValidateV8Config},
+		} {
+			t.Run(reader.name+"/"+test.payload, func(t *testing.T) {
+				err := reader.read(keyPayloadDocument("claude", test.payload))
+				path := "api-keys.claude[0].keys[1].payload" + test.suffix
+				if err == nil || !strings.Contains(err.Error(), path) {
+					t.Fatalf("expected source path %s; got %v", path, err)
+				}
+				for _, value := range []string{"syntheticTarget123", "secretValue123"} {
+					if strings.Contains(err.Error(), value) {
+						t.Fatal("validation exposed a credential or header value")
+					}
+				}
+			})
+		}
+	}
+	for _, family := range v8KeyFamilies {
+		grouped := []byte(fmt.Sprintf("api-keys:\n  %s:\n    - payload: {}\n      keys: [{api-key: syntheticTarget123}]\n", family.current))
+		if _, err := ParseConfigBytes(grouped); err == nil || !strings.Contains(err.Error(), "api-keys."+family.current+"[0].payload") {
+			t.Fatalf("missing indexed group-policy error: %v", err)
+		}
+		if err := ValidateV8Config(grouped); err == nil || !strings.Contains(err.Error(), "api-keys."+family.current+"[0].payload") {
+			t.Fatalf("strict reader lost indexed group-policy error: %v", err)
+		}
+		for _, payload := range []string{"null", "{}", "{filter: []}", "{filter: null}"} {
+			raw := keyPayloadDocument(family.current, payload)
+			if err := ValidateV8Config(raw); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := ParseConfigBytes(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := yaml.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot Config
+			if err = yaml.Unmarshal(encoded, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, err := yaml.Marshal(&snapshot)
+			if err != nil || !bytes.Equal(encoded, roundTrip) {
+				t.Fatalf("empty local policy changed its serialized configuration: %v", err)
+			}
+		}
+		raw := keyPayloadDocument(family.current, "{filter: [{models: [{name: '*', protocol: unsupported-destination}], params: [x]}]}")
+		if err := ValidateV8Config(raw); err == nil || !strings.Contains(err.Error(), "parent "+family.current+" key scope") {
+			t.Fatalf("missing parent destination rejection for %s: %v", family.current, err)
+		}
+	}
+}
+
+func TestKeyPayloadConfigAliasesAndLegacy(t *testing.T) {
+	raw := []byte("api-keys:\n  claude:\n    - keys:\n        - &key {api-key: syntheticSharedKey123, headers: {X-Role: target}, payload: {filter: [{models: [{name: '*'}], params: [system.0]}]}}\n        - {<<: *key, headers: {X-Role: other}}\n")
+	cfg, err := ParseConfigBytes(raw)
+	if err != nil || len(cfg.ClaudeKey) != 2 {
+		t.Fatalf("alias/merge decode failed: %v", err)
+	}
+	if len(cfg.ClaudeKey[1].PayloadFilters()) != 1 || cfg.ClaudeKey[1].Headers["X-Role"] != "other" {
+		t.Fatal("alias/merge lost the key-owned policy or explicit header")
+	}
+	for _, field := range keyPayloadFields(reflect.TypeFor[Config]()) {
+		family := keyPayloadPath(field)
+		entry := "{api-key: syntheticSharedKey123, payload: {filter: [{models: [{name: '*'}], params: [system.0]}]}}"
+		for _, child := range keyPayloadFields(field.Type.Elem()) {
+			entry = "{name: fixture, " + keyPayloadPath(child).old + ": [" + entry + "]}"
+		}
+		legacy := []byte(family.old + ": [" + entry + "]\n")
+		if _, err = ParseConfigBytes(legacy); err != nil {
+			t.Fatal(err)
+		}
+		if err = ValidateV8Config(legacy); err == nil || !strings.Contains(err.Error(), "unknown v8 configuration section "+family.old) {
+			t.Fatalf("strict reader changed legacy precedence: %v", err)
+		}
+	}
+}
 
 func TestV8ExampleLoadsAndRoundTrips(t *testing.T) {
 	example, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))

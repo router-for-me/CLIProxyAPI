@@ -22,6 +22,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -1106,13 +1107,42 @@ func deleteRequestHeaderFold(headers http.Header, key string) {
 	}
 }
 
-func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
-	if auth.AuthKind() == AuthKindAPIKey {
-		if scoped, ok := executor.(APIKeyConfigExecutor); ok {
-			return scoped.ForAPIKey()
-		}
+// executorForAuth binds a selected key without changing the registered provider.
+func executorForAuth(executor ProviderExecutor, auth *Auth) (ProviderExecutor, error) {
+	if auth == nil {
+		return executor, nil
 	}
-	return executor
+	kind := auth.AuthKind()
+	if kind == AuthKindOAuth {
+		return executor, nil
+	}
+	source := auth.ConfiguredKeyPayloadSource()
+	hasFilters := len(internalconfig.PayloadFiltersFor(source)) != 0
+	if kind != AuthKindAPIKey && !hasFilters {
+		return executor, nil
+	}
+
+	// Bind payload filters independently of credential kind when no key is required.
+	var bind func(internalconfig.PayloadFilterSource) ProviderExecutor
+	if kind == AuthKindAPIKey {
+		scoped, ok := executor.(APIKeyConfigExecutor)
+		if ok {
+			bind = scoped.ForAPIKey
+		}
+	} else if scoped, ok := executor.(KeyPayloadConfigExecutor); ok {
+		bind = scoped.WithKeyPayloadFilters
+	}
+	if bind == nil && !hasFilters {
+		return executor, nil
+	}
+	if bind == nil {
+		return nil, &Error{Code: "payload_policy_unsupported", Message: "selected key payload filters require a key-scoping provider"}
+	}
+	bound := bind(source)
+	if bound == nil {
+		return nil, &Error{Code: "payload_policy_unsupported", Message: "provider could not bind selected key payload filters"}
+	}
+	return bound, nil
 }
 
 // syncPreferredUpstreamError refreshes the error that terminal selection
@@ -1348,7 +1378,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if preparedAuth != nil {
 			auth = preparedAuth
 		}
-		executor = executorForAuth(executor, auth)
+		var errBind error
+		executor, errBind = executorForAuth(executor, auth)
+		if errBind != nil {
+			return cliproxyexecutor.Response{}, errBind
+		}
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -1651,7 +1685,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if preparedAuth != nil {
 			auth = preparedAuth
 		}
-		executor = executorForAuth(executor, auth)
+		var errBind error
+		executor, errBind = executorForAuth(executor, auth)
+		if errBind != nil {
+			return cliproxyexecutor.Response{}, errBind
+		}
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -4163,7 +4201,10 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		updated, _ := m.GetByID(auth.ID)
 		return updated, errPrepare
 	}
-	executor = executorForAuth(baseExecutor, auth)
+	executor, errBind := executorForAuth(baseExecutor, auth)
+	if errBind != nil {
+		return auth, errBind
+	}
 
 	var activeVerifyAuth atomic.Pointer[Auth]
 	activeVerifyAuth.Store(auth)
@@ -4228,7 +4269,10 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 						}
 						if okRefresh {
 							auth = refreshed
-							executor = executorForAuth(baseExecutor, auth)
+							executor, errBind = executorForAuth(baseExecutor, auth)
+							if errBind != nil {
+								return auth, errBind
+							}
 							didRefreshOnUnauthorized = true
 							execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 							executionSeq = m.nextExecutionSeq()
@@ -4263,7 +4307,10 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 			}
 			if okRefresh {
 				auth = refreshed
-				executor = executorForAuth(baseExecutor, auth)
+				executor, errBind = executorForAuth(baseExecutor, auth)
+				if errBind != nil {
+					return auth, errBind
+				}
 				didRefreshOnUnauthorized = true
 				execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 				executionSeq = m.nextExecutionSeq()
@@ -4326,7 +4373,10 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 				}
 				if okRefresh {
 					auth = refreshed
-					executor = executorForAuth(baseExecutor, auth)
+					executor, errBind = executorForAuth(baseExecutor, auth)
+					if errBind != nil {
+						return auth, errBind
+					}
 					didRefreshOnUnauthorized = true
 					execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 					executionSeq = m.nextExecutionSeq()

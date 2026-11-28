@@ -686,7 +686,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	executor = executorForAuth(executor, auth)
+	executor, errBind := executorForAuth(executor, auth)
+	if errBind != nil {
+		return nil, errBind
+	}
 	baseCtx := contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
 	var upstreamErr error

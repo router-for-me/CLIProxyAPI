@@ -170,6 +170,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:         id,
+			ConfigKey:  &entries[i],
 			Provider:   provider,
 			Label:      label,
 			Prefix:     prefix,
@@ -247,6 +248,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:         id,
+			ConfigKey:  &cfg.ClaudeKey[i],
 			Provider:   "claude",
 			Label:      "claude-apikey",
 			Prefix:     prefix,
@@ -337,6 +339,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:                  id,
+			ConfigKey:           &entries[i],
 			Provider:            provider,
 			Label:               provider + "-apikey",
 			Prefix:              prefix,
@@ -417,6 +420,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
 				ID:                  id,
+				ConfigKey:           entry,
 				Provider:            internalProviderKey,
 				Label:               compat.Name,
 				Prefix:              prefix,
@@ -539,6 +543,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 		a := &coreauth.Auth{
 			ID:         id,
+			ConfigKey:  compat,
 			Provider:   providerName,
 			Label:      "vertex-apikey",
 			Prefix:     prefix,

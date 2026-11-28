@@ -685,6 +685,37 @@ func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID string, mode
 	return nameMatch
 }
 
+// PayloadFilterSource exposes immutable filters owned by a configured key.
+type PayloadFilterSource interface {
+	PayloadFilters() []PayloadFilterRule
+}
+
+// KeyPayloadConfig configures JSON-path deletions for one selected key.
+type KeyPayloadConfig struct {
+	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`
+}
+
+// KeyPayloadPolicy attaches an optional filter policy to an individual key.
+type KeyPayloadPolicy struct {
+	Payload *KeyPayloadConfig `yaml:"payload,omitempty" json:"payload,omitempty"`
+}
+
+// PayloadFilters returns the key's immutable filter list.
+func (policy KeyPayloadPolicy) PayloadFilters() []PayloadFilterRule {
+	if policy.Payload == nil {
+		return nil
+	}
+	return policy.Payload.Filter
+}
+
+// PayloadFiltersFor returns the immutable filters of an optional key owner.
+func PayloadFiltersFor(source PayloadFilterSource) []PayloadFilterRule {
+	if source == nil {
+		return nil
+	}
+	return source.PayloadFilters()
+}
+
 // PayloadConfig defines parameter and text mutation rules applied to provider payloads.
 type PayloadConfig struct {
 	// Default defines rules that only set parameters when they are missing in the payload.
@@ -771,6 +802,8 @@ type CloakConfig struct {
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
+	KeyPayloadPolicy `yaml:",inline"`
+
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -896,6 +929,8 @@ func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type CodexKey struct {
+	KeyPayloadPolicy `yaml:",inline"`
+
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -1020,6 +1055,8 @@ type MetaModel = CodexModel
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
+	KeyPayloadPolicy `yaml:",inline"`
+
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -1159,6 +1196,8 @@ type OpenAICompatibility struct {
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
 type OpenAICompatibilityAPIKey struct {
+	KeyPayloadPolicy `yaml:",inline"`
+
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
