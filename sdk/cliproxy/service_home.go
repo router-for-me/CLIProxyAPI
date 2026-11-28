@@ -628,7 +628,7 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 			} else {
 				log.Warnf("home config subscription lifetime ended; retrying in %s: %v", retryDelay, errRun)
 			}
-			if retryDelay > 0 && !waitForHomeSubscriberRetry(homeCtx, retryDelay) {
+			if retryDelay > 0 && !s.waitHomeSubscriberRetry(homeCtx, retryDelay) {
 				return
 			}
 			previousClient = client
@@ -703,7 +703,7 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 				return
 			}
 			log.WithError(errParse).Warn("failed to stage home config; retrying")
-			if !waitForHomeSubscriberRetry(lifetimeCtx, homeSubscriberPreAckRetryBackoff) {
+			if !s.waitHomeSubscriberRetry(lifetimeCtx, homeSubscriberPreAckRetryBackoff) {
 				return
 			}
 			if latest, okLatest := queue.tryDequeueLatest(); okLatest {
@@ -776,6 +776,13 @@ func (s *Service) startHomeInFlightPublisher(ctx context.Context, client *home.C
 		defer close(done)
 		s.coreManager.StartHomeInFlightPublisher(ctx, client, registry)
 	}()
+}
+
+func (s *Service) waitHomeSubscriberRetry(ctx context.Context, delay time.Duration) bool {
+	if s.homeSubscriberRetryWaitFn != nil {
+		return s.homeSubscriberRetryWaitFn(ctx, delay)
+	}
+	return waitForHomeSubscriberRetry(ctx, delay)
 }
 
 func waitForHomeSubscriberRetry(ctx context.Context, delay time.Duration) bool {
