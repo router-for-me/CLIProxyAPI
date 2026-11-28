@@ -76,6 +76,9 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 // StopAutoRefresh cancels the background refresh loop, if running.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
@@ -88,6 +91,39 @@ func (m *Manager) StopAutoRefresh() {
 	sel := m.Selector()
 	if stoppable, ok := sel.(StoppableSelector); ok && stoppable != nil {
 		stoppable.Stop()
+	}
+}
+
+// StopAutoRefreshContext cancels the background refresh loop and waits, within ctx,
+// for in-flight auto-refresh workers to finish persisting refreshed credentials.
+func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.StopAutoRefresh()
+
+	m.mu.Lock()
+	if m.autoRefreshInFlight == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	idleCh := m.autoRefreshIdleCh
+	m.mu.Unlock()
+
+	select {
+	case <-idleCh:
+		return nil
+	default:
+	}
+
+	select {
+	case <-idleCh:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("stop auth auto-refresh: %w", ctx.Err())
 	}
 }
 
@@ -391,6 +427,29 @@ func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, regis
 	return job
 }
 
+type autoRefreshPersistDoneKey struct{}
+
+func withAutoRefreshPersistDone(ctx context.Context, fn func()) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, autoRefreshPersistDoneKey{}, fn)
+}
+
+func detachAutoRefreshPersistDone(ctx context.Context) (context.Context, func()) {
+	if ctx == nil {
+		return context.Background(), nil
+	}
+	fn, _ := ctx.Value(autoRefreshPersistDoneKey{}).(func())
+	if fn == nil {
+		return ctx, nil
+	}
+	return context.WithValue(ctx, autoRefreshPersistDoneKey{}, (func())(nil)), fn
+}
+
 func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -400,6 +459,39 @@ func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool
 	}
 	job.running = true
 	return true
+}
+
+func (m *Manager) beginAutoRefreshJob(ctx context.Context, job *authRefreshJob) (func(), bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth := m.auths[job.id]
+	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RegistrationEpoch != job.registrationEpoch {
+		return nil, false
+	}
+	job.running = true
+	m.autoRefreshInFlight++
+	if m.autoRefreshIdleCh == nil {
+		m.autoRefreshIdleCh = make(chan struct{})
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			m.finishAutoRefreshInFlight()
+		})
+	}
+	return release, true
+}
+
+func (m *Manager) finishAutoRefreshInFlight() {
+	m.mu.Lock()
+	if m.autoRefreshInFlight > 0 {
+		m.autoRefreshInFlight--
+	}
+	if m.autoRefreshInFlight == 0 && m.autoRefreshIdleCh != nil {
+		close(m.autoRefreshIdleCh)
+		m.autoRefreshIdleCh = nil
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queuedOnly bool) {
@@ -1030,7 +1122,17 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 	if hasUnauthorizedAuthFailure(existing) {
 		return false
 	}
+	releaseCredentialQuota(auth, existing, now, true)
+	return true
+}
 
+// releaseCredentialQuota clears an auth-level credential_quota cooldown on auth.
+// Model states wrapped by credential_quota propagation have their independent
+// shadow cooldown reinstated (if still live) or are reset, while an independent
+// auth-level force cooldown recorded on existing is preserved. When
+// includeLegacyUnwrappedQuota is true, unwrapped "quota" model states are also
+// cleared (used by legacy Devin quota restoration).
+func releaseCredentialQuota(auth, existing *Auth, now time.Time, includeLegacyUnwrappedQuota bool) {
 	applyCooldownFields(&auth.Quota, QuotaState{})
 	for _, state := range auth.ModelStates {
 		if state == nil {
@@ -1038,14 +1140,13 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 		}
 		reason := strings.TrimSpace(state.Quota.Reason)
 		wrapped := state.credentialQuotaPropagated || reason == "credential_quota"
-		if !state.Quota.Exceeded || (reason != "quota" && !wrapped) {
+		if !state.Quota.Exceeded || (!wrapped && (!includeLegacyUnwrappedQuota || reason != "quota")) {
 			continue
 		}
 		// A wrapped sibling carries its independent layer in the shadow.
 		// Reinstate that exact block (if still live) instead of erasing it;
-		// the reporting model ("quota" unwrapped) and pure propagation
-		// targets (no shadow) fully release. Deadline or status heuristics
-		// cannot recover this provenance reliably.
+		// pure propagation targets (no shadow) fully release. Deadline or
+		// status heuristics cannot recover this provenance reliably.
 		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
 			*state = *shadow.cloneShallow()
 			state.UpdatedAt = now
@@ -1081,8 +1182,13 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 		if auth.Unavailable && auth.Status == StatusActive {
 			auth.Status = StatusError
 		}
+	} else if auth.credentialRetryAfter.After(now) {
+		auth.Unavailable = true
+		if auth.NextRetryAfter.Before(auth.credentialRetryAfter) {
+			auth.NextRetryAfter = auth.credentialRetryAfter
+		}
+		auth.Status = StatusError
 	}
-	return true
 }
 
 // isDevinQuotaExhaustionMessage reports whether text is Devin's explicit
@@ -1555,6 +1661,8 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
+	var onPersistDone func()
+	ctx, onPersistDone = detachAutoRefreshPersistDone(ctx)
 	forceRefresh := isForceRefreshContext(ctx)
 	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
 	if ctx == nil {
@@ -2055,7 +2163,11 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 	}
 	// A successful refresh may have rotated upstream tokens after cancellation.
 	// Commit its result with context values intact; keep epoch checks and save ordering.
-	saved, committed, baseSuperseded, errUpdate := m.updateRefreshedAuthWithStatus(context.WithoutCancel(ctx), base, updated)
+	commitCtx := context.WithoutCancel(ctx)
+	if onPersistDone != nil {
+		commitCtx = withAutoRefreshPersistDone(commitCtx, onPersistDone)
+	}
+	saved, committed, baseSuperseded, errUpdate := m.updateRefreshedAuthWithStatus(commitCtx, base, updated)
 	if errUpdate != nil {
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)

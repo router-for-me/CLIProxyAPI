@@ -422,55 +422,40 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	// IMPORTANT: Update coreManager FIRST, before model registration.
 	// This ensures that configuration changes (proxy_url, prefix, etc.) take effect
 	// immediately for API calls, rather than waiting for model registration to complete.
-	op := "register"
-	var err error
-	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
-		if isStaleCoreAuth(existing, auth) {
-			log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
-			return existing
-		}
-		auth.CreatedAt = existing.CreatedAt
-		if existing.Metadata != nil {
-			if persistedHints, hasHints := existing.Metadata[antigravityPersistedHintsMetaKey]; hasHints {
-				if auth.Metadata == nil {
-					auth.Metadata = make(map[string]any)
+	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
+		return s.updateCoreAuthForModelRegistration(ctx, existing, auth)
+	}
+	var (
+		registered *coreauth.Auth
+		err        error
+	)
+	if auth.HasFileSnapshot() {
+		var exists bool
+		registered, exists, err = s.coreManager.RegisterFileSnapshotIfAbsent(ctx, auth)
+		if err == nil {
+			if exists {
+				// Auth was registered concurrently after GetByID; delegate to the
+				// update path so the existing file-snapshot fence handles it.
+				return s.updateCoreAuthForModelRegistration(ctx, registered, auth)
+			}
+			if registered == nil {
+				log.Debugf("skipping stale auth register for %s: file snapshot no longer matches disk", auth.ID)
+				if w := s.currentWatcher(); w != nil {
+					w.RereadDiscardedFileSnapshot(auth)
 				}
-				auth.Metadata[antigravityPersistedHintsMetaKey] = persistedHints
+				return nil
 			}
-		}
-		if !auth.HasFileSnapshot() && !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
-			if !coreauth.CredentialsChanged(existing, auth) {
-				auth.LastRefreshedAt = existing.LastRefreshedAt
-				auth.NextRefreshAfter = existing.NextRefreshAfter
-			}
-			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-				auth.ModelStates = existing.ModelStates
-			}
-		}
-		op = "update"
-		var updated *coreauth.Auth
-		updated, err = s.coreManager.Update(ctx, auth)
-		if err == nil && updated != nil {
-			if auth.HasFileSnapshot() || updated.Generation == existing.Generation {
-				log.Debugf("skipping stale auth update for %s: incoming snapshot did not advance generation (gen=%d)", auth.ID, existing.Generation)
-				if auth.HasFileSnapshot() {
-					if w := s.currentWatcher(); w != nil {
-						w.RereadDiscardedFileSnapshot(auth)
-					}
-				}
-				return updated
-			}
-			auth = updated
+			s.cancelStaleAntigravityProbes(registered.ID)
+			return registered
 		}
 	} else {
-		var registered *coreauth.Auth
 		registered, err = s.coreManager.Register(ctx, auth)
 		if err == nil && registered != nil {
 			auth = registered
 		}
 	}
 	if err != nil {
-		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
+		log.Errorf("failed to register auth %s: %v", auth.ID, err)
 		current, ok := s.coreManager.GetByID(auth.ID)
 		if !ok || current.Disabled {
 			GlobalModelRegistry().UnregisterClient(auth.ID)
@@ -480,6 +465,65 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	}
 	s.cancelStaleAntigravityProbes(auth.ID)
 	return auth
+}
+
+func (s *Service) updateCoreAuthForModelRegistration(ctx context.Context, existing, auth *coreauth.Auth) *coreauth.Auth {
+	if existing == nil {
+		return nil
+	}
+	if isStaleCoreAuth(existing, auth) {
+		log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
+		return existing
+	}
+	auth.CreatedAt = existing.CreatedAt
+	if existing.Metadata != nil {
+		if persistedHints, hasHints := existing.Metadata[antigravityPersistedHintsMetaKey]; hasHints {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata[antigravityPersistedHintsMetaKey] = persistedHints
+		}
+	}
+	if !auth.HasFileSnapshot() && !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+		if !coreauth.CredentialsChanged(existing, auth) {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+		}
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.ModelStates
+		}
+	}
+	updated, errUpdate := s.coreManager.Update(ctx, auth)
+	if errUpdate != nil {
+		log.Errorf("failed to update auth %s: %v", auth.ID, errUpdate)
+		current, ok := s.coreManager.GetByID(auth.ID)
+		if !ok || current.Disabled {
+			GlobalModelRegistry().UnregisterClient(auth.ID)
+			return nil
+		}
+		s.cancelStaleAntigravityProbes(current.ID)
+		return current
+	}
+	if updated == nil {
+		log.Debugf("skipping stale auth update for %s: auth no longer exists", auth.ID)
+		if auth.HasFileSnapshot() {
+			if w := s.currentWatcher(); w != nil {
+				w.RereadDiscardedFileSnapshot(auth)
+			}
+		}
+		return nil
+	}
+	if auth.HasFileSnapshot() || updated.Generation == existing.Generation {
+		log.Debugf("skipping stale auth update for %s: incoming snapshot did not advance generation (gen=%d)", auth.ID, existing.Generation)
+		if auth.HasFileSnapshot() {
+			if w := s.currentWatcher(); w != nil {
+				w.RereadDiscardedFileSnapshot(auth)
+			}
+		}
+		return updated
+	}
+	s.cancelStaleAntigravityProbes(updated.ID)
+	return updated
 }
 
 type authRegistrationWait struct {

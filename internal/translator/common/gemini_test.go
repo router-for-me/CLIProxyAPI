@@ -1,6 +1,7 @@
 package common
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -468,5 +469,65 @@ func TestSetGeminiFunctionCallArgsDoc(t *testing.T) {
 				t.Fatalf("functionCall.args = %s, want %s", args.Raw, tt.wantRaw)
 			}
 		})
+	}
+}
+
+func TestAlignGeminiFunctionResponses(t *testing.T) {
+	t.Run("aligns_out_of_order_responses_preserving_non_response_parts", func(t *testing.T) {
+		contents := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionCall":{"id":"call_bash","name":"Bash","args":{}}},{"functionCall":{"id":"call_read","name":"Read","args":{}}}]}`),
+			[]byte(`{"role":"user","parts":[{"text":"reminder"},{"functionResponse":{"id":"call_read","name":"Read","response":{"result":"r2"}}},{"functionResponse":{"id":"call_bash","name":"Bash","response":{"result":"r1"}}}]}`),
+		}
+		got := AlignGeminiFunctionResponses(contents)
+		parts := ojson.GetBytesNoCopy(got[1], "parts").Array()
+		if len(parts) != 3 {
+			t.Fatalf("parts len = %d, want 3; got=%s", len(parts), got[1])
+		}
+		if parts[0].Get("text").String() != "reminder" {
+			t.Fatalf("parts[0].text = %q, want reminder", parts[0].Get("text").String())
+		}
+		if parts[1].Get("functionResponse.id").String() != "call_bash" {
+			t.Fatalf("parts[1].functionResponse.id = %q, want call_bash", parts[1].Get("functionResponse.id").String())
+		}
+		if parts[2].Get("functionResponse.id").String() != "call_read" {
+			t.Fatalf("parts[2].functionResponse.id = %q, want call_read", parts[2].Get("functionResponse.id").String())
+		}
+	})
+
+	t.Run("reuses_slice_when_already_aligned", func(t *testing.T) {
+		contents := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"Bash","args":{}}},{"functionCall":{"id":"call_2","name":"Read","args":{}}}]}`),
+			[]byte(`{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"Bash","response":{"result":"r1"}}},{"functionResponse":{"id":"call_2","name":"Read","response":{"result":"r2"}}}]}`),
+		}
+		got := AlignGeminiFunctionResponses(contents)
+		if &got[0] != &contents[0] {
+			t.Fatal("expected already-aligned contents slice to be reused without copying")
+		}
+	})
+
+	t.Run("leaves_incomplete_responses_unchanged", func(t *testing.T) {
+		contents := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"Bash","args":{}}},{"functionCall":{"id":"call_2","name":"Read","args":{}}}]}`),
+			[]byte(`{"role":"user","parts":[{"functionResponse":{"id":"call_2","name":"Read","response":{"result":"r2"}}}]}`),
+		}
+		got := AlignGeminiFunctionResponses(contents)
+		if &got[0] != &contents[0] {
+			t.Fatal("expected incomplete response turn to be left unchanged")
+		}
+	})
+}
+
+func BenchmarkAlignGeminiFunctionResponsesAlreadyAligned(b *testing.B) {
+	contents := [][]byte{
+		[]byte(`{"role":"user","parts":[{"text":"run tools"}]}`),
+		[]byte(`{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"Bash","args":{"cmd":"ls"}}},{"functionCall":{"id":"call_2","name":"Read","args":{"path":"a.go"}}}]}`),
+		[]byte(`{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"Bash","response":{"result":"ok"}}},{"functionResponse":{"id":"call_2","name":"Read","response":{"result":"file"}}}]}`),
+		[]byte(`{"role":"model","parts":[{"functionCall":{"id":"call_3","name":"Read","args":{"path":"big.bin"}}}]}`),
+		[]byte(`{"role":"user","parts":[{"functionResponse":{"id":"call_3","name":"Read","response":{"result":"` + strings.Repeat("x", 64*1024) + `"}}}]}`),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = AlignGeminiFunctionResponses(contents)
 	}
 }

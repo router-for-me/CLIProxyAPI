@@ -252,6 +252,9 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							continue
 						}
 						partDoc := ojson.NewDocString(`{"functionCall":{"name":"","args":{}}}`)
+						if functionID != "" {
+							_ = partDoc.Set("functionCall.id", functionID)
+						}
 						_ = partDoc.Set("functionCall.name", functionName)
 						functionArgs := strings.TrimSpace(tc.Get("function.arguments").String())
 						if functionArgs != "" {
@@ -292,6 +295,9 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					responseParts := make([][]byte, 0, len(toolCalls))
 					for _, call := range toolCalls {
 						partDoc := ojson.NewDocString(`{"functionResponse":{"name":"","response":{"result":""}}}`)
+						if call.id != "" {
+							_ = partDoc.Set("functionResponse.id", call.id)
+						}
 						_ = partDoc.Set("functionResponse.name", call.name)
 						response := turnToolResponses[call.id]
 						if response == "" {

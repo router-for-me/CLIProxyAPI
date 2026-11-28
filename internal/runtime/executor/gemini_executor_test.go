@@ -2064,3 +2064,46 @@ func TestGeminiExecutorNativeInteractionsFromGeminiIssue7544(t *testing.T) {
 		t.Fatalf("tools.0.search_types = %s, want [web_search, image_search]; body=%s", ojson.GetBytesNoCopy(upstreamBody, "tools.0.search_types").Raw, string(upstreamBody))
 	}
 }
+
+func TestGeminiExecutorCountTokensAcceptsSingleFunctionResponseFragment(t *testing.T) {
+	var upstreamPath string
+	var upstreamBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"totalTokens":42}`))
+	}))
+	defer srv.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "gemini-count-tokens-fragment",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": srv.URL,
+		},
+	}
+	payload := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"read_file","id":"read_file__call_1","response":{"result":"ok"}}},{"inlineData":{"mimeType":"image/png","data":"AA=="}}]}]}`)
+	resp, err := exec.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-4-neon",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+	})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if !strings.HasSuffix(upstreamPath, "/models/gemini-4-neon:countTokens") {
+		t.Fatalf("upstream path = %q, want suffix /models/gemini-4-neon:countTokens", upstreamPath)
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "contents.0.parts.0.functionResponse.id").String(); got != "read_file__call_1" {
+		t.Fatalf("upstream functionResponse.id = %q, want read_file__call_1; body=%s", got, upstreamBody)
+	}
+	if got := ojson.GetBytesNoCopy(resp.Payload, "totalTokens").Int(); got != 42 {
+		t.Fatalf("totalTokens = %d, want 42; payload=%s", got, resp.Payload)
+	}
+}

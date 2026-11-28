@@ -5361,3 +5361,267 @@ func TestIssue8032_NormalizeJSONSchemaNumericProtoTypes(t *testing.T) {
 		}
 	})
 }
+
+func TestIssue8571_EmptyEnumValuesStripped(t *testing.T) {
+	geminiCleaners := map[string]func(string) string{
+		"Gemini":              CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	}
+	allCleaners := map[string]func(string) string{
+		"Gemini":                CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, true) },
+	}
+
+	t.Run("mixed empty string and valid values stripped with idempotent hints", func(t *testing.T) {
+		input := `{
+			"type": "object",
+			"properties": {
+				"target": {"type": "string"},
+				"style": {"type": "string", "enum": ["", "llm", "dossier"]},
+				"described": {"type": "string", "description": "Output style", "enum": ["", "llm", "dossier"]}
+			},
+			"required": ["target"]
+		}`
+
+		for name, clean := range allCleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := ojson.Parse(got)
+
+				for _, field := range []string{"style", "described"} {
+					prop := parsed.Get("properties." + field)
+					desc := prop.Get("description").String()
+					if strings.Contains(desc, "Allowed: ,") {
+						t.Errorf("%s: malformed enum hint in %s description: %q", name, field, desc)
+					}
+					if !strings.Contains(desc, "Allowed: llm, dossier") {
+						t.Errorf("%s: %s description missing Allowed values: %q", name, field, desc)
+					}
+					if !strings.Contains(desc, emptyStringEnumAllowedHint) {
+						t.Errorf("%s: %s description missing empty-string hint: %q", name, field, desc)
+					}
+					if _, keepsEnum := geminiCleaners[name]; keepsEnum {
+						gotEnum := getStrings(got, "properties."+field+".enum")
+						if !reflect.DeepEqual(gotEnum, []string{"llm", "dossier"}) {
+							t.Errorf("%s: %s enum = %v, want [llm dossier]; output=%s", name, field, gotEnum, got)
+						}
+					} else if prop.Get("enum").Exists() {
+						t.Errorf("%s: %s enum should be dropped; output=%s", name, field, got)
+					}
+				}
+
+				// Re-cleaning must be idempotent without duplicating Allowed or empty-string hints.
+				second := clean(got)
+				compareJSON(t, got, second)
+			})
+		}
+
+		// Translator (GeminiJSONSchema) -> Executor (AntigravityTool) chained cleaning must not duplicate hints.
+		translated := CleanJSONSchemaForGeminiJSONSchema(input)
+		executorCleaned := CleanJSONSchemaForAntigravityTool(translated, false)
+		executorRecleaned := CleanJSONSchemaForAntigravityTool(executorCleaned, false)
+		compareJSON(t, executorCleaned, executorRecleaned)
+		for _, field := range []string{"style", "described"} {
+			desc := ojson.Get(executorCleaned, "properties."+field+".description").String()
+			if strings.Count(desc, "Allowed:") != 1 {
+				t.Errorf("chained %s description duplicated Allowed hint: %q", field, desc)
+			}
+			if strings.Count(desc, emptyStringEnumAllowedHint) != 1 {
+				t.Errorf("chained %s description duplicated empty-string hint: %q", field, desc)
+			}
+		}
+	})
+
+	t.Run("whitespace-only member stripped leaving single valid value", func(t *testing.T) {
+		input := `{"type":"object","properties":{"mode":{"type":"string","enum":["   ","a"]}}}`
+
+		for name, clean := range geminiCleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				gotEnum := getStrings(got, "properties.mode.enum")
+				if !reflect.DeepEqual(gotEnum, []string{"a"}) {
+					t.Fatalf("%s: enum = %v, want [a]; output=%s", name, gotEnum, got)
+				}
+				desc := ojson.Get(got, "properties.mode.description").String()
+				if desc != emptyStringEnumAllowedHint {
+					t.Fatalf("%s: description = %q, want %q; output=%s", name, desc, emptyStringEnumAllowedHint, got)
+				}
+				compareJSON(t, got, clean(got))
+			})
+		}
+
+		// Antigravity tool path drops the remaining single enum into an Allowed hint too.
+		agyGot := CleanJSONSchemaForAntigravityTool(input, false)
+		if ojson.Get(agyGot, "properties.mode.enum").Exists() {
+			t.Fatalf("AntigravityTool should drop enum; output=%s", agyGot)
+		}
+		agyDesc := ojson.Get(agyGot, "properties.mode.description").String()
+		if !strings.Contains(agyDesc, "Allowed: a") || !strings.Contains(agyDesc, emptyStringEnumAllowedHint) {
+			t.Fatalf("AntigravityTool description = %q, want Allowed: a and empty-string hint", agyDesc)
+		}
+		compareJSON(t, agyGot, CleanJSONSchemaForAntigravityTool(agyGot, false))
+	})
+
+	t.Run("empty-only enum and empty const delete enum and keep string type with hint", func(t *testing.T) {
+		cases := map[string]string{
+			"enumEmptyString":      `{"type":"object","properties":{"v":{"type":"string","enum":[""]}}}`,
+			"enumWhitespaceOnly":   `{"type":"object","properties":{"v":{"type":"string","enum":["   ","	"]}}}`,
+			"constEmptyWithType":   `{"type":"object","properties":{"v":{"type":"string","const":""}}}`,
+			"constEmptyNoType":     `{"type":"object","properties":{"v":{"const":""}}}`,
+			"constWhitespaceNoTyp": `{"type":"object","properties":{"v":{"const":"   "}}}`,
+		}
+
+		for caseName, input := range cases {
+			for cleanerName, clean := range allCleaners {
+				t.Run(caseName+"/"+cleanerName, func(t *testing.T) {
+					got := clean(input)
+					prop := ojson.Get(got, "properties.v")
+					if prop.Get("enum").Exists() {
+						t.Fatalf("enum must be deleted, got: %s", got)
+					}
+					if prop.Get("const").Exists() {
+						t.Fatalf("const must be deleted, got: %s", got)
+					}
+					if gotType := prop.Get("type").String(); gotType != "string" {
+						t.Fatalf("type = %q, want string; output=%s", gotType, got)
+					}
+					if gotDesc := prop.Get("description").String(); gotDesc != emptyStringEnumOnlyHint {
+						t.Fatalf("description = %q, want %q; output=%s", gotDesc, emptyStringEnumOnlyHint, got)
+					}
+					compareJSON(t, got, clean(got))
+				})
+			}
+		}
+	})
+
+	t.Run("null enum members and const null do not emit empty strings", func(t *testing.T) {
+		mixedNullInputs := map[string]string{
+			"typeArrayNull":  `{"type":"object","properties":{"status":{"type":["string","null"],"enum":["open","closed",null]}}}`,
+			"scalarTypeNull": `{"type":"object","properties":{"status":{"type":"string","enum":["open","closed",null]}}}`,
+		}
+		for caseName, input := range mixedNullInputs {
+			for name, clean := range geminiCleaners {
+				t.Run(caseName+"/"+name, func(t *testing.T) {
+					got := clean(input)
+					prop := ojson.Get(got, "properties.status")
+					gotEnum := getStrings(got, "properties.status.enum")
+					if !reflect.DeepEqual(gotEnum, []string{"open", "closed"}) {
+						t.Fatalf("%s: enum = %v, want [open closed]; output=%s", name, gotEnum, got)
+					}
+					desc := prop.Get("description").String()
+					if strings.Contains(desc, emptyStringEnumAllowedHint) {
+						t.Fatalf("%s: null member must not produce empty-string hint: %q", name, desc)
+					}
+					if !strings.Contains(desc, "(nullable)") {
+						t.Fatalf("%s: null member should preserve nullable hint: %q", name, desc)
+					}
+					if name == "AntigravityResponse" {
+						if !prop.Get("nullable").Bool() {
+							t.Fatalf("%s: null enum member must set native nullable:true; output=%s", name, got)
+						}
+					} else if prop.Get("nullable").Exists() {
+						t.Fatalf("%s: Gemini cleaners must not retain nullable metadata; output=%s", name, got)
+					}
+					compareJSON(t, got, clean(got))
+				})
+			}
+		}
+
+		constNullInput := `{"type":"object","properties":{"nothing":{"const":null}}}`
+		for name, clean := range geminiCleaners {
+			t.Run("constNull/"+name, func(t *testing.T) {
+				got := clean(constNullInput)
+				prop := ojson.Get(got, "properties.nothing")
+				if prop.Get("enum").Exists() {
+					t.Fatalf("%s: const null must not leave enum; output=%s", name, got)
+				}
+				if gotType := prop.Get("type").String(); gotType != "null" {
+					t.Fatalf("%s: const null type = %q, want null; output=%s", name, gotType, got)
+				}
+				if !strings.Contains(prop.Get("description").String(), "(nullable)") {
+					t.Fatalf("%s: const null should record nullable hint; output=%s", name, got)
+				}
+				if strings.Contains(prop.Get("description").String(), emptyStringEnumOnlyHint) {
+					t.Fatalf("%s: const null must not emit empty-string hint; output=%s", name, got)
+				}
+				if name == "AntigravityResponse" && !prop.Get("nullable").Bool() {
+					t.Fatalf("%s: const null must set native nullable:true; output=%s", name, got)
+				}
+				compareJSON(t, got, clean(got))
+			})
+		}
+	})
+
+	t.Run("initially empty enum array stays empty array rather than null", func(t *testing.T) {
+		input := `{"type":"object","properties":{"tag":{"type":"string","enum":[]}}}`
+		for name, clean := range geminiCleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				enumVal := ojson.Get(got, "properties.tag.enum")
+				if !enumVal.IsArray() || len(enumVal.Array()) != 0 {
+					t.Fatalf("%s: enum = %s, want []; output=%s", name, enumVal.Raw, got)
+				}
+				compareJSON(t, got, clean(got))
+			})
+		}
+	})
+
+	t.Run("large enum with empty string preserves empty-string hint even when Allowed list is omitted", func(t *testing.T) {
+		input := `{"type":"object","properties":{"code":{"type":"string","enum":["","v1","v2","v3","v4","v5","v6","v7","v8","v9","v10","v11"]}}}`
+		for name, clean := range geminiCleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				gotEnum := getStrings(got, "properties.code.enum")
+				if len(gotEnum) != 11 || gotEnum[0] != "v1" {
+					t.Fatalf("%s: enum = %v, want 11 non-empty values starting with v1", name, gotEnum)
+				}
+				if gotDesc := ojson.Get(got, "properties.code.description").String(); gotDesc != emptyStringEnumAllowedHint {
+					t.Fatalf("%s: description = %q, want %q", name, gotDesc, emptyStringEnumAllowedHint)
+				}
+				compareJSON(t, got, clean(got))
+			})
+		}
+	})
+
+	t.Run("root-level empty const and enum", func(t *testing.T) {
+		gotConst := CleanJSONSchemaForGemini(`{"const":""}`)
+		if ojson.Get(gotConst, "enum").Exists() || ojson.Get(gotConst, "type").String() != "string" || ojson.Get(gotConst, "description").String() != emptyStringEnumOnlyHint {
+			t.Fatalf("root const empty got: %s", gotConst)
+		}
+		compareJSON(t, gotConst, CleanJSONSchemaForGemini(gotConst))
+
+		gotEnum := CleanJSONSchemaForGeminiJSONSchema(`{"type":"string","enum":["","a","b"]}`)
+		if !reflect.DeepEqual(getStrings(gotEnum, "enum"), []string{"a", "b"}) {
+			t.Fatalf("root enum got: %s", gotEnum)
+		}
+		if desc := ojson.Get(gotEnum, "description").String(); !strings.Contains(desc, "Allowed: a, b") || !strings.Contains(desc, emptyStringEnumAllowedHint) {
+			t.Fatalf("root enum description = %q", desc)
+		}
+		compareJSON(t, gotEnum, CleanJSONSchemaForGeminiJSONSchema(gotEnum))
+	})
+
+	t.Run("property literally named enum remains untouched", func(t *testing.T) {
+		input := `{"type":"object","properties":{"enum":{"type":"string","description":"Enum identifier","enum":["","alpha","beta"]}},"required":["enum"]}`
+		for name, clean := range geminiCleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				prop := ojson.Get(got, "properties.enum")
+				if prop.Get("type").String() != "string" {
+					t.Fatalf("%s: properties.enum lost type: %s", name, got)
+				}
+				if !reflect.DeepEqual(getStrings(got, "properties.enum.enum"), []string{"alpha", "beta"}) {
+					t.Fatalf("%s: properties.enum.enum = %v, want [alpha beta]; output=%s", name, getStrings(got, "properties.enum.enum"), got)
+				}
+				if ojson.Get(got, "enum").Exists() {
+					t.Fatalf("%s: unexpected root enum fabricated: %s", name, got)
+				}
+				compareJSON(t, got, clean(got))
+			})
+		}
+	})
+}

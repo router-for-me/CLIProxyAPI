@@ -303,7 +303,8 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				}
 			}
 		}
-		translatorcommon.SetRawArrayItemsDoc(outDoc, "contents", translatorcommon.MergeAdjacentGeminiContents(contentItems))
+		contentItems = translatorcommon.AlignGeminiFunctionResponses(translatorcommon.MergeAdjacentGeminiContents(contentItems))
+		translatorcommon.SetRawArrayItemsDoc(outDoc, "contents", contentItems)
 	}
 
 	// tools

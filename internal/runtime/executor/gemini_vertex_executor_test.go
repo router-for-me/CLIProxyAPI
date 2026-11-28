@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -710,6 +711,61 @@ func TestGeminiVertexExecutor_AliasedHydrogenPreservesNativeThinkingLevelWhenSha
 					t.Fatalf("expected includeThoughts=true in upstream Vertex payload: %s", upstreamBody)
 				}
 			})
+		}
+	}
+}
+
+func TestGeminiVertexExecutorStripsOpenAIChatToolCallIDs(t *testing.T) {
+	var upstreamBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer srv.Close()
+
+	exec := NewGeminiVertexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "vertex-openai-strip-ids",
+		Provider: "vertex",
+		Attributes: map[string]string{
+			"api_key":  "vertex-test-key",
+			"base_url": srv.URL,
+		},
+	}
+	payload := []byte(`{
+		"model": "gemini-4-neon",
+		"messages": [
+			{"role": "user", "content": "search"},
+			{"role": "assistant", "tool_calls": [
+				{"id": "call_1", "type": "function", "function": {"name": "web_search", "arguments": "{\"q\":\"a\"}"}},
+				{"id": "call_2", "type": "function", "function": {"name": "web_search", "arguments": "{\"q\":\"b\"}"}}
+			]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "res1"},
+			{"role": "tool", "tool_call_id": "call_2", "content": "res2"}
+		]
+	}`)
+
+	if !ojson.ValidBytes(payload) {
+		t.Fatalf("test fixture payload is invalid JSON: %s", payload)
+	}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-4-neon",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if ojson.GetBytesNoCopy(upstreamBody, fmt.Sprintf("contents.1.parts.%d.functionCall.id", i)).Exists() {
+			t.Fatalf("expected Vertex to strip contents.1.parts.%d.functionCall.id; body=%s", i, upstreamBody)
+		}
+		if ojson.GetBytesNoCopy(upstreamBody, fmt.Sprintf("contents.2.parts.%d.functionResponse.id", i)).Exists() {
+			t.Fatalf("expected Vertex to strip contents.2.parts.%d.functionResponse.id; body=%s", i, upstreamBody)
 		}
 	}
 }
