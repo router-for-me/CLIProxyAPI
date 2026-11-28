@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -436,7 +437,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		return "", fmt.Errorf("marshal request body: %w", errMarshal)
 	}
 
-	maxAttempts := 5
+	maxAttempts := 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		log.Debugf("Polling attempt %d/%d", attempt, maxAttempts)
 
@@ -506,7 +507,9 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			if errCtx := ctx.Err(); errCtx != nil {
 				return "", errCtx
 			}
-			timer := time.NewTimer(2 * time.Second)
+			// Random 3-6 second jitter delay between onboarding polling attempts
+			jitter := time.Duration(3000+rand.IntN(3000)) * time.Millisecond
+			timer := time.NewTimer(jitter)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
