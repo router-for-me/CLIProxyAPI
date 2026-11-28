@@ -13,6 +13,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -101,6 +103,11 @@ func (s *Service) Run(ctx context.Context) error {
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
 		})
+		// Register the models of stored credentials before the server listens. The
+		// watcher's first scan registers them too, but only after the port is open,
+		// and a request in between gets "unknown provider for model".
+		normalized := s.normalizeStoredCredentials(ctx, cfg)
+		s.runModelRegistrationBatch(ctx, s.servableStoredCredentials(normalized))
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
@@ -429,6 +436,130 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return errors.Join(refreshErr, shutdownErr)
+}
+
+// servableStoredCredentials keeps the stored credentials whose provider already
+// has an executor. It drops config API-key auths, whose models
+// registerConfigAPIKeyAuths has already registered, and plugin-backed
+// credentials, whose executors register only after the server starts.
+func (s *Service) servableStoredCredentials(auths []*coreauth.Auth) []*coreauth.Auth {
+	stored := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil || coreauth.IsConfigAPIKeyAuth(auth) {
+			continue
+		}
+		if _, ok := s.coreManager.Executor(auth.Provider); !ok {
+			continue
+		}
+		stored = append(stored, auth)
+	}
+	return stored
+}
+
+// normalizeStoredCredentials applies the watcher's file synthesis to the
+// credentials the store loaded from top-level files in the auth directory,
+// and returns them. Every store keeps fields such as excluded_models,
+// plan_type, and model_aliases in metadata only, and model registration reads
+// them from attributes, which the watcher fills on its first scan. The
+// Postgres, git, and object stores mirror their credentials into the auth
+// directory, so they are normalized the same way. A credential that is not
+// returned waits for the watcher's first scan, as it did before.
+func (s *Service) normalizeStoredCredentials(ctx context.Context, cfg *config.Config) []*coreauth.Auth {
+	if s == nil || s.coreManager == nil || cfg == nil {
+		return nil
+	}
+	authDir, errResolve := util.ResolveAuthDir(cfg.AuthDir)
+	if errResolve != nil {
+		log.Warnf("skipping startup credential normalization: %v", errResolve)
+		return nil
+	}
+	var parser synthesizer.PluginAuthParser
+	if s.pluginHost != nil {
+		parser = s.pluginHost
+	}
+	synthesisCtx := &synthesizer.SynthesisContext{
+		Config:           cfg,
+		AuthDir:          authDir,
+		Now:              time.Now(),
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: parser,
+	}
+	updateCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(coreauth.WithSkipPersist(ctx))
+	defer s.coreManager.RefreshAPIKeyModelAlias()
+	seenPaths := make(map[string]struct{})
+	normalizedIDs := make(map[string]struct{})
+	for _, stored := range s.coreManager.List() {
+		if stored == nil || coreauth.IsConfigAPIKeyAuth(stored) {
+			continue
+		}
+		path := stored.Attributes[coreauth.AttributePath]
+		if !synthesizer.IsTopLevelAuthFile(authDir, path) {
+			continue
+		}
+		if _, seen := seenPaths[path]; seen {
+			continue
+		}
+		seenPaths[path] = struct{}{}
+		data, errRead := readStartupAuthFile(path)
+		if errRead != nil {
+			log.Debugf("skipping startup normalization of %s: %v", path, errRead)
+			continue
+		}
+		synthesized, errSynthesize := synthesizer.SynthesizeAuthFile(synthesisCtx, path, data)
+		if errSynthesize != nil {
+			log.Debugf("skipping startup normalization of %s: %v", path, errSynthesize)
+			continue
+		}
+		for _, auth := range synthesized {
+			// Only refresh credentials the store loaded; the watcher's first scan
+			// still owns adding new ones.
+			if auth == nil {
+				continue
+			}
+			loaded, ok := s.coreManager.GetByID(auth.ID)
+			if !ok {
+				continue
+			}
+			// The synthesizer marks every credential as file-backed. Keep the
+			// store's own source_backend until the watcher's first scan applies.
+			if backend := loaded.Attributes[coreauth.AttributeSourceBackend]; backend != "" {
+				auth.Attributes[coreauth.AttributeSourceBackend] = backend
+			}
+			// prepareCoreAuthForModelRegistration returns the unchanged credential
+			// when the update fails, or when the manager rejects the snapshot
+			// because the file changed after the read. Check that the file still
+			// matches the snapshot and that the attributes landed.
+			if applied := s.prepareCoreAuthForModelRegistration(updateCtx, auth); auth.FileSnapshotMatchesDisk() && hasAttributes(applied, auth.Attributes) {
+				normalizedIDs[applied.ID] = struct{}{}
+			}
+		}
+	}
+	normalized := make([]*coreauth.Auth, 0, len(normalizedIDs))
+	for _, auth := range s.coreManager.List() {
+		if auth == nil {
+			continue
+		}
+		if _, ok := normalizedIDs[auth.ID]; ok {
+			normalized = append(normalized, auth)
+		}
+	}
+	return normalized
+}
+
+// readStartupAuthFile reads an auth file for startup normalization. Tests
+// replace it to simulate a file that changes after the read.
+var readStartupAuthFile = os.ReadFile
+
+func hasAttributes(auth *coreauth.Auth, want map[string]string) bool {
+	if auth == nil {
+		return false
+	}
+	for key, value := range want {
+		if auth.Attributes[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) ensureAuthDir() error {

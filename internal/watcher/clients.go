@@ -105,14 +105,10 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
 			} else {
 				for _, entry := range entries {
-					if entry == nil || entry.IsDir() {
+					if !synthesizer.IsAuthFileEntry(entry) {
 						continue
 					}
-					name := entry.Name()
-					if !strings.HasSuffix(strings.ToLower(name), ".json") {
-						continue
-					}
-					fullPath := filepath.Join(resolvedAuthDir, name)
+					fullPath := filepath.Join(resolvedAuthDir, entry.Name())
 					data, errReadFile := os.ReadFile(fullPath)
 					if errReadFile != nil {
 						if !errors.Is(errReadFile, fs.ErrNotExist) {
@@ -149,7 +145,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 					}
 					generated, errSynthesize := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
 					if errSynthesize != nil {
-						log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
+						log.WithError(errSynthesize).Warnf("skipping auth file %s", entry.Name())
 					} else if len(generated) > 0 {
 						if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
 							newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
@@ -549,13 +545,10 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		return 0
 	}
 	for _, entry := range entries {
-		if entry == nil || entry.IsDir() {
+		if !synthesizer.IsAuthFileEntry(entry) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
 		authFileCount++
 		log.Debugf("processing auth file %d: %s", authFileCount, name)
 		fullPath := filepath.Join(authDir, name)

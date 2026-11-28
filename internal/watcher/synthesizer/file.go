@@ -20,6 +20,28 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// IsAuthFileEntry reports whether the watcher scans entry, read from the auth
+// directory, as an auth file.
+func IsAuthFileEntry(entry fs.DirEntry) bool {
+	return entry != nil && !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".json")
+}
+
+// IsTopLevelAuthFile reports whether path names an auth file the watcher
+// scans: a .json file directly in authDir. The watcher does not scan
+// subdirectories.
+func IsTopLevelAuthFile(authDir, path string) bool {
+	if authDir == "" || path == "" {
+		return false
+	}
+	absDir, errDir := filepath.Abs(authDir)
+	absPath, errPath := filepath.Abs(path)
+	if errDir != nil || errPath != nil || filepath.Dir(absPath) != absDir {
+		return false
+	}
+	info, errStat := os.Lstat(absPath)
+	return errStat == nil && IsAuthFileEntry(fs.FileInfoToDirEntry(info))
+}
+
 // FileSynthesizer generates Auth entries from OAuth JSON files.
 // It handles file-based authentication.
 type FileSynthesizer struct{}
@@ -46,14 +68,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 	}
 
 	for _, e := range entries {
-		if e.IsDir() {
+		if !IsAuthFileEntry(e) {
 			continue
 		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
-		full := filepath.Join(ctx.AuthDir, name)
+		full := filepath.Join(ctx.AuthDir, e.Name())
 		data, errRead := os.ReadFile(full)
 		if errRead != nil {
 			if !errors.Is(errRead, fs.ErrNotExist) {
@@ -67,7 +85,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		}
 		auths, _, errSynthesize := synthesizeFileAuths(ctx, full, data)
 		if errSynthesize != nil {
-			log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
+			log.WithError(errSynthesize).Warnf("skipping auth file %s", e.Name())
 			continue
 		}
 		if len(auths) == 0 {
