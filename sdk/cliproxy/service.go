@@ -128,8 +128,14 @@ type Service struct {
 	// installed on request handlers. Nil means the internal pluginHost is used.
 	pluginInterceptorHost handlers.PluginInterceptorHost
 
-	// shutdownOnce ensures shutdown is called only once.
+	// shutdownOnce ensures shutdown teardown runs only once.
 	shutdownOnce sync.Once
+
+	// shutdownRefreshWaiters counts concurrent Shutdown calls waiting for auto-refresh saves.
+	shutdownRefreshWaiters atomic.Int32
+
+	// shutdownCleanupStarted records whether one-time shutdown teardown has begun.
+	shutdownCleanupStarted atomic.Bool
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager

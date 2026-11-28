@@ -274,6 +274,9 @@ func (h *Host) closeHostHTTPCallbackInstance(pluginID string, instance *hostCall
 	if h.modelStreams != nil {
 		h.modelStreams.closeInstance(pluginID, instance)
 	}
+	if h.callbackContexts != nil {
+		h.callbackContexts.closeInstance(pluginID, instance)
+	}
 }
 
 func (h *Host) closeHostHTTPPluginResources(pluginID string, instance *hostCallbackInstance) {
@@ -289,6 +292,9 @@ func (h *Host) closeHostHTTPPluginResources(pluginID string, instance *hostCallb
 	}
 	if h.modelStreams != nil {
 		h.modelStreams.closePlugin(pluginID)
+	}
+	if h.callbackContexts != nil {
+		h.callbackContexts.closePlugin(pluginID)
 	}
 }
 

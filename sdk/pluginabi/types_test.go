@@ -29,11 +29,14 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 10 {
-		t.Fatalf("SchemaVersion = %d, want 10", SchemaVersion)
+	if SchemaVersion != 11 {
+		t.Fatalf("SchemaVersion = %d, want 11", SchemaVersion)
 	}
 	if SchemaVersionMultiAuthProviders != 10 {
 		t.Fatalf("SchemaVersionMultiAuthProviders = %d, want 10", SchemaVersionMultiAuthProviders)
+	}
+	if SchemaVersionSchedulerPickCancel != 11 {
+		t.Fatalf("SchemaVersionSchedulerPickCancel = %d, want 11", SchemaVersionSchedulerPickCancel)
 	}
 	if SchemaVersionWebSocketResponseObserver != 4 {
 		t.Fatalf("SchemaVersionWebSocketResponseObserver = %d, want 4", SchemaVersionWebSocketResponseObserver)
@@ -95,8 +98,20 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostHTTPDoStream != "host.http.do_stream" {
 		t.Fatalf("MethodHostHTTPDoStream = %q", MethodHostHTTPDoStream)
 	}
+	if MethodSchedulerPick != "scheduler.pick" {
+		t.Fatalf("MethodSchedulerPick = %q", MethodSchedulerPick)
+	}
+	if MethodSchedulerPickCancel != "scheduler.pick.cancel" {
+		t.Fatalf("MethodSchedulerPickCancel = %q", MethodSchedulerPickCancel)
+	}
 	if MethodHostHTTPOperationOpen != "host.http.operation_open" {
 		t.Fatalf("MethodHostHTTPOperationOpen = %q", MethodHostHTTPOperationOpen)
+	}
+	if MethodHostContextDone != "host.context.done" {
+		t.Fatalf("MethodHostContextDone = %q", MethodHostContextDone)
+	}
+	if MethodHostContextWait != "host.context.wait" {
+		t.Fatalf("MethodHostContextWait = %q", MethodHostContextWait)
 	}
 	if MethodHostHTTPCancel != "host.http.cancel" {
 		t.Fatalf("MethodHostHTTPCancel = %q", MethodHostHTTPCancel)

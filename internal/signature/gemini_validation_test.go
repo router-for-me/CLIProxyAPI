@@ -762,3 +762,161 @@ func TestInspectGeminiThoughtSignature_BareTinkRequiresVertexKeyID(t *testing.T)
 		t.Fatal("provider-prefixed Vertex signature must be recognized")
 	}
 }
+
+func TestValidateGeminiFunctionCallPairing_AcceptsOutOfOrderIDMatchedParallelResponses(t *testing.T) {
+	t.Run("distinct_tools_reversed", func(t *testing.T) {
+		input := []byte(`{
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{"functionCall": {"id": "call-bash", "name": "Bash", "args": {"cmd": "ls"}}},
+						{"functionCall": {"id": "call-read", "name": "Read", "args": {"path": "a.go"}}}
+					]
+				},
+				{
+					"role": "user",
+					"parts": [
+						{"functionResponse": {"id": "call-read", "name": "Read", "response": {"result": "file"}}},
+						{"functionResponse": {"id": "call-bash", "name": "Bash", "response": {"result": "ok"}}}
+					]
+				}
+			]
+		}`)
+		if err := ValidateGeminiFunctionCallPairing(input); err != nil {
+			t.Fatalf("out-of-order ID-matched parallel responses should pass: %v", err)
+		}
+	})
+
+	t.Run("same_tool_name_permuted", func(t *testing.T) {
+		input := []byte(`{
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{"functionCall": {"id": "call-1", "name": "web_search", "args": {"q": "a"}}},
+						{"functionCall": {"id": "call-2", "name": "web_search", "args": {"q": "b"}}},
+						{"functionCall": {"id": "call-3", "name": "web_search", "args": {"q": "c"}}}
+					]
+				},
+				{
+					"role": "user",
+					"parts": [
+						{"functionResponse": {"id": "call-3", "name": "web_search", "response": {"result": "r3"}}},
+						{"functionResponse": {"id": "call-1", "name": "web_search", "response": {"result": "r1"}}},
+						{"functionResponse": {"id": "call-2", "name": "web_search", "response": {"result": "r2"}}}
+					]
+				}
+			]
+		}`)
+		if err := ValidateGeminiFunctionCallPairing(input); err != nil {
+			t.Fatalf("permuted same-name ID-matched parallel responses should pass: %v", err)
+		}
+	})
+}
+
+func TestValidateGeminiFunctionCallPairing_RejectsInvalidOutOfOrderParallelResponses(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{
+			name: "duplicate_response_id",
+			input: `{
+				"contents": [
+					{"role": "model", "parts": [
+						{"functionCall": {"id": "call-1", "name": "Bash", "args": {}}},
+						{"functionCall": {"id": "call-2", "name": "Read", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"functionResponse": {"id": "call-1", "name": "Bash", "response": {}}},
+						{"functionResponse": {"id": "call-1", "name": "Bash", "response": {}}}
+					]}
+				]
+			}`,
+			wantErr: "does not match functionCall.id",
+		},
+		{
+			name: "wrong_name_for_matched_id",
+			input: `{
+				"contents": [
+					{"role": "model", "parts": [
+						{"functionCall": {"id": "call-1", "name": "Bash", "args": {}}},
+						{"functionCall": {"id": "call-2", "name": "Read", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"functionResponse": {"id": "call-2", "name": "Bash", "response": {}}},
+						{"functionResponse": {"id": "call-1", "name": "Read", "response": {}}}
+					]}
+				]
+			}`,
+			wantErr: "does not match functionCall.name",
+		},
+		{
+			name: "missing_id_in_parallel_responses",
+			input: `{
+				"contents": [
+					{"role": "model", "parts": [
+						{"functionCall": {"id": "call-1", "name": "Bash", "args": {}}},
+						{"functionCall": {"id": "call-2", "name": "Read", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"functionResponse": {"id": "call-2", "name": "Read", "response": {}}},
+						{"functionResponse": {"name": "Bash", "response": {}}}
+					]}
+				]
+			}`,
+			wantErr: "missing functionResponse.id",
+		},
+		{
+			name: "idless_calls_remain_positional",
+			input: `{
+				"contents": [
+					{"role": "model", "parts": [
+						{"functionCall": {"name": "Bash", "args": {}}},
+						{"functionCall": {"name": "Read", "args": {}}}
+					]},
+					{"role": "user", "parts": [
+						{"functionResponse": {"name": "Read", "response": {}}},
+						{"functionResponse": {"name": "Bash", "response": {}}}
+					]}
+				]
+			}`,
+			wantErr: "does not match functionCall.name",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateGeminiFunctionCallPairing([]byte(tc.input))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ValidateGeminiFunctionCallPairing() err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func BenchmarkValidateGeminiFunctionCallPairingParallel(b *testing.B) {
+	aligned := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"Bash","args":{}}},{"functionCall":{"id":"call-2","name":"Read","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"Bash","response":{"result":"ok"}}},{"functionResponse":{"id":"call-2","name":"Read","response":{"result":"file"}}}]}]}`)
+	outOfOrder := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"Bash","args":{}}},{"functionCall":{"id":"call-2","name":"Read","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"Read","response":{"result":"file"}}},{"functionResponse":{"id":"call-1","name":"Bash","response":{"result":"ok"}}}]}]}`)
+
+	b.Run("aligned", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if err := ValidateGeminiFunctionCallPairing(aligned); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("out_of_order", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			if err := ValidateGeminiFunctionCallPairing(outOfOrder); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

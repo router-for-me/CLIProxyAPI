@@ -1726,3 +1726,87 @@ func TestConvertOpenAIRequestToGemini_FollowUpUserPrecedesFunctionResponse_Issue
 		}
 	})
 }
+
+func TestConvertOpenAIRequestToGemini_PreservesParallelToolCallIDs(t *testing.T) {
+	t.Run("preserves_matching_ids_across_parallel_same_name_calls", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-4-neon",
+			"messages": [
+				{"role": "user", "content": "Research topics"},
+				{
+					"role": "assistant",
+					"tool_calls": [
+						{"id": "call_extract_1", "type": "function", "function": {"name": "web_extract", "arguments": "{\"url\":\"https://a.example\"}"}},
+						{"id": "call_search_2", "type": "function", "function": {"name": "web_search", "arguments": "{\"q\":\"one\"}"}},
+						{"id": "call_search_3", "type": "function", "function": {"name": "web_search", "arguments": "{\"q\":\"two\"}"}},
+						{"id": "call_search_4", "type": "function", "function": {"name": "web_search", "arguments": "{\"q\":\"three\"}"}}
+					]
+				},
+				{"role": "tool", "tool_call_id": "call_search_4", "content": "res4"},
+				{"role": "tool", "tool_call_id": "call_search_2", "content": "res2"},
+				{"role": "tool", "tool_call_id": "call_extract_1", "content": "res1"},
+				{"role": "tool", "tool_call_id": "call_search_3", "content": "res3"}
+			]
+		}`)
+		if !ojson.ValidBytes(inputJSON) {
+			t.Fatalf("test fixture inputJSON is invalid JSON: %s", inputJSON)
+		}
+
+		out, err := ConvertOpenAIRequestToGemini("gemini-4-neon", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertOpenAIRequestToGemini error: %v", err)
+		}
+		if errPairing := signature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+			t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, out)
+		}
+
+		wantIDs := []string{"call_extract_1", "call_search_2", "call_search_3", "call_search_4"}
+		wantResults := []string{`"res1"`, `"res2"`, `"res3"`, `"res4"`}
+		callParts := ojson.GetBytesNoCopy(out, "contents.1.parts").Array()
+		respParts := ojson.GetBytesNoCopy(out, "contents.2.parts").Array()
+		if len(callParts) != len(wantIDs) || len(respParts) != len(wantIDs) {
+			t.Fatalf("got %d calls and %d responses, want %d; output=%s", len(callParts), len(respParts), len(wantIDs), out)
+		}
+		for i, wantID := range wantIDs {
+			if got := callParts[i].Get("functionCall.id").String(); got != wantID {
+				t.Fatalf("contents[1].parts[%d].functionCall.id = %q, want %q; output=%s", i, got, wantID, out)
+			}
+			if got := respParts[i].Get("functionResponse.id").String(); got != wantID {
+				t.Fatalf("contents[2].parts[%d].functionResponse.id = %q, want %q; output=%s", i, got, wantID, out)
+			}
+			if got := respParts[i].Get("functionResponse.response.result").String(); got != wantResults[i] {
+				t.Fatalf("contents[2].parts[%d].functionResponse.response.result = %q, want %q; output=%s", i, got, wantResults[i], out)
+			}
+		}
+		if got := callParts[0].Get("functionCall.args.url").String(); got != "https://a.example" {
+			t.Fatalf("contents[1].parts[0].functionCall.args.url = %q, want https://a.example; output=%s", got, out)
+		}
+	})
+
+	t.Run("omits_id_fields_when_tool_call_id_is_empty", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-4-neon",
+			"messages": [
+				{"role": "user", "content": "Check"},
+				{
+					"role": "assistant",
+					"tool_calls": [
+						{"type": "function", "function": {"name": "ping", "arguments": "{}"}}
+					]
+				},
+				{"role": "tool", "content": "pong"}
+			]
+		}`)
+
+		out, err := ConvertOpenAIRequestToGemini("gemini-4-neon", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertOpenAIRequestToGemini error: %v", err)
+		}
+		if ojson.GetBytesNoCopy(out, "contents.1.parts.0.functionCall.id").Exists() {
+			t.Fatalf("expected empty tool call id to omit functionCall.id; output=%s", out)
+		}
+		if ojson.GetBytesNoCopy(out, "contents.2.parts.0.functionResponse.id").Exists() {
+			t.Fatalf("expected empty tool call id to omit functionResponse.id; output=%s", out)
+		}
+	})
+}

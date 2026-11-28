@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/MoeForge/moego/json"
@@ -550,5 +552,88 @@ func TestFileTokenStoreSaveAllowsDeletingNonCredentialMetadata(t *testing.T) {
 	}
 	if _, exists := auth.Metadata["proxy_url"]; exists {
 		t.Fatalf("deleted proxy_url was resurrected in memory: %v", auth.Metadata["proxy_url"])
+	}
+}
+
+func TestFileTokenStoreSaveReplacesAuthFileAtomically(t *testing.T) {
+	baseDir := t.TempDir()
+	fileName := "antigravity-atomic.json"
+	path := filepath.Join(baseDir, fileName)
+	initialRaw := []byte(`{"type":"antigravity","access_token":"old-token","refresh_token":"old-refresh","disabled":false}`)
+	if errWrite := os.WriteFile(path, initialRaw, 0o600); errWrite != nil {
+		t.Fatalf("seed auth file: %v", errWrite)
+	}
+
+	var beforeInfo os.FileInfo
+	var oldFile *os.File
+	if runtime.GOOS != "windows" {
+		var errStatBefore error
+		beforeInfo, errStatBefore = os.Stat(path)
+		if errStatBefore != nil {
+			t.Fatalf("stat before save: %v", errStatBefore)
+		}
+		var errOpenOld error
+		oldFile, errOpenOld = os.Open(path)
+		if errOpenOld != nil {
+			t.Fatalf("open existing auth file: %v", errOpenOld)
+		}
+		defer func() {
+			if errClose := oldFile.Close(); errClose != nil {
+				t.Errorf("close old file handle: %v", errClose)
+			}
+		}()
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Metadata: map[string]any{
+			"type":          "antigravity",
+			"access_token":  "new-token",
+			"refresh_token": "new-refresh",
+		},
+	}
+
+	if _, errSave := store.Save(context.Background(), auth); errSave != nil {
+		t.Fatalf("Save() error = %v", errSave)
+	}
+
+	afterInfo, errStatAfter := os.Stat(path)
+	if errStatAfter != nil {
+		t.Fatalf("stat after save: %v", errStatAfter)
+	}
+	if runtime.GOOS != "windows" {
+		if os.SameFile(beforeInfo, afterInfo) {
+			t.Fatalf("Save() overwrote existing auth file in place instead of atomic rename")
+		}
+		if gotPerm := afterInfo.Mode().Perm(); gotPerm != 0o600 {
+			t.Fatalf("saved auth file mode = %o, want 0600", gotPerm)
+		}
+		oldContent, errReadOld := io.ReadAll(oldFile)
+		if errReadOld != nil {
+			t.Fatalf("read old file handle: %v", errReadOld)
+		}
+		if string(oldContent) != string(initialRaw) {
+			t.Fatalf("existing file handle saw mutated content %q, want original %q", oldContent, initialRaw)
+		}
+	}
+
+	persisted, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read saved auth file: %v", errRead)
+	}
+	want := []byte(`{"type":"antigravity","access_token":"new-token","refresh_token":"new-refresh","disabled":false}`)
+	if !jsonEqual(persisted, want) {
+		t.Fatalf("saved auth file = %s, want JSON equal to %s", persisted, want)
+	}
+
+	entries, errReadDir := os.ReadDir(baseDir)
+	if errReadDir != nil {
+		t.Fatalf("read base dir: %v", errReadDir)
+	}
+	if len(entries) != 1 || entries[0].Name() != fileName {
+		t.Fatalf("unexpected files left in auth dir: %v", entries)
 	}
 }

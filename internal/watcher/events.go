@@ -27,28 +27,143 @@ func matchProvider(provider string, targets []string) (string, bool) {
 }
 
 func (w *Watcher) start(ctx context.Context) error {
+	w.watchMu.Lock()
 	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
+		w.watchMu.Unlock()
 		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
 		return errAddConfig
 	}
+	configInfo, _ := os.Stat(w.configPath)
+	configIsSymlink, configTarget := configSymlinkTarget(w.configPath)
 	log.Debugf("watching config file: %s", w.configPath)
 
-	w.watchMu.Lock()
 	authDir := w.currentAuthDir()
 	if errAddAuthDir := w.watcher.Add(authDir); errAddAuthDir != nil {
+		if errRemoveConfig := w.watcher.Remove(w.configPath); errRemoveConfig != nil {
+			log.Debugf("failed to clean up config file watch %s: %v", w.configPath, errRemoveConfig)
+		}
 		w.watchMu.Unlock()
 		log.Errorf("failed to watch auth directory %s: %v", authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
+	log.Debugf("watching auth directory: %s", authDir)
+
+	watchedConfigDir := ""
+	configDir := filepath.Dir(filepath.Clean(strings.TrimSpace(w.configPath)))
+	if w.sameNormalizedAuthPath(configDir, authDir) {
+		watchedConfigDir = authDir
+	} else {
+		if absConfigDir, errAbsConfigDir := filepath.Abs(configDir); errAbsConfigDir == nil {
+			configDir = absConfigDir
+		}
+		if errAddConfigDir := w.watcher.Add(configDir); errAddConfigDir != nil {
+			log.Warnf("failed to watch config directory %s for %s; falling back to file watch only: %v", configDir, w.configPath, errAddConfigDir)
+		} else {
+			watchedConfigDir = configDir
+			log.Debugf("watching config directory %s for config file: %s", configDir, w.configPath)
+		}
+	}
+
 	w.started = true
+	w.watchedConfigFile = w.configPath
+	w.watchedConfigTarget = configTarget
+	w.watchedConfigIsSymlink = configIsSymlink
+	w.watchedConfigInfo = configInfo
+	w.watchedConfigDir = watchedConfigDir
 	w.watchedAuthDir = authDir
 	w.watchMu.Unlock()
-	log.Debugf("watching auth directory: %s", authDir)
 
 	go w.processEvents(ctx)
 
 	w.reloadClients(true, nil, false)
 	return nil
+}
+
+func configSymlinkTarget(path string) (bool, string) {
+	linfo, errLstat := os.Lstat(path)
+	if errLstat != nil || linfo.Mode()&os.ModeSymlink == 0 {
+		return false, ""
+	}
+	link, errReadlink := os.Readlink(path)
+	if errReadlink != nil || strings.TrimSpace(link) == "" {
+		return true, ""
+	}
+	if !filepath.IsAbs(link) {
+		link = filepath.Join(filepath.Dir(path), link)
+	}
+	return true, filepath.Clean(link)
+}
+
+func (w *Watcher) removeConfigFileWatchLocked() {
+	if w.watchedConfigFile != "" {
+		if errRemove := w.watcher.Remove(w.watchedConfigFile); errRemove != nil {
+			log.Debugf("failed to remove previous config file watch %s: %v", w.watchedConfigFile, errRemove)
+		}
+	}
+	if w.watchedConfigTarget != "" && !w.sameNormalizedAuthPath(w.watchedConfigTarget, w.watchedConfigFile) {
+		if errRemoveTarget := w.watcher.Remove(w.watchedConfigTarget); errRemoveTarget != nil {
+			log.Debugf("failed to remove previous config symlink target watch %s: %v", w.watchedConfigTarget, errRemoveTarget)
+		}
+	}
+	w.watchedConfigFile = ""
+	w.watchedConfigTarget = ""
+	w.watchedConfigInfo = nil
+}
+
+func (w *Watcher) refreshConfigFileWatch() bool {
+	if w == nil || w.watcher == nil || w.stopped.Load() {
+		return false
+	}
+	curInfo, errStat := os.Stat(w.configPath)
+	curIsSymlink, curTarget := configSymlinkTarget(w.configPath)
+	w.watchMu.Lock()
+	defer w.watchMu.Unlock()
+	if !w.started || w.stopped.Load() || w.watcher == nil {
+		return errStat == nil
+	}
+	if errStat != nil {
+		w.removeConfigFileWatchLocked()
+		w.watchedConfigIsSymlink = curIsSymlink
+		return false
+	}
+	if w.watchedConfigFile != "" && w.watchedConfigInfo != nil && os.SameFile(w.watchedConfigInfo, curInfo) {
+		w.watchedConfigIsSymlink = curIsSymlink
+		return true
+	}
+	w.removeConfigFileWatchLocked()
+	if errAdd := w.watcher.Add(w.configPath); errAdd != nil {
+		log.Debugf("failed to re-watch config file %s: %v", w.configPath, errAdd)
+		w.watchedConfigIsSymlink = curIsSymlink
+		return true
+	}
+	w.watchedConfigFile = w.configPath
+	w.watchedConfigTarget = curTarget
+	w.watchedConfigIsSymlink = curIsSymlink
+	w.watchedConfigInfo = curInfo
+	log.Debugf("re-attached config file watch: %s", w.configPath)
+	return true
+}
+
+func (w *Watcher) configSymlinkChangedInDir(normalizedName string, op fsnotify.Op) bool {
+	if w == nil || w.watcher == nil || w.stopped.Load() {
+		return false
+	}
+	if op&(fsnotify.Create|fsnotify.Rename|fsnotify.Remove|fsnotify.Write) == 0 {
+		return false
+	}
+	w.watchMu.Lock()
+	isSymlink := w.watchedConfigIsSymlink
+	configDir := w.watchedConfigDir
+	prevInfo := w.watchedConfigInfo
+	w.watchMu.Unlock()
+	if !isSymlink || configDir == "" || !w.isPathInAuthDir(normalizedName, configDir) {
+		return false
+	}
+	curInfo, errStat := os.Stat(w.configPath)
+	if errStat != nil {
+		return false
+	}
+	return prevInfo == nil || !os.SameFile(prevInfo, curInfo)
 }
 
 func (w *Watcher) syncAuthDirWatch() {
@@ -65,7 +180,7 @@ func (w *Watcher) syncAuthDirWatch() {
 	if oldWatched == target {
 		return
 	}
-	if oldWatched != "" && !w.sameNormalizedAuthPath(oldWatched, w.configPath) && !w.sameNormalizedAuthPath(oldWatched, target) {
+	if oldWatched != "" && !w.sameNormalizedAuthPath(oldWatched, w.watchedConfigDir) && !w.sameNormalizedAuthPath(oldWatched, w.configPath) && !w.sameNormalizedAuthPath(oldWatched, target) {
 		if errRemove := w.watcher.Remove(oldWatched); errRemove != nil {
 			log.Debugf("failed to remove previous auth directory watch %s: %v", oldWatched, errRemove)
 		}
@@ -111,86 +226,101 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.currentAuthDir())
-	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
+	activeAuthDir := w.currentAuthDir()
+	isConfigPath := w.isConfigEventPath(normalizedName, normalizedConfigPath)
+	isConfigEvent := isConfigPath && event.Op&configOps != 0
+	isConfigRemove := isConfigPath && event.Op&fsnotify.Remove != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
-		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
-		return
+	isAuthJSON := w.isPathInAuthDir(normalizedName, activeAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	if !isConfigEvent && !isConfigRemove && !isAuthJSON {
+		if w.configSymlinkChangedInDir(normalizedName, event.Op) {
+			isConfigEvent = true
+		} else {
+			// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
+			return
+		}
 	}
 
 	now := time.Now()
 	log.Debugf("file system event detected: %s %s", event.Op.String(), event.Name)
 
 	// Handle config file changes
-	if isConfigEvent {
-		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
-		w.scheduleConfigReload()
+	if isConfigEvent || isConfigRemove {
+		exists := w.refreshConfigFileWatch()
+		if isConfigEvent || exists {
+			log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
+			w.scheduleConfigReload()
+		}
 		return
 	}
 
 	// Handle auth directory changes incrementally (.json only)
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()
-	if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+	currentAuthDir := w.currentAuthDir()
+	if !w.isPathInAuthDir(normalizedName, currentAuthDir) {
 		return
 	}
-	w.observeAuthFile(event.Name)
+	authEventPath := event.Name
+	if strings.TrimSpace(currentAuthDir) != "" {
+		authEventPath = filepath.Join(currentAuthDir, filepath.Base(normalizedName))
+	}
+	normalizedAuthPath := w.normalizeAuthPath(authEventPath)
+	w.observeAuthFile(authEventPath)
 
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-		if w.shouldDebounceRemove(normalizedName, now) {
-			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
+		if w.shouldDebounceRemove(normalizedAuthPath, now) {
+			log.Debugf("debouncing remove event for %s", filepath.Base(authEventPath))
 			return
 		}
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
-		if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+		if !w.isPathInAuthDir(normalizedAuthPath, w.currentAuthDir()) {
 			return
 		}
 		statSucceeded := false
-		if _, statErr := os.Stat(event.Name); statErr == nil {
+		if _, statErr := os.Stat(authEventPath); statErr == nil {
 			statSucceeded = true
-		} else if w.isKnownAuthFile(event.Name) {
+		} else if w.isKnownAuthFile(authEventPath) {
 			// On macOS (and under disk I/O pressure), atomic replace (e.g. os.Rename from temp file)
 			// can trigger a NOTE_DELETE before the target inode is fully visible. Retry briefly
 			// before treating a known auth file as permanently removed.
 			for attempt := 0; attempt < 3; attempt++ {
 				time.Sleep(25 * time.Millisecond)
-				if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+				if !w.isPathInAuthDir(normalizedAuthPath, w.currentAuthDir()) {
 					return
 				}
-				if _, retryErr := os.Stat(event.Name); retryErr == nil {
+				if _, retryErr := os.Stat(authEventPath); retryErr == nil {
 					statSucceeded = true
 					break
 				}
 			}
 		}
 		if statSucceeded {
-			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
-				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
+			if unchanged, errSame := w.authFileUnchanged(authEventPath); errSame == nil && unchanged {
+				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(authEventPath))
 				return
 			}
-			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-			w.addOrUpdateClientLocked(event.Name)
+			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(authEventPath))
+			w.addOrUpdateClientLocked(authEventPath)
 			return
 		}
-		if !w.isKnownAuthFile(event.Name) {
-			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
+		if !w.isKnownAuthFile(authEventPath) {
+			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(authEventPath))
 			return
 		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.removeClientLocked(event.Name)
+		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(authEventPath))
+		w.removeClientLocked(authEventPath)
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
-		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
-			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
+		if unchanged, errSame := w.authFileUnchanged(authEventPath); errSame == nil && unchanged {
+			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(authEventPath))
 			return
 		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.addOrUpdateClientLocked(event.Name)
+		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(authEventPath))
+		w.addOrUpdateClientLocked(authEventPath)
 	}
 }
 
@@ -246,6 +376,33 @@ func (w *Watcher) isKnownAuthFile(path string) bool {
 	defer w.clientsMutex.RUnlock()
 	_, ok := w.lastAuthHashes[normalized]
 	return ok
+}
+
+func (w *Watcher) isConfigEventPath(normalizedName, normalizedConfigPath string) bool {
+	if normalizedName == "" || normalizedConfigPath == "" {
+		return false
+	}
+	if normalizedName == normalizedConfigPath {
+		return true
+	}
+	if filepath.Base(normalizedName) == filepath.Base(normalizedConfigPath) {
+		return w.sameNormalizedAuthPath(normalizedName, normalizedConfigPath)
+	}
+	if !strings.EqualFold(filepath.Base(normalizedName), filepath.Base(normalizedConfigPath)) {
+		return false
+	}
+	if !w.sameNormalizedAuthPath(filepath.Dir(normalizedName), filepath.Dir(normalizedConfigPath)) {
+		return false
+	}
+	eventInfo, errEventStat := os.Stat(normalizedName)
+	if errEventStat != nil {
+		return false
+	}
+	configInfo, errConfigStat := os.Stat(w.configPath)
+	if errConfigStat != nil {
+		return false
+	}
+	return os.SameFile(eventInfo, configInfo)
 }
 
 func (w *Watcher) normalizeAuthPath(path string) string {

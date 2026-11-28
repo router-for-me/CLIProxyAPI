@@ -927,9 +927,11 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 	if len(contentItems) > 0 {
 		if util.IsClaudeModel(modelName) {
 			contentItems = translatorcommon.SplitGeminiFunctionResponseTurns(contentItems)
-			translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", translatorcommon.MergeAdjacentGeminiUserContents(contentItems))
+			contentItems = translatorcommon.AlignGeminiFunctionResponses(translatorcommon.MergeAdjacentGeminiUserContents(contentItems))
+			translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", contentItems)
 		} else {
-			translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", translatorcommon.MergeAdjacentGeminiContents(contentItems))
+			contentItems = translatorcommon.AlignGeminiFunctionResponses(translatorcommon.MergeAdjacentGeminiContents(contentItems))
+			translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", contentItems)
 		}
 	}
 	if toolDeclCount > 0 && !isToolChoiceNone {

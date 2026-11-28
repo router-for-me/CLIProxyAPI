@@ -1235,3 +1235,48 @@ func TestConvertClaudeRequestToGemini_SanitizesGenerationConstraints(t *testing.
 		}
 	})
 }
+
+func TestConvertClaudeRequestToGemini_AlignsSplitOutOfOrderParallelToolResults(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-4-neon",
+		"messages": [
+			{"role": "user", "content": "Run bash and read file"},
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "call_bash_19", "name": "Bash", "input": {"cmd": "pwd"}},
+				{"type": "tool_use", "id": "call_read_20", "name": "Read", "input": {"file_path": "main.go"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "call_read_20", "content": "package main"}
+			]},
+			{"role": "user", "content": [
+				{"type": "text", "text": "note"},
+				{"type": "tool_result", "tool_use_id": "call_bash_19", "content": "/workspace"}
+			]}
+		]
+	}`)
+
+	output, err := ConvertClaudeRequestToGemini("gemini-4-neon", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToGemini() error = %v", err)
+	}
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3; output=%s", len(contents), output)
+	}
+	respParts := contents[2].Get("parts").Array()
+	if len(respParts) != 3 {
+		t.Fatalf("merged user parts length = %d, want 3; output=%s", len(respParts), output)
+	}
+	if got := respParts[0].Get("text").String(); got != "note" {
+		t.Fatalf("parts[0].text = %q, want note; output=%s", got, output)
+	}
+	if got := respParts[1].Get("functionResponse.id").String(); got != "call_bash_19" {
+		t.Fatalf("parts[1].functionResponse.id = %q, want call_bash_19; output=%s", got, output)
+	}
+	if got := respParts[2].Get("functionResponse.id").String(); got != "call_read_20" {
+		t.Fatalf("parts[2].functionResponse.id = %q, want call_read_20; output=%s", got, output)
+	}
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, output)
+	}
+}
