@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
@@ -423,12 +425,131 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
-			body := handlers.BuildErrorResponseBody(status, errText)
+			body := buildGeminiErrorResponseBody(status, errText)
 			if alt == "" {
-				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				// Emit a raw Google APIError JSON frame without "event: error" or "data:"
+				// wrapping so google.golang.org/genai's iterateResponseStream decodes it
+				// as *genai.APIError in its default branch across all SDK versions.
+				_, _ = fmt.Fprintf(c.Writer, "%s\n\n", string(body))
 			} else {
 				_, _ = c.Writer.Write(body)
 			}
 		},
 	})
+}
+
+type geminiErrorResponse struct {
+	Error *geminiErrorDetail `json:"error"`
+}
+
+type geminiErrorDetail struct {
+	Code    int              `json:"code"`
+	Message string           `json:"message"`
+	Status  string           `json:"status"`
+	Details []map[string]any `json:"details,omitempty"`
+}
+
+func geminiRPCStatusFromHTTPStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "INVALID_ARGUMENT"
+	case http.StatusUnauthorized:
+		return "UNAUTHENTICATED"
+	case http.StatusForbidden:
+		return "PERMISSION_DENIED"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return "DEADLINE_EXCEEDED"
+	case http.StatusConflict:
+		return "ABORTED"
+	case http.StatusTooManyRequests:
+		return "RESOURCE_EXHAUSTED"
+	case 499:
+		return "CANCELLED"
+	case http.StatusNotImplemented:
+		return "UNIMPLEMENTED"
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		return "UNAVAILABLE"
+	default:
+		if status >= http.StatusInternalServerError {
+			return "INTERNAL"
+		}
+		if status >= http.StatusBadRequest {
+			return "INVALID_ARGUMENT"
+		}
+		return "UNKNOWN"
+	}
+}
+
+func extractGeminiErrorMessage(raw, fallback string) string {
+	if !ojson.Valid(raw) {
+		return fallback
+	}
+	root := ojson.Parse(raw)
+	for _, path := range []string{"error.message", "0.error.message", "message"} {
+		res := root.Get(path)
+		if res.Type == ojson.String {
+			if msg := strings.TrimSpace(res.String()); msg != "" {
+				return msg
+			}
+		}
+	}
+	return fallback
+}
+
+// buildGeminiErrorResponseBody builds a compact single-line Google RPC error
+// JSON body compatible with google.golang.org/genai's APIError struct.
+func buildGeminiErrorResponseBody(status int, errText string) []byte {
+	if status <= 0 {
+		status = http.StatusInternalServerError
+	}
+	trimmed := strings.TrimSpace(errText)
+	if trimmed == "" {
+		trimmed = http.StatusText(status)
+	}
+
+	if trimmed != "" && ojson.Valid(trimmed) {
+		var existing geminiErrorResponse
+		if errUnmarshal := json.Unmarshal([]byte(trimmed), &existing); errUnmarshal == nil && existing.Error != nil && existing.Error.Code > 0 {
+			if strings.TrimSpace(existing.Error.Status) == "" {
+				existing.Error.Status = geminiRPCStatusFromHTTPStatus(existing.Error.Code)
+			}
+			if strings.TrimSpace(existing.Error.Message) == "" {
+				existing.Error.Message = http.StatusText(existing.Error.Code)
+			}
+			if payload, errMarshal := json.Marshal(existing); errMarshal == nil {
+				return payload
+			}
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			var existingList []geminiErrorResponse
+			if errUnmarshal := json.Unmarshal([]byte(trimmed), &existingList); errUnmarshal == nil && len(existingList) > 0 && existingList[0].Error != nil && existingList[0].Error.Code > 0 {
+				entry := existingList[0]
+				if strings.TrimSpace(entry.Error.Status) == "" {
+					entry.Error.Status = geminiRPCStatusFromHTTPStatus(entry.Error.Code)
+				}
+				if strings.TrimSpace(entry.Error.Message) == "" {
+					entry.Error.Message = http.StatusText(entry.Error.Code)
+				}
+				if payload, errMarshal := json.Marshal(entry); errMarshal == nil {
+					return payload
+				}
+			}
+		}
+	}
+
+	message := extractGeminiErrorMessage(trimmed, trimmed)
+	rpcStatus := geminiRPCStatusFromHTTPStatus(status)
+	payload, errMarshal := json.Marshal(geminiErrorResponse{
+		Error: &geminiErrorDetail{
+			Code:    status,
+			Message: message,
+			Status:  rpcStatus,
+		},
+	})
+	if errMarshal != nil {
+		return []byte(fmt.Sprintf(`{"error":{"code":%d,"message":%q,"status":%q}}`, status, message, rpcStatus))
+	}
+	return payload
 }

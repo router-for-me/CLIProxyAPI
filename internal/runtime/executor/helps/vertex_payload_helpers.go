@@ -7,10 +7,15 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
-// StripVertexOpenAIResponsesToolCallIDs removes OpenAI Responses call IDs that
-// Vertex rejects in Gemini functionCall/functionResponse payloads.
+func shouldStripVertexToolCallIDs(sourceFormat string) bool {
+	trimmed := strings.TrimSpace(sourceFormat)
+	return strings.EqualFold(trimmed, "openai-response") || strings.EqualFold(trimmed, "openai")
+}
+
+// StripVertexOpenAIResponsesToolCallIDs removes OpenAI Responses and OpenAI Chat
+// Completions call IDs that Vertex rejects in Gemini functionCall/functionResponse payloads.
 func StripVertexOpenAIResponsesToolCallIDs(payload []byte, sourceFormat string) []byte {
-	if len(payload) == 0 || !strings.EqualFold(strings.TrimSpace(sourceFormat), "openai-response") {
+	if len(payload) == 0 || !shouldStripVertexToolCallIDs(sourceFormat) {
 		return payload
 	}
 	doc := ojson.NewDoc(payload)
@@ -20,10 +25,11 @@ func StripVertexOpenAIResponsesToolCallIDs(payload []byte, sourceFormat string) 
 	return doc.Bytes()
 }
 
-// StripVertexOpenAIResponsesToolCallIDsDoc removes OpenAI Responses call IDs that
-// Vertex rejects in Gemini functionCall/functionResponse payloads in place on doc.
+// StripVertexOpenAIResponsesToolCallIDsDoc removes OpenAI Responses and OpenAI Chat
+// Completions call IDs that Vertex rejects in Gemini functionCall/functionResponse
+// payloads in place on doc.
 func StripVertexOpenAIResponsesToolCallIDsDoc(doc *ojson.Doc, sourceFormat string) bool {
-	if doc == nil || doc.Len() == 0 || !strings.EqualFold(strings.TrimSpace(sourceFormat), "openai-response") {
+	if doc == nil || doc.Len() == 0 || !shouldStripVertexToolCallIDs(sourceFormat) {
 		return false
 	}
 
