@@ -10,6 +10,7 @@ require (
 
 require (
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 )
 
