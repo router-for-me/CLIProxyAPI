@@ -143,9 +143,11 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	jsonStr = inlineLocalRefsForClean(jsonStr)
 	jsonStr = convertRefsToHints(jsonStr, options.antigravitySemantics)
 	jsonStr = convertConstToEnum(jsonStr)
-	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
+	var strippedEnumHints []strippedEnumHint
+	jsonStr, strippedEnumHints = convertEnumValuesToStringsAndCollectHints(jsonStr, options.forceEnumStringType, options.antigravitySemantics)
 	jsonStr = addEnumHints(jsonStr)
 	jsonStr = dropIgnoredEnumsToHints(jsonStr, options)
+	jsonStr = applyStrippedEnumHints(jsonStr, strippedEnumHints)
 	if !options.preserveAdditionalPropertiesFalse && !options.preserveAllAdditionalProperties {
 		jsonStr = addAdditionalPropertiesHints(jsonStr)
 	}
@@ -1565,16 +1567,33 @@ func convertConstToEnum(jsonStr string) string {
 	return jsonStr
 }
 
+type strippedEnumHint struct {
+	parentPath string
+	hint       string
+}
+
+const (
+	emptyStringEnumAllowedHint = `Empty string "" allowed`
+	emptyStringEnumOnlyHint    = `Allowed: ""`
+)
+
 // convertEnumValuesToStrings ensures all enum values use the string representation required by
-// Gemini's proto schema. The declared type remains independent: Antigravity uses it to choose the
-// emitted JSON type on both response and function-argument paths.
+// Gemini's proto schema and strips empty, whitespace-only, or null members that Google's Schema
+// validator rejects with "enum[N]: cannot be empty". The declared type remains independent:
+// Antigravity uses it to choose the emitted JSON type on both response and function-argument paths.
 func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
+	updated, hints := convertEnumValuesToStringsAndCollectHints(jsonStr, forceStringType, false)
+	return applyStrippedEnumHints(updated, hints)
+}
+
+func convertEnumValuesToStringsAndCollectHints(jsonStr string, forceStringType, preserveNativeNullable bool) (string, []strippedEnumHint) {
 	paths := findPaths(jsonStr, "enum")
 	if len(paths) == 0 {
-		return jsonStr
+		return jsonStr, nil
 	}
 	doc := ojson.NewDocString(jsonStr)
 	modified := false
+	var hints []strippedEnumHint
 	for _, p := range paths {
 		parentPath := trimSuffix(p, ".enum")
 		if isPropertyDefinition(parentPath) {
@@ -1585,24 +1604,95 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 			continue
 		}
 
-		var stringVals []string
-		for _, item := range arr.Array() {
-			stringVals = append(stringVals, item.String())
+		typePath := joinPath(parentPath, "type")
+		items := arr.Array()
+		if len(items) == 0 {
+			if forceStringType && doc.Get(typePath).String() != "string" {
+				if doc.Set(typePath, "string") == nil {
+					modified = true
+				}
+			}
+			continue
+		}
+
+		stringVals := make([]string, 0, len(items))
+		sawEmptyString := false
+		sawNull := false
+		for _, item := range items {
+			if item.Type == ojson.Null {
+				sawNull = true
+				continue
+			}
+			val := item.String()
+			if strings.TrimSpace(val) == "" {
+				sawEmptyString = true
+				continue
+			}
+			stringVals = append(stringVals, val)
+		}
+
+		if len(stringVals) == 0 {
+			if doc.Delete(p) == nil {
+				modified = true
+			}
+			if sawEmptyString {
+				if forceStringType || !doc.Get(typePath).Exists() {
+					if doc.Set(typePath, "string") == nil {
+						modified = true
+					}
+				}
+				hints = append(hints, strippedEnumHint{parentPath: parentPath, hint: emptyStringEnumOnlyHint})
+			} else if sawNull && !doc.Get(typePath).Exists() {
+				if doc.Set(typePath, "null") == nil {
+					modified = true
+				}
+			}
+			if sawNull {
+				if preserveNativeNullable {
+					if doc.Set(joinPath(parentPath, "nullable"), true) == nil {
+						modified = true
+					}
+				}
+				hints = append(hints, strippedEnumHint{parentPath: parentPath, hint: "(nullable)"})
+			}
+			continue
 		}
 
 		if doc.Set(p, stringVals) == nil {
 			modified = true
 		}
 		if forceStringType {
-			if doc.Set(joinPath(parentPath, "type"), "string") == nil {
+			if doc.Set(typePath, "string") == nil {
 				modified = true
 			}
 		}
+		if sawEmptyString {
+			hints = append(hints, strippedEnumHint{parentPath: parentPath, hint: emptyStringEnumAllowedHint})
+		}
+		if sawNull {
+			if preserveNativeNullable {
+				if doc.Set(joinPath(parentPath, "nullable"), true) == nil {
+					modified = true
+				}
+			}
+			hints = append(hints, strippedEnumHint{parentPath: parentPath, hint: "(nullable)"})
+		}
 	}
 	if modified {
-		return doc.String()
+		return doc.String(), hints
 	}
-	return jsonStr
+	return jsonStr, hints
+}
+
+func applyStrippedEnumHints(jsonStr string, hints []strippedEnumHint) string {
+	if len(hints) == 0 {
+		return jsonStr
+	}
+	doc := ojson.NewDocString(jsonStr)
+	for _, h := range hints {
+		appendHintDoc(doc, h.parentPath, h.hint)
+	}
+	return doc.String()
 }
 
 func addEnumHints(jsonStr string) string {

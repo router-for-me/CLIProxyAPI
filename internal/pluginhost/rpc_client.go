@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,16 +12,20 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
+const schedulerPickCancelTimeout = 5 * time.Second
+
 type rpcPluginAdapter struct {
-	id       string
-	host     *Host
-	client   pluginClient
-	instance *hostCallbackInstance
+	id                  string
+	host                *Host
+	client              pluginClient
+	instance            *hostCallbackInstance
+	schedulerPickCancel bool
 }
 
 type rpcAuthProvider struct {
@@ -188,6 +193,10 @@ func registerRPCPluginWithOutcome(ctx context.Context, host *Host, id string, cl
 	if resp.Capabilities.Scheduler {
 		plugin.Capabilities.Scheduler = adapter
 		plugin.Capabilities.SchedulerAcrossPriorities = resp.Capabilities.SchedulerAcrossPriorities
+		if schemaVersion >= pluginabi.SchemaVersionSchedulerPickCancel && resp.Capabilities.SchedulerPickCancel {
+			adapter.schedulerPickCancel = true
+			plugin.Capabilities.SchedulerPickCancel = true
+		}
 	}
 	if resp.Capabilities.SchedulerContinuity {
 		plugin.Capabilities.SchedulerContinuity = adapter
@@ -352,6 +361,12 @@ func sanitizePluginRequest(request any) any {
 		req.HTTPClient = nil
 		return req
 	case pluginapi.SchedulerPickRequest:
+		req.Options.Metadata = sanitizePluginMetadata(req.Options.Metadata)
+		for index := range req.Candidates {
+			req.Candidates[index].Metadata = sanitizePluginMetadata(req.Candidates[index].Metadata)
+		}
+		return req
+	case rpcSchedulerPickRequest:
 		req.Options.Metadata = sanitizePluginMetadata(req.Options.Metadata)
 		for index := range req.Candidates {
 			req.Candidates[index].Metadata = sanitizePluginMetadata(req.Candidates[index].Metadata)
@@ -555,8 +570,87 @@ func (a *rpcPluginAdapter) ModelsForAuth(ctx context.Context, req pluginapi.Auth
 	})
 }
 
+func schedulerPickSelectionID(req *pluginapi.SchedulerPickRequest, ensure bool) string {
+	if req == nil {
+		return ""
+	}
+	if raw, ok := req.Options.Metadata[pluginapi.SelectionIDMetadataKey]; ok {
+		if id, okStr := raw.(string); okStr {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	if !ensure {
+		return ""
+	}
+	selectionID := uuid.NewString()
+	meta := make(map[string]any, len(req.Options.Metadata)+1)
+	for k, v := range req.Options.Metadata {
+		meta[k] = v
+	}
+	meta[pluginapi.SelectionIDMetadataKey] = selectionID
+	req.Options.Metadata = meta
+	return selectionID
+}
+
+func (a *rpcPluginAdapter) notifySchedulerPickCancel(pluginMeta pluginapi.Metadata, selectionID string, cause error) {
+	if a == nil || a.client == nil || strings.TrimSpace(selectionID) == "" {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if a.host != nil {
+				a.host.fusePlugin(a.id, pluginabi.MethodSchedulerPickCancel, recovered)
+			}
+		}
+	}()
+	cancelReq := pluginapi.SchedulerPickCancelRequest{
+		Plugin:      pluginMeta,
+		SelectionID: selectionID,
+		Reason:      contextDoneReason(cause),
+	}
+	cancelCtx, cancelTimeout := context.WithTimeout(context.Background(), schedulerPickCancelTimeout)
+	defer cancelTimeout()
+	if _, errCancel := callPlugin[rpcEmptyResponse](cancelCtx, a.client, pluginabi.MethodSchedulerPickCancel, cancelReq); errCancel != nil && !errors.Is(errCancel, errPluginClientClosed) {
+		log.WithField("plugin_id", a.id).WithError(errCancel).Debug("pluginhost: scheduler pick cancel notification failed")
+	}
+}
+
 func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
-	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
+	if ctx != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return pluginapi.SchedulerPickResponse{}, errCtx
+		}
+	}
+	selectionID := schedulerPickSelectionID(&req, a != nil && a.schedulerPickCancel)
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	var stopCancel func() bool
+	if a != nil && a.schedulerPickCancel && ctx != nil && selectionID != "" {
+		cancelPluginMeta := clonePluginMetadata(req.Plugin)
+		stopCancel = context.AfterFunc(ctx, func() {
+			a.notifySchedulerPickCancel(cancelPluginMeta, selectionID, ctx.Err())
+		})
+	}
+	cleanup := func() {
+		if stopCancel != nil {
+			stopCancel()
+		}
+		closeCallback()
+	}
+	callCtx, finishCall := withPluginCallFinish(ctx, cleanup)
+	defer finishCall()
+
+	resp, errCall := callPlugin[pluginapi.SchedulerPickResponse](callCtx, a.client, pluginabi.MethodSchedulerPick, rpcSchedulerPickRequest{
+		SchedulerPickRequest: req,
+		HostCallbackID:       callbackID,
+	})
+	if ctx != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return pluginapi.SchedulerPickResponse{}, errCtx
+		}
+	}
+	return resp, errCall
 }
 
 func (a *rpcPluginAdapter) Continuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, error) {

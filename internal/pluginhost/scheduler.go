@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -330,8 +331,18 @@ func (h *Host) callScheduler(ctx context.Context, record capabilityRecord, req p
 
 	req.Plugin = clonePluginMetadata(record.meta)
 	resp, errPick := scheduler.Pick(ctx, req)
+	if ctx != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			log.WithField("plugin_id", record.id).WithError(errCtx).Debug("pluginhost: scheduler auth pick canceled")
+			return pluginapi.SchedulerPickResponse{}, true, errCtx
+		}
+	}
 	if errPick != nil {
-		log.WithField("plugin_id", record.id).WithError(errPick).Warn("pluginhost: scheduler rejected auth pick")
+		if errors.Is(errPick, context.Canceled) || errors.Is(errPick, context.DeadlineExceeded) {
+			log.WithField("plugin_id", record.id).WithError(errPick).Debug("pluginhost: scheduler auth pick canceled")
+		} else {
+			log.WithField("plugin_id", record.id).WithError(errPick).Warn("pluginhost: scheduler rejected auth pick")
+		}
 		return pluginapi.SchedulerPickResponse{}, true, errPick
 	}
 	return resp, true, nil

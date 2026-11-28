@@ -3998,13 +3998,14 @@ func (m *Manager) recordVerifyFailure(execCtx context.Context, auth *Auth, provi
 }
 
 func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *Auth, provider, stateModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, credVersion, regEpoch, executionSeq uint64) (*Auth, error) {
-	m.MarkResult(execCtx, Result{
+	appliedVerification := m.markResult(execCtx, Result{
 		AuthID:            auth.ID,
 		Provider:          provider,
 		Model:             stateModel,
 		RouteModel:        routeModel,
 		Success:           true,
 		CompletedResponse: true,
+		OperatorVerify:    true,
 		Options:           opts,
 		AccessToken:       accessToken,
 		RefreshToken:      authRefreshToken(auth),
@@ -4016,8 +4017,15 @@ func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *
 	if !okUpdated || updated == nil {
 		return nil, verifyCredentialRemovedError()
 	}
-	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
+	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch {
 		return updated, verifyCredentialSupersededError()
+	}
+	if !appliedVerification || !updated.InferenceVerified {
+		return updated, &Error{
+			Code:       "verification_not_applied",
+			Message:    "upstream completed the verification request, but the credential is still cooling down or disabled; it was not marked verified",
+			HTTPStatus: http.StatusConflict,
+		}
 	}
 	return updated, nil
 }

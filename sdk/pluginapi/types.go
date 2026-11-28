@@ -102,6 +102,9 @@ type Capabilities struct {
 	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
 	// credentials from the highest available priority tier.
 	SchedulerAcrossPriorities bool
+	// SchedulerPickCancel opts into receiving scheduler.pick.cancel push notifications
+	// when a request context is canceled while scheduler.pick is in flight (schema v11+).
+	SchedulerPickCancel bool
 	// SchedulerContinuity optionally evaluates bounded pre-admission continuity when
 	// eligible Codex credentials are waiting for quota recovery or after a pre-output 429.
 	SchedulerContinuity SchedulerContinuity
@@ -588,6 +591,17 @@ type Scheduler interface {
 // or a built-in provider before model-to-provider resolution and auth selection.
 type ModelRouter interface {
 	RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error)
+}
+
+// SchedulerPickCancelRequest notifies a scheduler plugin that an in-flight
+// scheduler.pick request context was canceled or exceeded its deadline.
+type SchedulerPickCancelRequest struct {
+	// Plugin is the metadata of the plugin being notified.
+	Plugin Metadata `json:"plugin,omitempty"`
+	// SelectionID matches the selection_id metadata carried on SchedulerPickRequest.
+	SelectionID string `json:"selection_id"`
+	// Reason describes why the pick context ended ("canceled", "deadline_exceeded", or "done").
+	Reason string `json:"reason,omitempty"`
 }
 
 // SchedulerPickRequest describes the routing context offered to a scheduler plugin.
@@ -1184,6 +1198,42 @@ type HostAffinityLookupResponse struct {
 	Disabled bool `json:"disabled,omitempty"`
 	// Unavailable reports whether the bound credential is currently unavailable.
 	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// HostContextDoneRequest asks the host whether the request context bound to host_callback_id is done.
+type HostContextDoneRequest struct {
+	// HostCallbackID identifies the active host callback context supplied on the plugin RPC request.
+	HostCallbackID string `json:"host_callback_id"`
+}
+
+// HostContextDoneResponse reports whether the host callback context is done.
+type HostContextDoneResponse struct {
+	// Done reports whether the bound context has been canceled, timed out, or closed.
+	Done bool `json:"done"`
+	// Reason classifies why the context ended ("canceled", "deadline_exceeded", "closed", or "done").
+	Reason string `json:"reason,omitempty"`
+	// Error carries the underlying context error text when Done is true.
+	Error string `json:"error,omitempty"`
+}
+
+// HostContextWaitRequest asks the host to wait until the request context bound to host_callback_id is done or timeout_ms elapses.
+type HostContextWaitRequest struct {
+	// HostCallbackID identifies the active host callback context supplied on the plugin RPC request.
+	HostCallbackID string `json:"host_callback_id"`
+	// TimeoutMS bounds the wait in milliseconds. Zero waits until the context or callback scope ends.
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
+}
+
+// HostContextWaitResponse reports the outcome of waiting on a host callback context.
+type HostContextWaitResponse struct {
+	// Done reports whether the bound context has been canceled, timed out, or closed.
+	Done bool `json:"done"`
+	// TimedOut reports whether timeout_ms elapsed while the context was still active.
+	TimedOut bool `json:"timed_out,omitempty"`
+	// Reason classifies why the context ended ("canceled", "deadline_exceeded", "closed", or "done").
+	Reason string `json:"reason,omitempty"`
+	// Error carries the underlying context error text when Done is true.
+	Error string `json:"error,omitempty"`
 }
 
 // HostRoutingResetCooldownRequest asks the host to clear quota and cooldown routing state for one credential.

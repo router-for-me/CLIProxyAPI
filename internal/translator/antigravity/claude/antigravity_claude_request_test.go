@@ -4441,3 +4441,44 @@ func TestConvertClaudeRequestToAntigravity_SkipsEmptyPartsAndMalformedInlineData
 		}
 	})
 }
+
+func TestConvertClaudeRequestToAntigravity_AlignsSplitOutOfOrderParallelToolResults(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-4-neon",
+		"messages": [
+			{"role": "user", "content": "Run bash and read"},
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "call_bash_19", "name": "Bash", "input": {"cmd": "pwd"}},
+				{"type": "tool_use", "id": "call_read_20", "name": "Read", "input": {"file_path": "main.go"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "call_read_20", "content": "package main"}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "call_bash_19", "content": "/workspace"}
+			]}
+		]
+	}`)
+
+	for _, model := range []string{"gemini-4-neon", "claude-sonnet-4-6"} {
+		t.Run(model, func(t *testing.T) {
+			output, err := ConvertClaudeRequestToAntigravity(model, inputJSON, false)
+			if err != nil {
+				t.Fatalf("ConvertClaudeRequestToAntigravity(%s) error = %v", model, err)
+			}
+			respParts := ojson.GetBytesNoCopy(output, "request.contents.2.parts").Array()
+			if len(respParts) != 2 {
+				t.Fatalf("response parts length = %d, want 2; output=%s", len(respParts), output)
+			}
+			if got := respParts[0].Get("functionResponse.id").String(); got != "call_bash_19" {
+				t.Fatalf("parts[0].functionResponse.id = %q, want call_bash_19; output=%s", got, output)
+			}
+			if got := respParts[1].Get("functionResponse.id").String(); got != "call_read_20" {
+				t.Fatalf("parts[1].functionResponse.id = %q, want call_read_20; output=%s", got, output)
+			}
+			if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+				t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, output)
+			}
+		})
+	}
+}
