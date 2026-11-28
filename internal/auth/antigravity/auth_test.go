@@ -270,8 +270,8 @@ func TestOnboardUserIncompletePollingDoesNotWrapErrProjectIDNotFound(t *testing.
 		if err == nil {
 			t.Fatal("FetchProjectID() = nil, want incomplete onboarding error")
 		}
-		if onboardCalls != 5 {
-			t.Fatalf("onboardCalls = %d, want 5", onboardCalls)
+		if onboardCalls != 3 {
+			t.Fatalf("onboardCalls = %d, want 3", onboardCalls)
 		}
 		if errors.Is(err, ErrProjectIDNotFound) {
 			t.Fatalf("FetchProjectID() err = %v, must NOT wrap ErrProjectIDNotFound when onboarding did not complete", err)
@@ -599,6 +599,36 @@ func TestOnboardUserPollingCancelsImmediatelyOnContextDone(t *testing.T) {
 				t.Fatalf("attempts = %d, want 2", got)
 			}
 		})
+	})
+}
+
+func TestOnboardUserPollingJitterDelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var attemptTimes []time.Time
+		auth := NewAntigravityAuth(nil, &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attemptTimes = append(attemptTimes, time.Now())
+			if len(attemptTimes) < 3 {
+				return jsonResponse(`{"done":false}`), nil
+			}
+			return jsonResponse(`{"done":true,"response":{"cloudaicompanionProject":"jitter-project"}}`), nil
+		})})
+
+		projectID, err := auth.OnboardUser(context.Background(), "access-token", "free-tier")
+		if err != nil {
+			t.Fatalf("OnboardUser() error: %v", err)
+		}
+		if projectID != "jitter-project" {
+			t.Fatalf("projectID = %q, want %q", projectID, "jitter-project")
+		}
+		if len(attemptTimes) != 3 {
+			t.Fatalf("attempts = %d, want 3", len(attemptTimes))
+		}
+		for i := 1; i < len(attemptTimes); i++ {
+			delay := attemptTimes[i].Sub(attemptTimes[i-1])
+			if delay < 3*time.Second || delay >= 6*time.Second {
+				t.Fatalf("delay between attempt %d and %d = %v, want in [3s, 6s)", i, i+1, delay)
+			}
+		}
 	})
 }
 
