@@ -1240,8 +1240,8 @@ func TestAntigravityExecutorCountTokensReconstructsCompactedClaudeToolCall(t *te
 
 func TestNormalizeAntigravityGeminiFunctionResponseRolesOrdersMixedParallelResponses(t *testing.T) {
 	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read","args":{"file":"one"}}},{"functionCall":{"id":"call-2","name":"read","args":{"file":"two"}}}]},{"role":"user","parts":[{"text":"results follow"},{"functionResponse":{"id":"call-2","name":"read","response":{"result":"two"}}},{"text":"continue"},{"functionResponse":{"id":"call-1","name":"read","response":{"result":"one"}}}]}]}}`)
-	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(payload); errValidate == nil {
-		t.Fatal("permuted input unexpectedly passed function call pairing validation")
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(payload); errValidate != nil {
+		t.Fatalf("ID-matched permuted input should pass pairing validation: %v", errValidate)
 	}
 	output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
 	if got := ojson.GetBytes(output, "request.contents.1.role").String(); got != "user" {

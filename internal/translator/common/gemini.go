@@ -213,6 +213,231 @@ func ReorderGeminiUserParts(parts [][]byte) [][]byte {
 	return append(promptParts, toolParts...)
 }
 
+type geminiAlignCallRef struct {
+	id   string
+	name string
+}
+
+// AlignGeminiFunctionResponses aligns functionResponse parts in a non-model turn
+// to the order of the preceding model turn's functionCall parts while preserving
+// the indices and relative order of any non-functionResponse parts. If a complete
+// one-to-one match is unavailable or the responses are already aligned, the turn
+// is left unchanged.
+func AlignGeminiFunctionResponses(contents [][]byte) [][]byte {
+	if len(contents) <= 1 {
+		return contents
+	}
+
+	var pending []geminiAlignCallRef
+	var out [][]byte
+	for idx, content := range contents {
+		if len(content) == 0 {
+			pending = nil
+			if out != nil {
+				out[idx] = content
+			}
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(content, "role").String()))
+		if role != "model" && len(pending) == 0 {
+			if out != nil {
+				out[idx] = content
+			}
+			continue
+		}
+		parts := ojson.GetBytesNoCopy(content, "parts")
+		if !parts.IsArray() || !parts.Get("0").Exists() {
+			pending = nil
+			if out != nil {
+				out[idx] = content
+			}
+			continue
+		}
+
+		if role == "model" {
+			var calls []geminiAlignCallRef
+			hasResponse := false
+			parts.ForEach(func(_, part ojson.Result) bool {
+				if GeminiPartFunctionResponse(part).Exists() {
+					hasResponse = true
+					return false
+				}
+				if fc := GeminiPartFunctionCall(part); fc.Exists() {
+					calls = append(calls, geminiAlignCallRef{
+						id:   fc.Get("id").String(),
+						name: strings.TrimSpace(fc.Get("name").String()),
+					})
+				}
+				return true
+			})
+			// Single-call turns can never be out of order; only track parallel call groups.
+			if len(calls) > 1 && !hasResponse {
+				pending = calls
+			} else {
+				pending = nil
+			}
+			if out != nil {
+				out[idx] = content
+			}
+			continue
+		}
+
+		var responseIndices []int
+		var responses []geminiAlignCallRef
+		hasCall := false
+		partIdx := 0
+		parts.ForEach(func(_, part ojson.Result) bool {
+			if GeminiPartFunctionCall(part).Exists() {
+				hasCall = true
+				return false
+			}
+			if fr := GeminiPartFunctionResponse(part); fr.Exists() {
+				if responses == nil {
+					responseIndices = make([]int, 0, len(pending))
+					responses = make([]geminiAlignCallRef, 0, len(pending))
+				}
+				responseIndices = append(responseIndices, partIdx)
+				responses = append(responses, geminiAlignCallRef{
+					id:   fr.Get("id").String(),
+					name: strings.TrimSpace(fr.Get("name").String()),
+				})
+			}
+			partIdx++
+			return true
+		})
+
+		if hasCall {
+			pending = nil
+			if out != nil {
+				out[idx] = content
+			}
+			continue
+		}
+		if len(responses) == 0 {
+			if out != nil {
+				out[idx] = content
+			}
+			continue
+		}
+
+		if len(responses) == len(pending) {
+			if order, changed := matchGeminiFunctionResponseOrder(responses, pending); changed {
+				partList := parts.Array()
+				orderedParts := make([][]byte, len(partList))
+				for pIdx, part := range partList {
+					orderedParts[pIdx] = []byte(part.Raw)
+				}
+				for slotIdx, srcResponseIdx := range order {
+					orderedParts[responseIndices[slotIdx]] = []byte(partList[responseIndices[srcResponseIdx]].Raw)
+				}
+				contentDoc := ojson.NewDoc(content)
+				if errSet := contentDoc.SetRawBytes("parts", JoinRawArray(orderedParts)); errSet == nil {
+					if out == nil {
+						out = make([][]byte, len(contents))
+						copy(out[:idx], contents[:idx])
+					}
+					out[idx] = contentDoc.Bytes()
+					pending = nil
+					continue
+				}
+			}
+		}
+
+		pending = nil
+		if out != nil {
+			out[idx] = content
+		}
+	}
+
+	if out == nil {
+		return contents
+	}
+	return out
+}
+
+func matchGeminiFunctionResponseOrder(responses, pending []geminiAlignCallRef) ([]int, bool) {
+	if len(responses) != len(pending) || len(responses) <= 1 {
+		return nil, false
+	}
+
+	alreadyAligned := true
+	for i, call := range pending {
+		resp := responses[i]
+		if call.id != "" {
+			if resp.id != call.id || (call.name != "" && resp.name != "" && resp.name != call.name) {
+				alreadyAligned = false
+				break
+			}
+		} else if call.name != "" && resp.name != call.name {
+			alreadyAligned = false
+			break
+		}
+	}
+	if alreadyAligned {
+		return nil, false
+	}
+
+	used := make([]bool, len(responses))
+	order := make([]int, len(pending))
+	matched := make([]bool, len(pending))
+
+	// First pass: prefer exact (id, name) matches.
+	for slot, call := range pending {
+		if call.id == "" || call.name == "" {
+			continue
+		}
+		for respIdx, resp := range responses {
+			if !used[respIdx] && resp.id == call.id && resp.name == call.name {
+				used[respIdx] = true
+				order[slot] = respIdx
+				matched[slot] = true
+				break
+			}
+		}
+	}
+
+	// Second pass: match remaining calls with non-empty id by id.
+	for slot, call := range pending {
+		if matched[slot] || call.id == "" {
+			continue
+		}
+		for respIdx, resp := range responses {
+			if !used[respIdx] && resp.id == call.id {
+				used[respIdx] = true
+				order[slot] = respIdx
+				matched[slot] = true
+				break
+			}
+		}
+	}
+
+	// Third pass: match remaining id-less calls by name.
+	for slot, call := range pending {
+		if matched[slot] || call.id != "" || call.name == "" {
+			continue
+		}
+		for respIdx, resp := range responses {
+			if !used[respIdx] && resp.name == call.name {
+				used[respIdx] = true
+				order[slot] = respIdx
+				matched[slot] = true
+				break
+			}
+		}
+	}
+
+	changed := false
+	for slot := range pending {
+		if !matched[slot] {
+			return nil, false
+		}
+		if order[slot] != slot {
+			changed = true
+		}
+	}
+	return order, changed
+}
+
 // MergeAdjacentGeminiUserContents merges consecutive user Content turns,
 // but leaves turns containing functionResponse unmerged to preserve tool-call/response boundaries.
 func MergeAdjacentGeminiUserContents(contents [][]byte) [][]byte {
