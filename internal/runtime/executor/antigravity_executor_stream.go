@@ -120,7 +120,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
-	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate_stream").Do(httpReq)
+	httpResp, errDo := doAntigravityRequest(httpClient, auth, "generate_stream", httpReq, requestPayload)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {

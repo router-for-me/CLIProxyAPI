@@ -122,7 +122,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
 
-	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
+	httpResp, errDo := doAntigravityRequest(httpClient, auth, "generate", httpReq, requestPayload)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
@@ -314,7 +314,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
 
-	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
+	httpResp, errDo := doAntigravityRequest(httpClient, auth, "generate", httpReq, requestPayload)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {

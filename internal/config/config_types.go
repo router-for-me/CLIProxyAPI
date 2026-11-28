@@ -281,12 +281,27 @@ type AntigravityConfig struct {
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 
+	// UpstreamRequestCompression enables gzip request bodies for the Antigravity endpoint.
+	// The endpoint accepts identity/gzip only; zstd is rejected with HTTP 415.
+	UpstreamRequestCompression bool `yaml:"upstream-request-compression" json:"upstream-request-compression"`
+
+	// UpstreamRequestCompressionMinBytes defaults to 1024 when zero or negative.
+	UpstreamRequestCompressionMinBytes int `yaml:"upstream-request-compression-min-bytes,omitempty" json:"upstream-request-compression-min-bytes,omitempty"`
+
 	// TOSPauseWindow controls the pool-wide protective pause armed after the first
 	// 403 TOS_VIOLATION. Defaults to "0" (disabled), so only the violating
 	// credential is deactivated unless a positive Go duration string (e.g. "6h")
 	// is explicitly configured. Set to "0", "off", "false", "none", or
 	// "disabled" to explicitly disable the pause.
 	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
+}
+
+// RequestCompressionMinBytes returns the minimum request size eligible for compression.
+func (c *AntigravityConfig) RequestCompressionMinBytes() int {
+	if c == nil || c.UpstreamRequestCompressionMinBytes <= 0 {
+		return 1024
+	}
+	return c.UpstreamRequestCompressionMinBytes
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.

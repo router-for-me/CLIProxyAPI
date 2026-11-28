@@ -96,7 +96,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizerWithSourceModels(e.cfg, e.Identifier(), selection.ID, to.String(), "request", prepared.originalTranslated, req, opts, baseModel))
 	helps.FinalizePayloadDoc(ctx, doc)
 	payload := helps.SerializeAntigravityPayload(doc, false)
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
+	bodyReader, compressed := e.encodeAntigravityRequestBody(payload)
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
 		return cliproxyexecutor.Response{}, errReq
 	}
@@ -112,6 +113,9 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if compressed {
+		httpReq.Header.Set("Content-Encoding", "gzip")
+	}
 
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       requestURL.String(),
@@ -126,7 +130,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	})
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "count_tokens").Do(httpReq)
+	httpResp, errDo := doAntigravityRequest(httpClient, auth, "count_tokens", httpReq, payload)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return cliproxyexecutor.Response{}, errDo

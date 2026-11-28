@@ -107,6 +107,8 @@ func buildV8Paths() []configPath {
 		{"disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
 		{"claude-header-defaults", "upstream.claude.header-defaults"},
 		{"antigravity", "oauth.providers.antigravity"},
+		{"antigravity.upstream-request-compression", "oauth.providers.antigravity.upstream-request-compression"},
+		{"antigravity.upstream-request-compression-min-bytes", "oauth.providers.antigravity.upstream-request-compression-min-bytes"},
 		{"antigravity-signature-cache-enabled", "oauth.providers.antigravity.signature-cache-enabled"},
 		{"antigravity-signature-bypass-strict", "oauth.providers.antigravity.signature-bypass-strict"},
 		{"quota-exceeded.antigravity-credits", "oauth.providers.antigravity.antigravity-credits"},
