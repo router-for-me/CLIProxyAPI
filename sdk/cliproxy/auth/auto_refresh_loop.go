@@ -148,7 +148,7 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 	l.queue = l.queue[:0]
 	l.index = make(map[string]*refreshHeapItem, len(entries))
 	for _, e := range entries {
-		item := &refreshHeapItem{id: e.id, next: e.next}
+		item := &refreshHeapItem{id: e.id, next: e.next.Round(0)}
 		heap.Push(&l.queue, item)
 		l.index[e.id] = item
 	}
@@ -270,6 +270,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	if authID == "" {
 		return
 	}
+	now = now.Round(0)
 
 	manager := l.manager
 
@@ -376,6 +377,8 @@ func (l *authAutoRefreshLoop) upsert(authID string, next time.Time) {
 	if authID == "" || next.IsZero() {
 		return
 	}
+	// OAuth deadlines must advance even when the monotonic clock pauses during suspend.
+	next = next.Round(0)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if item, ok := l.index[authID]; ok && item != nil {
