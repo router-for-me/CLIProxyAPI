@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	responsesWebsocketMergedInputSink       any
+	responsesWebsocketMergedInputSink       string
 	responsesWebsocketNormalizedRequestSink []byte
 )
 
@@ -313,7 +313,7 @@ func TestMergeResponsesWebsocketInputBoundsLargeTranscriptAllocations(t *testing
 					}
 					responsesWebsocketMergedInputSink = merged
 				}
-				responsesWebsocketMergedInputSink = nil
+				responsesWebsocketMergedInputSink = ""
 			})
 
 			const (

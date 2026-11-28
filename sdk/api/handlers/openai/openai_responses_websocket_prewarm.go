@@ -79,7 +79,7 @@ func normalizeResponsesWebsocketPrewarmFollowup(rawJSON, warmupRequest []byte) (
 	}
 	doc := ojson.NewDoc(rawJSON)
 	normalizeResponseTranscriptReplacementDoc(doc, warmupRequest)
-	if errSet := doc.SetRawBytes("input", merged); errSet != nil {
+	if errSet := doc.SetRaw("input", merged); errSet != nil {
 		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errSet}
 	}
 	normalized := doc.Bytes()

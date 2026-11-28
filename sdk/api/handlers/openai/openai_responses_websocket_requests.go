@@ -151,10 +151,10 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// skip merging with stale lastRequest/lastResponseOutput to avoid breaking
 	// function_call / function_call_output pairings.
 	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
-	var mergedInput []byte
+	var mergedInput string
 	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
-		mergedInput = []byte(nextInput.Raw)
+		mergedInput = nextInput.Raw
 	} else {
 		appendInputRaw := nextInput.Raw
 		if inputContainsFullTranscript(nextInput) {
@@ -173,7 +173,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 
 	doc := ojson.NewDoc(rawJSON)
 	normalizeResponseTranscriptReplacementDoc(doc, lastRequest)
-	if errSet := doc.SetRawBytes("input", mergedInput); errSet != nil {
+	if errSet := doc.SetRaw("input", mergedInput); errSet != nil {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      fmt.Errorf("failed to merge websocket input: %w", errSet),
@@ -477,14 +477,14 @@ func responsesWebsocketSanitizePassthroughObject(passthrough ojson.Result) (stri
 	return string(out), true, true
 }
 
-func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) ([]byte, error) {
+func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) (string, error) {
 	previousInput, errPrevious := responsesWebsocketPreviousInputNoCopy(lastRequest)
 	if errPrevious != nil {
-		return nil, fmt.Errorf("invalid previous request input: %w", errPrevious)
+		return "", fmt.Errorf("invalid previous request input: %w", errPrevious)
 	}
 	items, errExisting := appendResponsesWebsocketMergeInputResult(nil, previousInput)
 	if errExisting != nil {
-		return nil, fmt.Errorf("invalid previous request input: %w", errExisting)
+		return "", fmt.Errorf("invalid previous request input: %w", errExisting)
 	}
 
 	trimmedResponse := bytes.TrimSpace(lastResponseOutput)
@@ -499,7 +499,7 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 		var errResponse error
 		items, errResponse = appendResponsesWebsocketMergeInputResult(items, responseInput)
 		if errResponse != nil {
-			return nil, fmt.Errorf("invalid previous response output: %w", errResponse)
+			return "", fmt.Errorf("invalid previous response output: %w", errResponse)
 		}
 		// Replayed response items become upstream input. Drop output-only
 		// fields the client never sends so another credential cannot reject
@@ -511,7 +511,7 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 
 	items, errAppend := appendResponsesWebsocketMergeInputItems(items, appendRaw)
 	if errAppend != nil {
-		return nil, fmt.Errorf("invalid request input: %w", errAppend)
+		return "", fmt.Errorf("invalid request input: %w", errAppend)
 	}
 
 	items = dedupeResponsesWebsocketMergeFunctionCalls(items)
@@ -672,7 +672,7 @@ func dedupeResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInpu
 	return filtered
 }
 
-func marshalResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInputItem) []byte {
+func marshalResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInputItem) string {
 	outputLength := 2
 	if len(items) > 1 {
 		outputLength += len(items) - 1
@@ -683,16 +683,17 @@ func marshalResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInp
 
 	// This allocation establishes ownership of the merged transcript and is the
 	// only large allocation the merge path retains after it returns.
-	out := make([]byte, 0, outputLength)
-	out = append(out, '[')
+	var out strings.Builder
+	out.Grow(outputLength)
+	out.WriteByte('[')
 	for index, item := range items {
 		if index > 0 {
-			out = append(out, ',')
+			out.WriteByte(',')
 		}
-		out = append(out, item.raw...)
+		out.WriteString(item.raw)
 	}
-	out = append(out, ']')
-	return out
+	out.WriteByte(']')
+	return out.String()
 }
 
 func parseResponsesWebsocketInputItems(rawArray string) ([]responsesWebsocketInputItem, error) {
