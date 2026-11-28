@@ -13,8 +13,31 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+func TestModelListInterceptorReceivesQueryKeyCallerScope(t *testing.T) {
+	server := newTestServer(t)
+	calls := 0
+	server.handlers.SetPluginHost(&mockModelListInterceptorHost{interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+		calls++
+		if got, want := req.Metadata[pluginapi.CallerScopeMetadataKey], coresession.CallerScope("test-key"); got != want {
+			t.Errorf("caller scope = %v, want %q", got, want)
+		}
+		return pluginapi.ResponseInterceptResponse{Body: req.Body}
+	}})
+	for _, path := range []string{"/v1/models?key=test-key", "/v1beta/models?key=test-key", "/v1beta/models/missing?key=test-key"} {
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if rr.Code != http.StatusOK && rr.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("interceptor calls = %d, want 3", calls)
+	}
+}
 
 type mockModelListInterceptorHost struct {
 	interceptResponse func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
