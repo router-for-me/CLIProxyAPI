@@ -924,6 +924,18 @@ func keepPreferredCandidateError(current, next error) error {
 	return next
 }
 
+// preferRetryableRoundError prevents an exclusion miss from hiding a recoverable
+// failure elsewhere in the same round without overriding terminal control flow.
+func preferRetryableRoundError(err, retryable error) error {
+	if retryable == nil || !strings.EqualFold(strings.TrimSpace(errorCodeFromError(err)), "model_excluded") {
+		return err
+	}
+	if isCredentialTerminatedError(err) || isRequestStopError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return retryable
+}
+
 func isRequestTerminatedError(err error) bool {
 	var terminated *cliproxyexecutor.RequestTerminatedError
 	return (errors.As(err, &terminated) && terminated != nil) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err)
@@ -1254,10 +1266,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
+	var retryableErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1281,7 +1294,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
-				return cliproxyexecutor.Response{}, roundPickFailureError(lastErr, upstreamErr, errPick)
+				return cliproxyexecutor.Response{}, roundPickFailureError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr, errPick)
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
@@ -1343,6 +1356,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+			if isRequestRetryRoundError(errPrepare) {
+				retryableErr = errPrepare
+			}
 			continue
 		}
 		if preparedAuth != nil {
@@ -1470,6 +1486,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 				}
+				if isRequestRetryRoundError(errExec) {
+					retryableErr = errExec
+				}
 				if hasUpstreamExecutionAttempt(errExec) {
 					syncPreferredUpstreamError(&upstreamErr, errExec)
 				} else if preRefreshExecErr != nil {
@@ -1557,10 +1576,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
+	var retryableErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1584,7 +1604,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
-				return cliproxyexecutor.Response{}, roundPickFailureError(lastErr, upstreamErr, errPick)
+				return cliproxyexecutor.Response{}, roundPickFailureError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr, errPick)
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
@@ -1646,6 +1666,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+			if isRequestRetryRoundError(errPrepare) {
+				retryableErr = errPrepare
+			}
 			continue
 		}
 		if preparedAuth != nil {
@@ -1778,6 +1801,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 				}
+				if isRequestRetryRoundError(errExec) {
+					retryableErr = errExec
+				}
 				if hasUpstreamExecutionAttempt(errExec) {
 					syncPreferredUpstreamError(&upstreamErr, errExec)
 				} else if preRefreshExecErr != nil {
@@ -1875,12 +1901,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
+	var retryableErr error
 	var roundTiming homeRetryRoundTiming
 	for {
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
 			if lastErr != nil {
-				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+				preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 				if homeMode && !isCredentialTerminatedError(preferredErr) {
 					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), true)
 				}
@@ -1922,7 +1949,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		}
 		if errPick != nil {
-			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+			preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 			var homeCooldown *homeDispatchRetryAfterError
 			if homeMode && lastErr != nil && errors.As(errPick, &homeCooldown) && homeCooldown != nil {
 				observeHomeCooldownRetryLimit(homeCooldown, homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == "")
@@ -1937,11 +1964,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 						return nil, preferredErr
 					}
 					if isSchedulerRejectError(errPick) {
-						preferredErr = roundPickFailureError(lastErr, upstreamErr, errPick)
+						preferredErr = roundPickFailureError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr, errPick)
 					}
 					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), isHomeNextRoundImmediatelyAvailable(errPick))
 				}
-				return nil, roundPickFailureError(lastErr, upstreamErr, errPick)
+				return nil, roundPickFailureError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr, errPick)
 			}
 			return nil, errPick
 		}
@@ -1959,7 +1986,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errEnd
 			}
 			if lastErr != nil {
-				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+				preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 				if isCredentialTerminatedError(preferredErr) {
 					return nil, preferredErr
 				}
@@ -1981,7 +2008,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 						return nil, errEnd
 					}
 					if lastErr != nil {
-						preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+						preferredErr := preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 						if isCredentialTerminatedError(preferredErr) {
 							return nil, preferredErr
 						}
@@ -2150,6 +2177,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+			if isRequestRetryRoundError(errPrepare) {
+				retryableErr = errPrepare
+			}
 			if homeMode {
 				roundTiming.Observe(errPrepare)
 			}
@@ -2205,6 +2235,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
+			if isRequestRetryRoundError(errStream) {
+				retryableErr = errStream
+			}
 			if isCredentialTerminatedError(errStream) {
 				recordRequestRefusedAuth(ctx, auth.ID)
 				if selection != nil {

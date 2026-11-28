@@ -690,6 +690,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	baseCtx := contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
 	var upstreamErr error
+	var retryableErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
 		execCtx := withUpstreamAttemptProvider(m.newUpstreamAttemptContext(baseCtx), provider)
@@ -846,6 +847,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if okAction && !isRequestStopError(errStream) && !isTOSViolationError(errStream) && !isRequestScopedStop(action, okAction) {
 				errStream = wrapRequestScopedContinueError(errStream)
 			}
+			if isRequestRetryRoundError(errStream) {
+				retryableErr = errStream
+			}
 			if hasUpstreamExecutionAttempt(errStream) {
 				syncPreferredUpstreamError(&upstreamErr, errStream)
 			} else if preRefreshStreamErr != nil {
@@ -869,7 +873,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				lastErr = errStream
 				if result.CredentialScope {
-					return nil, preferredExecutionAttemptError(errStream, upstreamErr)
+					return nil, preferredExecutionAttemptError(preferRetryableRoundError(errStream, retryableErr), upstreamErr)
 				}
 				continue
 			}
@@ -878,7 +882,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			lastErr = errStream
 			if result.CredentialScope {
-				return nil, preferredExecutionAttemptError(errStream, upstreamErr)
+				return nil, preferredExecutionAttemptError(preferRetryableRoundError(errStream, retryableErr), upstreamErr)
 			}
 			continue
 		}
@@ -993,6 +997,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				bootstrapErr = wrapRequestScopedContinueError(bootstrapErr)
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				if isRequestRetryRoundError(bootstrapErr) {
+					retryableErr = bootstrapErr
+				}
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 				if isRequestTerminatedError(bootstrapErr) {
 					return nil, bootstrapErr
@@ -1000,7 +1007,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				lastErr = bootstrapErr
 				if result.CredentialScope {
 					currentErr := bootstrapErr
-					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
+					return nil, preferredExecutionAttemptError(preferRetryableRoundError(currentErr, retryableErr), upstreamErr)
 				}
 				continue
 			}
@@ -1026,11 +1033,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				m.recordExecutionResult(execCtx, result, auth, ephemeralResult)
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				if isRequestRetryRoundError(bootstrapErr) {
+					retryableErr = bootstrapErr
+				}
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 				lastErr = bootstrapErr
 				if result.CredentialScope {
 					currentErr := bootstrapErr
-					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
+					return nil, preferredExecutionAttemptError(preferRetryableRoundError(currentErr, retryableErr), upstreamErr)
 				}
 				continue
 			}
@@ -1045,7 +1055,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 			currentErr := bootstrapErr
-			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
+			return nil, preferredExecutionAttemptError(preferRetryableRoundError(currentErr, retryableErr), upstreamErr)
 		}
 
 		if closed || len(buffered) == 0 {
@@ -1082,5 +1092,5 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
 	}
-	return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+	return nil, preferredExecutionAttemptError(preferRetryableRoundError(lastErr, retryableErr), upstreamErr)
 }

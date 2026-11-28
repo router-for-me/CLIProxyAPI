@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +18,61 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	fileauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
+
+type authFileExcludedModelRoundTripper struct {
+	calls int
+}
+
+func (rt *authFileExcludedModelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.calls++
+	return nil, fmt.Errorf("unexpected upstream request: %s", req.URL)
+}
+
+func TestPatchAuthFileFields_PublishedPrefixExclusionsBlockExecution(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	_, errRegister := manager.Register(t.Context(), &coreauth.Auth{
+		ID:       "prefixed.json",
+		FileName: "prefixed.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{"type": "antigravity"},
+	})
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields",
+		strings.NewReader(`{"name":"prefixed.json","prefix":"team/","excluded_models":["team//gemini-review-*"]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch returned %d: %s", rec.Code, rec.Body.String())
+	}
+	auth, ok := manager.GetByID("prefixed.json")
+	if !ok {
+		t.Fatal("patched credential disappeared")
+	}
+	rt := &authFileExcludedModelRoundTripper{}
+	callCtx := context.WithValue(t.Context(), "cliproxy.roundtripper", rt)
+	_, errExecute := runtimeexecutor.NewAntigravityExecutor(&config.Config{}).Execute(callCtx, auth,
+		cliproxyexecutor.Request{Model: "gemini-review-high", Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`)},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	var rejected *coreauth.Error
+	if !errors.As(errExecute, &rejected) || rejected.Code != "model_excluded" {
+		t.Fatalf("patched published-prefix exclusion was not enforced: %v", errExecute)
+	}
+	if rt.calls != 0 {
+		t.Fatalf("excluded request reached the upstream transport %d times", rt.calls)
+	}
+}
 
 func TestSyncAuthFilePriorityAttributeTracksFileSource(t *testing.T) {
 	auth := &coreauth.Auth{

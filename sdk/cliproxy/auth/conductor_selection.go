@@ -2042,7 +2042,12 @@ func isRequestRetryRoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if !isCredentialScopedError(err) && strings.EqualFold(strings.TrimSpace(errorCodeFromError(err)), transientTransportErrorCode) {
+	code := strings.TrimSpace(errorCodeFromError(err))
+	// Same-round credential failover is exhausted before retrying the request.
+	if strings.EqualFold(code, "model_excluded") {
+		return false
+	}
+	if !isCredentialScopedError(err) && strings.EqualFold(code, transientTransportErrorCode) {
 		return true
 	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)

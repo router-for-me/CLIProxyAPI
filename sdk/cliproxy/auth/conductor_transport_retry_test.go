@@ -64,6 +64,10 @@ func TestManager_ShouldRetryAfterError_RetriesPreHTTPTransportFailure(t *testing
 		{name: "http2 force closed", err: errors.New("http2: client connection force closed via ClientConn.Close"), want: true},
 		{name: "http2 conn closed", err: &url.Error{Op: "Post", URL: "https://example.com", Err: errors.New("http2: client conn is closed")}, want: true},
 		{name: "unauthorized", err: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}, want: false},
+		{name: "service unavailable", err: &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"}, want: true},
+		{name: "excluded model", err: &Error{Code: "model_excluded", HTTPStatus: http.StatusServiceUnavailable, Message: "excluded"}, want: false},
+		{name: "rejected antigravity target", err: RejectAntigravityTarget(&Error{Code: "model_excluded", HTTPStatus: http.StatusServiceUnavailable, Message: "excluded"}), want: false},
+		{name: "wrapped rejected target", err: fmt.Errorf("refresh: %w", RejectAntigravityTarget(&Error{Code: "model_excluded", HTTPStatus: http.StatusServiceUnavailable, Message: "excluded"})), want: false},
 		{name: "canceled", err: context.Canceled, want: false},
 		{name: "certificate", err: &url.Error{Op: "Post", URL: "https://chatgpt.com/backend-api/codex/responses", Err: x509.UnknownAuthorityError{}}, want: false},
 	}

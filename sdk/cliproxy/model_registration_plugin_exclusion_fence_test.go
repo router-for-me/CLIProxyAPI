@@ -101,3 +101,54 @@ func TestModelRegistrationPluginExclusionSources(t *testing.T) {
 		})
 	}
 }
+
+func TestModelRegistrationPluginPublishedPrefixExclusions(t *testing.T) {
+	const provider = "exclusion-fixture"
+	for _, tc := range []struct {
+		name  string
+		rule  string
+		wantA bool
+	}{
+		{name: "published prefix", rule: "team//model-a"},
+		{name: "normalized prefix", rule: "team/model-a"},
+		{name: "different prefix", rule: "other/model-a", wantA: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			host := pluginhost.New()
+			service := &Service{cfg: &config.Config{}, coreManager: manager, pluginHost: host}
+			modelProvider := &exclusionFenceModelProvider{provider: provider, onModels: func() pluginapi.ModelResponse {
+				return pluginapi.ModelResponse{
+					Provider:   provider,
+					Models:     []pluginapi.ModelInfo{{ID: "model-a"}, {ID: "model-b"}},
+					AuthUpdate: pluginapi.AuthData{Prefix: "team/"},
+				}
+			}}
+			pluginID := t.Name()
+			host.RegisterPluginForTest(pluginID, pluginapi.Plugin{Capabilities: pluginapi.Capabilities{ModelProvider: modelProvider}})
+			reg := GlobalModelRegistry()
+			host.RegisterModels(t.Context(), reg)
+			t.Cleanup(func() { reg.UnregisterClient("plugin:" + pluginID + ":" + provider) })
+			auth, errRegister := manager.Register(t.Context(), &coreauth.Auth{
+				ID:       t.Name(),
+				Provider: provider,
+				Prefix:   "other",
+				Attributes: map[string]string{
+					"auth_kind":       "oauth",
+					"excluded_models": tc.rule,
+				},
+			})
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			service.registerModelsForAuth(t.Context(), auth)
+			if reg.ClientSupportsModel(auth.ID, "model-a") != tc.wantA || reg.ClientSupportsModel(auth.ID, "team//model-a") != tc.wantA {
+				t.Fatalf("published-prefix exclusion not respected: %v", reg.GetModelsForClient(auth.ID))
+			}
+			if !reg.ClientSupportsModel(auth.ID, "model-b") || !reg.ClientSupportsModel(auth.ID, "team//model-b") {
+				t.Fatalf("allowed model or its existing published route disappeared: %v", reg.GetModelsForClient(auth.ID))
+			}
+		})
+	}
+}
