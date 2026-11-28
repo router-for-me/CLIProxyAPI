@@ -126,15 +126,50 @@ type responsesWebsocketWriter struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
 	closing atomic.Bool
+	// closed is closed by whichever close wins `closing` once the socket is closed. A later
+	// close (the session's own teardown) waits on it at most responsesWebsocketCloseWait, then
+	// closes the socket so a stuck terminal write returns.
+	closed chan struct{}
+	// onCloseWait, when set by tests, runs each time a close starts waiting on another write.
+	onCloseWait func()
 }
+
+// A close waits this long for another write to finish: a terminal close for a write in flight,
+// so its frame is not dropped behind a writer that is only finishing, and a later close for a
+// terminal frame in flight. After that the socket is closed, which also cuts off a stuck write.
+// The two waits run on their own clocks, so a terminal frame is best-effort past about twice
+// this. Only local state is waited on; no network deadline is set.
+const responsesWebsocketCloseWait = 250 * time.Millisecond
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
-	return &responsesWebsocketWriter{conn: conn}
+	return &responsesWebsocketWriter{conn: conn, closed: make(chan struct{})}
 }
 
-// closeForUpstreamError sends a best-effort close frame without waiting behind
-// an active downstream writer. If a data or Ping write already owns writeMu,
-// the connection is closed immediately so the blocked writer and session can exit.
+func (w *responsesWebsocketWriter) notifyCloseWait() {
+	if w.onCloseWait != nil {
+		w.onCloseWait()
+	}
+}
+
+// lockForClose takes writeMu for a terminal close within responsesWebsocketCloseWait.
+func (w *responsesWebsocketWriter) lockForClose() bool {
+	if w.writeMu.TryLock() {
+		return true
+	}
+	w.notifyCloseWait()
+	deadline := time.Now().Add(responsesWebsocketCloseWait)
+	for !w.writeMu.TryLock() {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// closeForUpstreamError sends a best-effort close frame without waiting long behind
+// an active downstream writer. If a data or Ping write still owns writeMu after
+// responsesWebsocketCloseWait, the connection is closed so the blocked writer and session can exit.
 func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
@@ -146,7 +181,8 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 	if !w.closing.CompareAndSwap(false, true) {
 		return true, nil
 	}
-	if !w.writeMu.TryLock() {
+	defer close(w.closed)
+	if !w.lockForClose() {
 		return true, w.conn.Close()
 	}
 	defer w.writeMu.Unlock()
@@ -164,9 +200,30 @@ func (w *responsesWebsocketWriter) closeWithoutError() (bool, error) {
 		return false, nil
 	}
 	if !w.closing.CompareAndSwap(false, true) {
+		w.waitForClose()
 		return false, nil
 	}
+	defer close(w.closed)
 	return true, w.conn.Close()
+}
+
+// waitForClose gives a close already in progress (normally a terminal frame) a bounded chance
+// to finish, then closes the socket so a terminal write stuck on a client that stopped reading
+// returns and teardown can proceed.
+func (w *responsesWebsocketWriter) waitForClose() {
+	select {
+	case <-w.closed:
+		return
+	default:
+	}
+	w.notifyCloseWait()
+	timer := time.NewTimer(responsesWebsocketCloseWait)
+	defer timer.Stop()
+	select {
+	case <-w.closed:
+	case <-timer.C:
+		_ = w.conn.Close()
+	}
 }
 
 func (w *responsesWebsocketWriter) writePing() error {
@@ -282,7 +339,8 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	if !w.closing.CompareAndSwap(false, true) {
 		return false, nil
 	}
-	if !w.writeMu.TryLock() {
+	defer close(w.closed)
+	if !w.lockForClose() {
 		return false, w.conn.Close()
 	}
 	defer w.writeMu.Unlock()
