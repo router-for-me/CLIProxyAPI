@@ -165,6 +165,9 @@ type Auth struct {
 	nonAuthCredentialLastError  *Error    `json:"-"`
 	nonQuotaCooldownUntil       time.Time `json:"-"`
 	forceCooldownSeeded         bool      `json:"-"`
+	// failureSeq counts failure results and restored cooldown records. Quota
+	// recovery compares it to detect a failure that occurred during a probe.
+	failureSeq uint64 `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`

@@ -162,6 +162,7 @@ func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
 }
 
 func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
+	m.claudeQuotaProbes.cancelAll()
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	} else {
@@ -504,6 +505,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		auth.forceCooldownSeeded = true
 		auth.Generation++
+		auth.failureSeq++
 		if liveNewer {
 			auth.UpdatedAt = prevUpdatedAt
 			if prevStatusMsg != "" {
@@ -659,6 +661,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 	auth.forceCooldownSeeded = true
 	auth.Generation++
+	auth.failureSeq++
 	if updatedAt.After(auth.UpdatedAt) {
 		auth.UpdatedAt = updatedAt
 	}
@@ -1153,6 +1156,13 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	return m.resetQuota(ctx, authID, nil, false)
+}
+
+// resetQuota clears quota state under the auth mutation lock. A guard that
+// returns false leaves the auth unchanged. With preserveDisabled, model states
+// with StatusDisabled keep their status, so the selector does not route to them.
+func (m *Manager) resetQuota(ctx context.Context, authID string, guard func(*Auth) bool, preserveDisabled bool) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -1176,6 +1186,11 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		return nil, nil, nil
 	}
 
+	if guard != nil && !guard(auth) {
+		m.mu.Unlock()
+		return nil, nil, nil
+	}
+
 	var cooldownRecordsBefore []CooldownStateRecord
 	trackCooldownState := m.cooldownStore != nil
 	if trackCooldownState {
@@ -1187,7 +1202,12 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 			continue
 		}
 		models = append(models, modelKey)
-		if state != nil {
+		if state == nil {
+			continue
+		}
+		if preserveDisabled {
+			resetModelStateKeepDisabled(state, now)
+		} else {
 			resetModelState(state, now)
 		}
 	}
@@ -1246,6 +1266,25 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		return nil, nil, errPersist
 	}
 	return snapshot, models, nil
+}
+
+// resetModelStateKeepDisabled resets state like resetModelState, but keeps a
+// disabled status. Credential-quota propagation can move a disabled state into
+// the shadow, so the shadow status counts too.
+func resetModelStateKeepDisabled(state *ModelState, now time.Time) {
+	if state.Status == StatusDisabled {
+		return
+	}
+	shadow := state.credentialQuotaShadow
+	if shadow == nil || shadow.Status != StatusDisabled {
+		resetModelState(state, now)
+		return
+	}
+	message, unavailable := shadow.StatusMessage, shadow.Unavailable
+	resetModelState(state, now)
+	state.Status = StatusDisabled
+	state.StatusMessage = message
+	state.Unavailable = unavailable
 }
 
 func modelsForRegisteredAuth(authID string) []string {
@@ -1750,6 +1789,7 @@ func (m *Manager) markResult(ctx context.Context, result Result) bool {
 			auth.Success++
 		} else {
 			auth.Failed++
+			auth.failureSeq++
 		}
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
 
@@ -2580,6 +2620,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 			auth.Success++
 		} else {
 			auth.Failed++
+			auth.failureSeq++
 		}
 		auth.Generation++
 		auth.UpdatedAt = now
