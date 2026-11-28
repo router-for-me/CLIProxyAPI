@@ -27,6 +27,7 @@ type cooldownTestState struct {
 	mu      sync.Mutex
 	rows    map[string]cooldownTestRow
 	queries []string
+	writes  []string
 }
 
 type cooldownTestRow struct {
@@ -77,6 +78,7 @@ func (c *cooldownTestConn) ExecContext(_ context.Context, query string, args []d
 		return nil, errors.New("invalid cooldown query arguments")
 	}
 	key := authID + "\x00" + model
+	c.state.writes = append(c.state.writes, key)
 	current, exists := c.state.rows[key]
 	if len(args) == 4 {
 		if !exists || !current.updatedAt.After(updatedAt) {
@@ -132,6 +134,35 @@ func (r *cooldownTestRows) Next(dest []driver.Value) error {
 	dest[1] = r.rows[r.index].updatedAt
 	r.index++
 	return nil
+}
+
+func TestPostgresCooldownStateStore_WriteOrder(t *testing.T) {
+	state := &cooldownTestState{rows: make(map[string]cooldownTestRow)}
+	driverName := fmt.Sprintf("cliproxy_postgres_cooldown_order_%d", cooldownTestDriverID.Add(1))
+	sql.Register(driverName, &cooldownTestDriver{state: state})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	s := &postgresCooldownStateStore{store: &PostgresStore{db: db, cfg: PostgresStoreConfig{CooldownTable: defaultCooldownTable}}}
+	a := cliproxyauth.CooldownStateRecord{AuthID: "a", Model: "x"}
+	b := cliproxyauth.CooldownStateRecord{AuthID: "a", Model: "y"}
+	c := cliproxyauth.CooldownStateRecord{AuthID: "b", Model: "x"}
+	if err := s.Save(t.Context(), []cliproxyauth.CooldownStateRecord{b}); err != nil {
+		t.Fatal(err)
+	}
+	state.writes = nil
+	if err := s.Save(t.Context(), []cliproxyauth.CooldownStateRecord{c, a}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a\x00x", "a\x00y", "b\x00x"}; !reflect.DeepEqual(state.writes, want) {
+		t.Fatalf("writes = %q, want %q", state.writes, want)
+	}
 }
 
 func TestPostgresCooldownStateStore_SaveLoad(t *testing.T) {
